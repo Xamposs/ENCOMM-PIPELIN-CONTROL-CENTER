@@ -559,9 +559,11 @@ Pre-commit verification, in the order the brief requires:
 | Hermes config/profiles not modified | profile listing before/after | unchanged |
 | Only intended files changed | `git status --short` review | only project files |
 
-Commit + push: `feat: add orchestrated multi-task batch runner` → pushed to
-`origin/main` (no force push); `git rev-parse HEAD` == `git rev-parse
-origin/main` verified after the push.
+Commit + push: `feat: add orchestrated multi-task batch runner` →
+**commit `9abbb2d0bf3ef3fcf33a92a6efe6bfc8222890af`** pushed to `origin/main`
+(no force push); `git rev-parse HEAD` == `git rev-parse origin/main` verified
+after the push (both `9abbb2d0bf3ef3fcf33a92a6efe6bfc8222890af`). Working tree
+clean after the push.
 
 ---
 
