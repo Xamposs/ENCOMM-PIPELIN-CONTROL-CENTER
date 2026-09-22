@@ -1,0 +1,5 @@
+# ENCOMM Pipeline Control Center — runtime dependencies (v0.1 foundation).
+# Kept deliberately minimal: no web server, no Electron, no Docker, no cloud SDK.
+PySide6>=6.6,<7
+
+# Test-only extras:  pip install -r requirements-dev.txt
