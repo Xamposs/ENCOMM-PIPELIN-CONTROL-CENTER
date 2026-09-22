@@ -1,5 +1,8 @@
--- ENCOMM Pipeline Control Center — schema v1 (foundation).
--- Deliberately small. No migration framework yet; see docs/DECISIONS.md (D-008).
+-- ENCOMM Pipeline Control Center — schema v2.
+-- v1 → v2 adds `tasks.prompt` (the implementation prompt a task must keep so it
+-- can be re-read, re-dispatched and audited after a restart).  The in-place
+-- upgrade for an existing v1 database is a single targeted ALTER in
+-- Database._upgrade() — still no migration framework; see docs/DECISIONS.md.
 
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -66,6 +69,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     batch_id     TEXT NOT NULL,
     task_index   INTEGER NOT NULL DEFAULT 0,
     title        TEXT NOT NULL DEFAULT '',
+    prompt       TEXT NOT NULL DEFAULT '',
     state        TEXT NOT NULL,
     attempts     INTEGER NOT NULL DEFAULT 0,
     audit_rounds INTEGER NOT NULL DEFAULT 0,

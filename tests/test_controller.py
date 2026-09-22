@@ -154,7 +154,12 @@ def test_blank_workspace_name_falls_back(controller: PipelineController) -> None
 def test_driver_capabilities_are_exposed(controller: PipelineController) -> None:
     rows = controller.driver_capabilities()
     assert {r["driver_id"] for r in rows} == {"codex", "generic_cli", "hermes"}
-    assert all(r["implemented"] is False for r in rows)
+    by_id = {r["driver_id"]: r for r in rows}
+    # Still-unimplemented placeholders must not claim capability…
+    assert by_id["codex"]["implemented"] is False
+    assert by_id["generic_cli"]["implemented"] is False
+    # …and Hermes reports its own verification state, which is a bool either way.
+    assert isinstance(by_id["hermes"]["implemented"], bool)
 
 
 def test_probe_session_decision_is_read_only(controller: PipelineController) -> None:

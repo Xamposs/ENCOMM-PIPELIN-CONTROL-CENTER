@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import Any, Mapping
 
 from ..domain import AgentRole, SessionPolicy
 from ..drivers import DriverCapabilities
@@ -195,19 +195,37 @@ class SessionManager:
         )
 
     # -- mutations ---------------------------------------------------------
-    def register_session(self, role: AgentRole, session_id: str, driver_id: str) -> None:
-        """Record a session id for ``role`` in memory and in the database."""
+    def register_session(
+        self,
+        role: AgentRole,
+        session_id: str,
+        driver_id: str,
+        *,
+        external: bool = False,
+        persistent: bool = True,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Record a session id for ``role`` in memory and in the database.
+
+        ``external=True`` marks an id that really exists on the engine side
+        (Hermes reports one per real run).  It is never set for a locally
+        generated handle, and the value stored is exactly what the engine
+        reported — ids are never fabricated here.
+        """
         self._sessions[role] = session_id
         self._session_batch[role] = self._batch_generation
         if self._database is not None and self._workspace_id:
+            payload = dict(metadata or {})
+            payload.setdefault("batch_generation", self._batch_generation)
             self._database.record_session(
                 session_id=session_id,
                 workspace_id=self._workspace_id,
                 role=role,
                 driver_id=driver_id,
-                persistent=True,
-                external=False,
-                metadata={"batch_generation": self._batch_generation},
+                external_session_id=session_id if external else None,
+                persistent=persistent,
+                external=external,
+                metadata=payload,
             )
 
     def clear_session(self, role: AgentRole) -> None:

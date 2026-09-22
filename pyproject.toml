@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "encomm-pipeline-control-center"
-version = "0.1.0"
-description = "Local Windows desktop supervisor for AI coding pipelines (v0.1 foundation)."
+version = "0.2.0"
+description = "Local Windows desktop supervisor for AI coding pipelines (v0.2: real Hermes executor path)."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }

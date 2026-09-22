@@ -38,7 +38,7 @@ from ..domain.models import new_id
 
 __all__ = ["SCHEMA_PATH", "SCHEMA_VERSION", "Database", "PersistenceError"]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -105,7 +105,13 @@ class Database:
 
     # -- schema ----------------------------------------------------------
     def initialize(self) -> None:
-        """Create tables and record/validate the schema version."""
+        """Create tables and record/validate the schema version.
+
+        A database written by a *newer* build is refused (D-008).  A database
+        written by an *older* one is upgraded in place by :meth:`_upgrade` — the
+        targeted, explicitly listed upgrades only.  This is still not a
+        migration framework: adding a version here means adding the exact DDL.
+        """
         with self._lock:
             conn = self.connection
             conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -119,13 +125,30 @@ class Database:
                     (str(SCHEMA_VERSION),),
                 )
                 conn.commit()
-            else:
-                found = int(row["value"])
-                if found > SCHEMA_VERSION:
-                    raise PersistenceError(
-                        f"Database at {self.path} uses schema v{found}, but this "
-                        f"build supports v{SCHEMA_VERSION}. Refusing to open."
-                    )
+                return
+            found = int(row["value"])
+            if found > SCHEMA_VERSION:
+                raise PersistenceError(
+                    f"Database at {self.path} uses schema v{found}, but this "
+                    f"build supports v{SCHEMA_VERSION}. Refusing to open."
+                )
+            if found < SCHEMA_VERSION:
+                self._upgrade(conn, found)
+                conn.execute(
+                    "UPDATE schema_meta SET value = ? WHERE key = 'schema_version'",
+                    (str(SCHEMA_VERSION),),
+                )
+                conn.commit()
+
+    @staticmethod
+    def _upgrade(conn: sqlite3.Connection, from_version: int) -> None:
+        """Apply the in-place upgrades this build knows about, in order."""
+        if from_version <= 1:
+            # v1 → v2: tasks gained their implementation prompt.  Existing rows
+            # keep working: the column is added with an empty default.
+            columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(tasks)")}
+            if "prompt" not in columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN prompt TEXT NOT NULL DEFAULT ''")
 
     def schema_version(self) -> int:
         row = self.connection.execute(
@@ -320,15 +343,16 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO tasks (
-                        task_id, batch_id, task_index, title, state, attempts,
+                        task_id, batch_id, task_index, title, prompt, state, attempts,
                         audit_rounds, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
                         batch.batch_id,
                         task.index,
                         task.title,
+                        task.prompt,
                         task.state.value,
                         task.attempts,
                         task.audit_rounds,

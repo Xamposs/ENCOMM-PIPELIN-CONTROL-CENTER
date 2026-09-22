@@ -5,11 +5,14 @@ orchestrator agents, builders, task auditors and final auditors, with
 configurable session policies, multi-task batches, automatic audit/fix loops
 and final batch audits.
 
-**Current version: 0.1.0 — foundation.** The architecture and the desktop shell
-exist and are tested. The task executor and all engine integrations are
-deliberate placeholders that refuse to do real work. See
-[docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5 for the precise list of what
-is and is not implemented.
+**Current version: 0.2.0 — real executor path.** The architecture, the desktop
+shell and the **first real engine integration** exist and are tested: one
+controlled task can be dispatched through the deterministic executor to a real
+Hermes session, with the real process exit code and a real session id persisted.
+The Codex and Generic-CLI adapters remain deliberate placeholders that refuse to
+do real work, and the task auditor, fix loop and orchestrator do not exist yet.
+See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5 for the precise list of
+what is and is not implemented.
 
 ---
 
@@ -37,9 +40,19 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-144 tests covering imports/compile, the domain model, the phase state machine,
-persistence round-trips, driver refusal behaviour, session policy resolution,
-the controller control surface, and the UI in Qt offscreen mode.
+221 tests covering imports/compile, the domain model, the phase state machine,
+persistence round-trips, driver refusal behaviour, the Hermes CLI contract,
+the real driver's mapping of a child process onto a `PromptResult`, the
+executor's transitions and failure propagation, profile discovery, session
+policy resolution, the controller control surface, the worker-thread dispatch
+path, and the UI in Qt offscreen mode.
+
+The suite never touches a network or a real engine. One real end-to-end run is a
+separate, explicitly invoked script:
+
+```bash
+python scripts/session_002_smoke.py --profile <hermes-profile>
+```
 
 ---
 
@@ -53,12 +66,21 @@ the controller control surface, and the UI in Qt offscreen mode.
 | **TASK AUDITOR** | Engine, Hermes profile, provider, model, session policy "Persistent per batch" |
 | **BUILDER** | Engine, Hermes profile, provider, model, session policy "Always new" |
 | **BATCH** | Batch size (default 5), current phase, current status, Start / Pause / Resume / Stop |
+| **TASK** | Hermes driver availability + discovered profiles, task title/prompt, **Dispatch task**, task state, status, failure and the real result |
 | **LOG PANEL** | Timestamped local event log |
 
-Start / Pause / Resume / Stop drive the **state machine and batch records**.
-They do not dispatch work: every start logs an explicit
-`Executor is not implemented in the v0.1 foundation` event, and
-`ControlResult.executor_started` is always `False`.
+Start / Pause / Resume / Stop drive the **state machine and batch records**. They
+do not dispatch work by themselves: Start creates the batch, and the TASK panel
+dispatches the single controlled task through the executor. Dispatch runs on a
+worker thread, so the window stays responsive while the agent works, and the
+panel shows only what the executor reported — outcome, real exit code, real
+session id, output excerpt and any failure text.
+
+`executor_started` is the machine-checkable "did a process really start?" flag.
+It stays `False` when no executor is attached or when a preflight refuses, and
+becomes `True` on an `ExecutionReport` only after a child process was launched.
+"Stop" takes effect at the next safe task boundary; mid-prompt cancellation is
+**not** implemented and is not advertised as a capability.
 
 ---
 
@@ -85,7 +107,7 @@ Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 |---|---|
 | [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) | **Canonical handoff file.** Read first in every new session. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The actual architecture, including deliberate non-goals |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-013 with reasons |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-018 with reasons |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased plan from foundation to operational hardening |
 | [docs/reports/](docs/reports/) | Per-session reports |
 

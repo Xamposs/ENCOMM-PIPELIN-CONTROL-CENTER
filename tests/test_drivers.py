@@ -40,9 +40,15 @@ def test_registry_contains_the_three_v01_adapters(registry: DriverRegistry) -> N
     assert set(registry.driver_ids()) == {c.driver_id for c in IMPLEMENTED_DRIVERS}
 
 
-def test_no_driver_is_marked_implemented_in_v01(registry: DriverRegistry) -> None:
-    for row in registry.describe_all():
-        assert row["implemented"] is False, f"{row['driver_id']} claims to be implemented"
+def test_only_unimplemented_drivers_are_marked_unimplemented(registry: DriverRegistry) -> None:
+    """`implemented` is a claim about real capability, not a snapshot.
+
+    Codex and GenericCli remain deliberate placeholders.  Hermes is the first
+    real adapter and reports its own verification state (see test_hermes_driver).
+    """
+    assert registry.capabilities("codex").implemented is False
+    assert registry.capabilities("generic_cli").implemented is False
+    assert isinstance(registry.capabilities("hermes").implemented, bool)
 
 
 def test_codex_and_hermes_support_sessions_generic_cli_does_not(registry: DriverRegistry) -> None:
@@ -107,10 +113,11 @@ def test_registry_rejects_a_driver_without_an_id() -> None:
         DriverRegistry().register(Nameless)
 
 
-@pytest.mark.parametrize("driver_id", ["codex", "hermes", "generic_cli"])
+@pytest.mark.parametrize("driver_id", ["codex", "generic_cli"])
 def test_placeholders_refuse_every_real_operation(
     registry: DriverRegistry, driver_id: str
 ) -> None:
+    """Placeholders still refuse real work — only Hermes is real now."""
     driver = registry.create(driver_id)
     request = SessionRequest(
         role=AgentRole.BUILDER, project_profile="p", session_policy=SessionPolicy.ALWAYS_NEW
@@ -160,6 +167,35 @@ def test_subprocess_runner_reports_failure_without_raising() -> None:
     )
     assert not result.ok
     assert result.exit_code == 3
+
+
+def test_subprocess_runner_kills_the_tree_on_timeout() -> None:
+    """A timeout is data, not a silent hang, and never looks like success."""
+    import time
+
+    started = time.monotonic()
+    result = SubprocessRunner().run(
+        ProcessSpec(
+            argv=[sys.executable, "-c", "import time; time.sleep(60)"], timeout_s=2
+        )
+    )
+    elapsed = time.monotonic() - started
+
+    assert result.timed_out is True
+    assert result.ok is False
+    assert result.exit_code < 0
+    assert elapsed < 30, "the runner must kill the child rather than wait it out"
+
+
+def test_kill_process_tree_is_available_and_safe_on_a_finished_process() -> None:
+    import subprocess
+
+    from encomm_pcc.drivers import kill_process_tree
+
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    child.wait(timeout=30)
+    kill_process_tree(child)  # must be a no-op, never an error
+    assert child.poll() is not None
 
 
 def test_probe_availability_never_launches_anything(registry: DriverRegistry) -> None:

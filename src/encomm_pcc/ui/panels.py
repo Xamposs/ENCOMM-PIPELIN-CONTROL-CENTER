@@ -6,13 +6,14 @@ No panel owns business logic, and no panel starts an engine session.
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QCompleter,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -30,6 +31,7 @@ from ..core import (
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
     ROLE_SESSION_POLICY_DESCRIPTION,
+    ExecutionReport,
     LogRecord,
     PipelineController,
 )
@@ -40,6 +42,7 @@ __all__ = [
     "BatchPanel",
     "LogPanel",
     "RolePanel",
+    "TaskPanel",
     "WorkspacePanel",
 ]
 
@@ -64,6 +67,11 @@ def _monospace(widget: QWidget, point_size: int = 9) -> None:
     font.setStyleHint(QFont.Monospace)
     font.setPointSize(point_size)
     widget.setFont(font)
+
+
+#: How much engine output the TASK panel renders.  The full text stays in the
+#: report and in the (bounded) event payload; the panel shows a working excerpt.
+OUTPUT_VIEW_CHARS = 4000
 
 
 class WorkspacePanel(QGroupBox):
@@ -118,6 +126,7 @@ class RolePanel(QGroupBox):
         role: AgentRole,
         controller: PipelineController,
         registry: DriverRegistry,
+        profiles: Sequence[str] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(role.value.replace("_", " "), parent)
@@ -126,6 +135,7 @@ class RolePanel(QGroupBox):
         self._registry = registry
         self._fields = _ROLE_FIELDS[role]
         self._loading = False
+        self._profiles: tuple[str, ...] = tuple(profiles)
 
         form = QFormLayout(self)
 
@@ -141,6 +151,14 @@ class RolePanel(QGroupBox):
         # -- profile ------------------------------------------------------
         self.profile_edit = QLineEdit()
         self.profile_edit.setPlaceholderText("profile / project name")
+        if self._profiles:
+            completer = QCompleter(list(self._profiles), self.profile_edit)
+            completer.setCaseSensitivity(Qt.CaseInsensitive)
+            completer.setFilterMode(Qt.MatchContains)
+            self.profile_edit.setCompleter(completer)
+            self.profile_edit.setToolTip(
+                "Discovered Hermes profiles: " + ", ".join(self._profiles)
+            )
         form.addRow(_PROFILE_LABEL[role], self.profile_edit)
 
         # -- provider / model ----------------------------------------------
@@ -333,9 +351,7 @@ class BatchPanel(QGroupBox):
             button_row.addWidget(button)
         form.addRow("Controls", buttons)
 
-        self.hint = QLabel(
-            "Executor not implemented in v0.1 — Start records batch state only."
-        )
+        self.hint = QLabel("")
         self.hint.setWordWrap(True)
         self.hint.setStyleSheet("color: palette(mid);")
         form.addRow("", self.hint)
@@ -353,6 +369,16 @@ class BatchPanel(QGroupBox):
         else:
             self.status_label.setText(
                 f"{batch.status.value} — {batch.batch_id} — {batch.progress_label()}"
+            )
+
+        if controller.executor_attached:
+            self.hint.setText(
+                "Executor attached — Start creates the batch; task dispatch runs "
+                "through the executor (see the TASK section)."
+            )
+        else:
+            self.hint.setText(
+                "No executor attached — Start records batch state only."
             )
 
         self.start_button.setEnabled(controller.machine.can_go_to(PipelinePhase.PLANNING_BATCH))
@@ -404,3 +430,187 @@ class LogPanel(QGroupBox):
             self.view.appendPlainText(line)
             self._count += 1
         self.count_label.setText(f"{self._count} events")
+
+
+class TaskPanel(QGroupBox):
+    """TASK section — one controlled task, dispatched through the executor.
+
+    Session 002 deliberately has no planner and no batch editor: this panel
+    supplies the single task the executor runs and displays the **real** result
+    (outcome, exit code, session id, output excerpt) when it comes back.
+    """
+
+    #: title, prompt
+    dispatch_requested = Signal(str, str)
+
+    DEFAULT_TITLE = "Session 002 controlled task"
+
+    def __init__(
+        self,
+        controller: PipelineController,
+        profiles: Sequence[str] = (),
+        profile_method: str = "",
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__("TASK (Session 002 — one controlled task)", parent)
+        self._controller = controller
+        self._profiles: tuple[str, ...] = tuple(profiles)
+        self._profile_method = profile_method
+        self._busy = False
+
+        self.driver_label = QLabel()
+        self.driver_label.setWordWrap(True)
+        self.profiles_label = QLabel()
+        self.profiles_label.setWordWrap(True)
+        self.profiles_label.setStyleSheet("color: palette(mid);")
+        self.profile_label = QLabel()
+
+        self.title_edit = QLineEdit(self.DEFAULT_TITLE)
+        self.prompt_edit = QPlainTextEdit()
+        self.prompt_edit.setPlaceholderText(
+            "Implementation prompt handed to the Builder (one task per batch in this session)."
+        )
+        self.prompt_edit.setMaximumHeight(90)
+
+        self.dispatch_button = QPushButton("Dispatch task")
+        self.dispatch_button.clicked.connect(self._emit_dispatch)
+
+        self.task_state_label = QLabel()
+        self.status_label = QLabel("Idle — no task dispatched.")
+        self.status_label.setWordWrap(True)
+        self.failure_label = QLabel()
+        self.failure_label.setWordWrap(True)
+        self.failure_label.setStyleSheet("color: palette(bright-text);")
+
+        self.result_view = QPlainTextEdit()
+        self.result_view.setReadOnly(True)
+        self.result_view.setMaximumHeight(150)
+        self.result_view.setLineWrapMode(QPlainTextEdit.NoWrap)
+        _monospace(self.result_view, point_size=8)
+
+        form = QFormLayout(self)
+        form.addRow("Engine", self.driver_label)
+        form.addRow("Profiles", self.profiles_label)
+        form.addRow("Builder profile", self.profile_label)
+        form.addRow("Task title", self.title_edit)
+        form.addRow("Task prompt", self.prompt_edit)
+        form.addRow("", self.dispatch_button)
+        form.addRow("Task 1 state", self.task_state_label)
+        form.addRow("Status", self.status_label)
+        form.addRow("Failure", self.failure_label)
+        form.addRow("Result", self.result_view)
+
+        self.refresh()
+
+    # -- data -----------------------------------------------------------------
+    def values(self) -> tuple[str, str]:
+        return self.title_edit.text().strip() or self.DEFAULT_TITLE, self.prompt_edit.toPlainText()
+
+    def set_profiles(self, profiles: Sequence[str], method: str = "") -> None:
+        self._profiles = tuple(profiles)
+        self._profile_method = method
+        self.refresh()
+
+    def set_busy(self, busy: bool) -> None:
+        self._busy = busy
+        self.refresh()
+
+    def _emit_dispatch(self) -> None:
+        title, prompt = self.values()
+        if not prompt.strip():
+            self.status_label.setText("Refused locally: the task prompt is empty.")
+            return
+        self.dispatch_requested.emit(title, prompt)
+
+    def refresh(self) -> None:
+        controller = self._controller
+        engine = controller.state.resolved_engine_for(AgentRole.BUILDER)
+
+        # -- engine / driver availability ---------------------------------
+        if engine and controller.registry.is_registered(engine):
+            caps = controller.registry.capabilities(engine)
+            resolver = getattr(controller.registry.get_class(engine), "resolve_executable", None)
+            executable = resolver() if callable(resolver) else None
+            where = f"CLI found: {executable}" if executable else "CLI NOT found on PATH"
+            state = "implemented" if caps.implemented else "placeholder (refuses real work)"
+            self.driver_label.setText(
+                f"'{caps.display_name}' ({engine}) — {state}; {where}; "
+                f"sessions={caps.supports_sessions}, resume={caps.supports_resume}, "
+                f"cancel={caps.supports_cancellation}."
+            )
+        else:
+            self.driver_label.setText(f"No registered engine for BUILDER (configured: '{engine}').")
+
+        # -- profile discovery ---------------------------------------------
+        if self._profiles:
+            self.profiles_label.setText(
+                f"{len(self._profiles)} Hermes profiles discovered via "
+                f"{self._profile_method or 'discovery'}: {', '.join(self._profiles)}"
+            )
+        else:
+            self.profiles_label.setText(
+                "Hermes profiles not discovered yet (discovery is read-only and advisory)."
+            )
+        self.profile_label.setText(controller.role_config(AgentRole.BUILDER).project_profile or "(none)")
+
+        # -- task + phase ----------------------------------------------------
+        batch = controller.state.batch
+        if batch is None or not batch.tasks:
+            self.task_state_label.setText("(no task materialised)")
+        else:
+            task = batch.tasks[0]
+            self.task_state_label.setText(
+                f"{task.state.value} — {task.task_id} — attempts {task.attempts}"
+            )
+
+        phase = controller.machine.phase
+        can_dispatch = (
+            controller.executor_attached
+            and not self._busy
+            and phase in (PipelinePhase.IDLE, PipelinePhase.PLANNING_BATCH)
+            and (batch is None or not batch.tasks)
+        )
+        self.dispatch_button.setEnabled(can_dispatch)
+        if self._busy:
+            self.dispatch_button.setText("Running…")
+        else:
+            self.dispatch_button.setText("Dispatch task")
+
+    # -- results --------------------------------------------------------------
+    def show_report(self, report: ExecutionReport | None) -> None:
+        """Display the executor's real report — never a fabricated success."""
+        if report is None:
+            self.status_label.setText("No report was returned by the worker.")
+            return
+        lines = [
+            f"outcome        : {report.outcome.value}",
+            f"phase          : {report.phase.value}",
+            f"message        : {report.message}",
+        ]
+        result = report.prompt_result
+        if result is not None:
+            lines += [
+                f"ok             : {result.ok}",
+                f"exit_code      : {result.exit_code}",
+                f"session_id     : {report.session_id or 'NOT_EXPOSED'}",
+                f"duration_s     : {result.duration_s:.2f}",
+                f"simulated      : {result.simulated}",
+            ]
+            if result.metadata.get("argv"):
+                lines.append(f"argv           : {result.metadata['argv']}")
+            text = result.text or ""
+            lines.append("")
+            lines.append("--- output ---")
+            lines.append(text[:OUTPUT_VIEW_CHARS] if text else "(no output)")
+            if len(text) > OUTPUT_VIEW_CHARS:
+                lines.append(f"... [{len(text) - OUTPUT_VIEW_CHARS} more characters]")
+        self.result_view.setPlainText("\n".join(lines))
+        self.failure_label.setText(
+            (result.error if result is not None and result.error else "")
+            or ("(none)" if report.ok else "failure reported without an error string")
+        )
+        self.status_label.setText(
+            f"{report.outcome.value} — task {report.task_id or '(none)'} — "
+            f"executor_started={report.executor_started}"
+        )
+        self.refresh()

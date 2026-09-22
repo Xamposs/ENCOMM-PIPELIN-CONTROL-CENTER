@@ -10,11 +10,27 @@ import logging
 import sys
 from typing import Sequence
 
-from .core import APP_NAME, AppPaths, EventLog, PipelineController, default_paths
+from .core import (
+    APP_NAME,
+    AppPaths,
+    EventLog,
+    Executor,
+    PipelineController,
+    default_paths,
+    discover_profiles,
+)
 from .domain import AgentRole, PipelineState, WorkspaceConfig
+from .drivers import SubprocessRunner
 from .persistence import Database
 
-__all__ = ["build_controller", "configure_logging", "run", "restore_state"]
+__all__ = [
+    "attach_default_executor",
+    "build_controller",
+    "configure_logging",
+    "discover_hermes_profiles",
+    "run",
+    "restore_state",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +87,12 @@ def build_controller(
 
 
 def run(argv: Sequence[str] | None = None) -> int:
-    """Launch the desktop application.  Returns the Qt exit code."""
+    """Launch the desktop application.  Returns the Qt exit code.
+
+    This is the only place that wires the *real* process runner: the executor
+    gets a :class:`SubprocessRunner`, so dispatched prompts start real Hermes
+    processes.  Tests build controllers without it (see ``attach_default_executor``).
+    """
     from PySide6.QtWidgets import QApplication
 
     from .ui import MainWindow
@@ -81,8 +102,46 @@ def run(argv: Sequence[str] | None = None) -> int:
     app.setApplicationName(APP_NAME)
 
     controller = build_controller()
-    window = MainWindow(controller)
+    attach_default_executor(controller)
+    discovery = discover_hermes_profiles()
+    window = MainWindow(
+        controller,
+        profiles=discovery.profiles if discovery.ok else (),
+        profile_method=discovery.method if discovery.ok else "",
+    )
     window.show()
 
     controller.events.info("Main window shown.", source="app")
     return app.exec()
+
+
+def attach_default_executor(
+    controller: PipelineController,
+    *,
+    runner: object | None = None,
+) -> Executor:
+    """Wire the real executor (and its process runner) onto ``controller``.
+
+    Kept out of :func:`build_controller` on purpose: a test or a tool that builds
+    a controller must never be one call away from launching an agent process.
+    """
+    executor = Executor(
+        controller,
+        runner=runner if runner is not None else SubprocessRunner(),
+        database=controller.database,
+        event_log=controller.events,
+    )
+    controller.attach_executor(executor)
+    return executor
+
+
+def discover_hermes_profiles():  # noqa: ANN201 - ProfileDiscoveryResult
+    """Read-only profile discovery over the real runner (never raises)."""
+    try:
+        return discover_profiles(runner=SubprocessRunner(), timeout_s=60.0)
+    except Exception as exc:  # noqa: BLE001 - discovery is advisory
+        from .core import ProfileDiscoveryResult
+
+        return ProfileDiscoveryResult(
+            ok=False, method="none", detail="discovery failed", error=str(exc)
+        )

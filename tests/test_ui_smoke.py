@@ -34,6 +34,8 @@ def test_all_required_sections_are_present(window) -> None:  # noqa: ANN001
         assert required in titles, f"missing section {required}; got {sorted(titles)}"
     for role in AgentRole:
         assert role.value.replace("_", " ") in titles
+    # Session 002 adds the one-task dispatch control.
+    assert any(t.startswith("TASK") for t in titles)
 
 
 def test_one_panel_per_role(window) -> None:  # noqa: ANN001
@@ -157,5 +159,5 @@ def test_same_as_orchestrator_disables_the_final_auditor_session_field(
 
 def test_startup_summary_is_logged(qapp, window, controller) -> None:  # noqa: ANN001
     messages = [r.message for r in controller.events.history()]
-    assert any("foundation started" in m for m in messages)
+    assert any("started." in m for m in messages)
     assert any("Driver 'codex'" in m for m in messages)

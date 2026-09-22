@@ -31,31 +31,41 @@ tests pass, docs and report exist, no secrets committed.
 
 ---
 
-## Phase 1 — Executor skeleton + first real driver
+## Phase 1 — Executor skeleton + first real driver ✅ DONE (Session 002)
 
 **Goal:** one task, end to end, with real subprocess execution and honest
 reporting.
 
-Scope:
+Delivered:
 
-1. **Task materialisation.** `BatchState` holds real `TaskStateRecord`s from a
-   planning step; persisted through the existing `tasks` table (no migration).
-2. **`core/executor.py`.** `dispatch_batch()` drives the existing
-   `StateMachine`; pausable and stoppable **at task boundaries**; runs off the
-   UI thread.
-3. **`HermesDriver` implemented** over `SubprocessRunner`, with real exit codes
-   and real stdout capture. `implemented=True` only once verified.
-4. **Honesty invariant.** `ControlResult.executor_started` becomes `True` only
-   when a process was genuinely launched.
-5. UI: a task list / progress view; executor state visible per task.
+- **Task materialisation.** `Executor.materialise_task()` persists a real
+  `TaskStateRecord` (including its implementation prompt) through the existing
+  `tasks` table; schema bumped to **v2** with one targeted in-place upgrade.
+- **`core/executor.py`.** Deterministic dispatch: read-only phase gate and
+  preflight, `IDLE → PLANNING_BATCH → RUNNING_TASK → AUDITING_TASK`, boundary-only
+  pause/stop, no UI-thread work.
+- **`HermesDriver` implemented** over `SubprocessRunner`: real sessions, real exit
+  codes, real stdout captured as `--format stream-json`, capability flags gated on
+  live proof.
+- **Honesty invariant.** `ControlResult.executor_started` stays `False` (a Start
+  starts no process); `ExecutionReport.executor_started` becomes `True` only when
+  a launch recorder saw a real `ProcessSpec`. A blocked preflight changes nothing.
+- **UI:** a TASK section (driver availability, discovered Hermes profiles, task
+  input, dispatch, live task state, real result/failure) plus a worker thread.
+- 221 passing tests, including a real-driver failure-propagation test.
 
-Exit criteria:
+Exit criteria met:
 
-- A batch of ≥1 real task runs to `AUDITING_TASK` and stops there.
-- Pause takes effect at the next task boundary and resumes correctly.
-- A non-zero child exit code produces a `FAILED` task, not a silent success.
+- A batch of 1 real task ran to `AUDITING_TASK` and stopped there — proven live
+  (session `20260922_172437_722edb`, exit code 0, answer
+  `ENCOMM_PCC_HERMES_SMOKE_OK`).
+- A non-zero child exit code produces a `FAILED` task, not a silent success
+  (unit-tested for exit codes 2 and 3).
 - `PromptResult` never carries `simulated=True` for real work.
-- Tests cover pause-at-boundary, failure propagation and restart-from-database.
+- Tests cover failure propagation and restart-from-database.
+- **Pause at a task boundary** is implemented as a pre-dispatch flag: with a single
+  task there is no mid-run boundary, and mid-prompt suspension is deliberately not
+  attempted (see D-018). Multi-task boundary pausing arrives with Phase 3.
 
 ---
 

@@ -87,6 +87,10 @@ class PipelineController:
             database=database,
             workspace_id=self.state.workspace.workspace_id,
         )
+        #: Set by :meth:`attach_executor`.  The controller never dispatches by
+        #: itself; this only tells it whether a real dispatcher is wired, so
+        #: Start can stop claiming that nothing exists.
+        self._executor: Any = None
         self._ensure_role_configs()
 
     # -- construction helpers ---------------------------------------------
@@ -112,6 +116,65 @@ class PipelineController:
         """Reset every role to the documented placeholder configuration."""
         for role in AgentRole:
             self.state.role_configs[role] = placeholder_role_config(role)
+
+    # -- executor wiring -----------------------------------------------------
+    def attach_executor(self, executor: Any) -> None:
+        """Register (or clear) the component that actually dispatches work.
+
+        The controller stays the owner of *state*: the executor asks it for
+        transitions through :meth:`transition`.  Attaching an executor does not
+        start anything — it only stops ``request_start`` from claiming that no
+        dispatcher exists.
+        """
+        self._executor = executor
+        if executor is None:
+            self.events.info(
+                "Executor detached — Start records batch state only.", source="controller"
+            )
+            return
+        role = getattr(getattr(executor, "role", None), "value", "?")
+        self.events.info(
+            f"Executor attached ({type(executor).__name__}, role {role}): "
+            "Start creates the batch and the executor dispatches tasks.",
+            source="controller",
+        )
+
+    @property
+    def executor_attached(self) -> bool:
+        """True when a dispatcher is wired (the UI shows this honestly)."""
+        return self._executor is not None
+
+    @property
+    def executor(self) -> Any:
+        """The attached dispatcher, or ``None`` when the foundation runs alone."""
+        return self._executor
+
+    def transition(
+        self,
+        phase: PipelinePhase,
+        *,
+        message: str = "",
+        source: str = "controller",
+    ) -> PipelinePhase:
+        """Move the pipeline to ``phase`` over a legal edge, then persist.
+
+        The transition graph stays the single authority — a caller (the
+        executor) decides *when*, never *whether*.  Illegal edges raise
+        :class:`InvalidTransitionError` and leave the state untouched.
+        """
+        target = phase if isinstance(phase, PipelinePhase) else PipelinePhase(str(phase))
+        if not self.machine.can_go_to(target):
+            raise InvalidTransitionError(self.machine.phase, target)
+        self.machine.transition_to(target)
+        self.state.phase = self.machine.phase
+        if message:
+            self.events.info(message, source=source)
+        self._persist()
+        return self.state.phase
+
+    def persist(self) -> None:
+        """Persist the current aggregate (the executor's explicit seam)."""
+        self._persist()
 
     # -- workspace ---------------------------------------------------------
     def set_workspace(self, name: str, repo_path: str) -> WorkspaceConfig:
@@ -199,12 +262,28 @@ class PipelineController:
             f"(workspace '{self.state.workspace.name}')",
             source="controller",
         )
-        self.events.warning(self.EXECUTOR_NOT_IMPLEMENTED, source="controller")
+        if self._executor is None:
+            # No dispatcher exists: say so, every time (Session 001 invariant).
+            self.events.warning(self.EXECUTOR_NOT_IMPLEMENTED, source="controller")
+            message = f"Batch {self.state.batch.batch_id} created (state only)."
+        else:
+            # A real dispatcher is wired.  Requesting a batch still starts no
+            # process, so `executor_started` stays False here — the field that
+            # becomes True is ExecutionReport.executor_started, set from the
+            # actual process launch.
+            self.events.info(
+                f"Batch {self.state.batch.batch_id} created; dispatch is owned by "
+                "the attached executor.",
+                source="controller",
+            )
+            message = (
+                f"Batch {self.state.batch.batch_id} created; the executor owns dispatch."
+            )
         self._persist()
         return ControlResult(
             ControlOutcome.OK,
             self.machine.phase,
-            f"Batch {self.state.batch.batch_id} created (state only).",
+            message,
             executor_started=False,
         )
 

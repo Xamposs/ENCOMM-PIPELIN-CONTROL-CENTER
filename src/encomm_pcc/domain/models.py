@@ -169,6 +169,10 @@ class TaskStateRecord:
     task_id: str = field(default_factory=lambda: new_id("task"))
     index: int = 0
     title: str = ""
+    #: The implementation prompt handed to the engine.  Persisted, because a
+    #: task that cannot be re-read cannot be re-dispatched or audited after a
+    #: restart (durable truth lives in SQLite, never in a live session).
+    prompt: str = ""
     state: TaskState = TaskState.PENDING
     attempts: int = 0
     audit_rounds: int = 0
@@ -184,6 +188,7 @@ class TaskStateRecord:
             "task_id": self.task_id,
             "index": self.index,
             "title": self.title,
+            "prompt": self.prompt,
             "state": self.state.value,
             "attempts": self.attempts,
             "audit_rounds": self.audit_rounds,
@@ -197,6 +202,7 @@ class TaskStateRecord:
             task_id=str(data.get("task_id") or new_id("task")),
             index=int(data.get("index", 0)),
             title=str(data.get("title", "")),
+            prompt=str(data.get("prompt") or ""),
             state=TaskState(str(data.get("state", TaskState.PENDING.value))),
             attempts=int(data.get("attempts", 0)),
             audit_rounds=int(data.get("audit_rounds", 0)),
