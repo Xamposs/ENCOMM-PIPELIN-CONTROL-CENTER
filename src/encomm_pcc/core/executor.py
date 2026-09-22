@@ -55,6 +55,7 @@ from ..domain import (
     BatchPlan,
     BatchPlanRecord,
     BatchStatus,
+    FinalAuditPacket,
     PipelinePhase,
     TaskState,
     TaskStateRecord,
@@ -76,6 +77,10 @@ from ..persistence import Database
 from .audit_packet import AuditPacket, render_audit_prompt, render_fix_prompt
 from .config import MAX_BATCH_SIZE
 from .events import EventLog, NullEventLog
+from .final_audit_parser import (
+    FinalAuditParseError,
+    parse_final_audit,
+)
 from .hermes_profiles import ProfileDiscoveryResult, discover_profiles
 from .plan_packet import render_planning_prompt
 from .plan_parser import PLAN_ENVELOPE_END, PLAN_ENVELOPE_START, PlanParseError, parse_batch_plan
@@ -92,10 +97,16 @@ __all__ = [
     "ExecutionOutcome",
     "ExecutionReport",
     "Executor",
+    "FinalAuditOutcome",
+    "FinalAuditReport",
     "MAX_AUDIT_ROUNDS",
+    "MAX_NEXT_BATCH_SIZE",
+    "MIN_NEXT_BATCH_SIZE",
     "ORCHESTRATOR_ROLE",
     "PlanOutcome",
     "PlanReport",
+    "StartNextBatchOutcome",
+    "StartNextBatchReport",
     "TaskNextAction",
     "TaskSpec",
     "next_task_action",
@@ -112,6 +123,17 @@ AUDITOR_ROLE = AgentRole.TASK_AUDITOR
 #: The role that plans each batch (Session 004).  Resolved through the SAME
 #: generic path — no orchestrator-specific engine code exists anywhere.
 ORCHESTRATOR_ROLE = AgentRole.ORCHESTRATOR
+
+#: The role that audits a completed batch (Session 005).  Resolved through the
+#: SAME generic role → config → registry → SessionManager path; nothing in the
+#: final-audit logic mentions a specific engine.
+FINAL_AUDITOR_ROLE = AgentRole.FINAL_AUDITOR
+
+#: Next-batch size bounds (brief §6): a PASSing Final Auditor must return
+#: EXACTLY this many next tasks; the strict parser enforces the count.
+MIN_NEXT_BATCH_SIZE = 4
+MAX_NEXT_BATCH_SIZE = 5
+DEFAULT_NEXT_BATCH_SIZE = 5
 
 #: Hard cap on audit/fix rounds for ONE task (brief semantics): Audit 1 is the
 #: initial audit; Fix 1 → Audit 2; Fix 2 → Audit 3.  A NEEDS_FIX returned by
@@ -373,6 +395,91 @@ class PlanReport:
         if self.prompt_result is not None and self.prompt_result.exit_code is not None:
             parts.append(f"exit_code={self.prompt_result.exit_code}")
         return " | ".join(parts)
+
+
+class FinalAuditOutcome(str, Enum):
+    """How one Final Auditor call ended (Session 005)."""
+
+    #: PASS: the batch is BATCH_COMPLETE and the next plan is persisted,
+    #: waiting for the operator.  Nothing auto-starts.
+    PASSED = "PASSED"
+    #: NEEDS_FIX: findings persisted; the batch needs operator/supervisor
+    #: handling (no uncontrolled global fix loop is entered).
+    NEEDS_FIX = "NEEDS_FIX"
+    #: BLOCKED: malformed answer, guard violation, or an explicit BLOCKED
+    #: verdict — operator/manual decision required.
+    BLOCKED = "BLOCKED"
+    #: The child process failed; the pipeline is FAILED.
+    FAILED = "FAILED"
+    #: The request was illegal for the current phase/state (no change).
+    REJECTED = "REJECTED"
+    #: A stop/pause request was honoured before the call started.
+    STOPPED = "STOPPED"
+
+
+@dataclass(slots=True)
+class FinalAuditReport:
+    """Machine-checkable record of one Final Auditor call (Session 005)."""
+
+    outcome: FinalAuditOutcome
+    phase: PipelinePhase
+    message: str
+    #: The strict parsed result (never None on PASSED; the raw JSON is
+    #: persisted separately — see ``structured_json``).
+    result: Any = None  # FinalAuditResult (kept loose to avoid an import cycle)
+    #: Real external Final Auditor session id when the engine exposed one.
+    session_id: str | None = None
+    #: True only when a real process was launched for this call.
+    executor_started: bool = False
+    prompt_result: PromptResult | None = None
+    #: True when the auditor modified the supervised repository (guard).
+    guard_violation: bool = False
+    #: The persisted next-plan id (PASSED only).
+    next_plan_id: str | None = None
+    #: Bounded raw model output kept on the in-memory report for diagnosis.
+    output_excerpt: str = ""
+    stop_requested: bool = False
+    started_at: str = field(default_factory=utc_now)
+    finished_at: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is FinalAuditOutcome.PASSED
+
+    def summary(self) -> str:
+        parts = [f"{self.outcome.value}: {self.message}"]
+        if self.session_id:
+            parts.append(f"session={self.session_id}")
+        if self.prompt_result is not None and self.prompt_result.exit_code is not None:
+            parts.append(f"exit_code={self.prompt_result.exit_code}")
+        return " | ".join(parts)
+
+
+class StartNextBatchOutcome(str, Enum):
+    """How one START NEXT BATCH request ended (Session 005)."""
+
+    #: The persisted next plan was materialised into a new batch; the
+    #: operator now presses the normal START controls to run it.
+    READY = "READY"
+    #: No open pending next plan exists (or the phase forbids it).
+    REJECTED = "REJECTED"
+
+
+@dataclass(slots=True)
+class StartNextBatchReport:
+    """Result of materialising the persisted next plan (no AI involved)."""
+
+    outcome: StartNextBatchOutcome
+    phase: PipelinePhase
+    message: str
+    #: The new batch id (READY only).
+    batch_id: str = ""
+    #: How many PENDING tasks were materialised from the persisted plan.
+    task_count: int = 0
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is StartNextBatchOutcome.READY
 
 
 class _LaunchRecorder:
@@ -1064,6 +1171,533 @@ class Executor:
             prompt_result=result,
             stop_requested=self.stop_requested,
             finished_at=utc_now(),
+        )
+
+    # -- final audit (Session 005) -------------------------------------------
+    def run_final_audit(
+        self,
+        *,
+        next_batch_size: int = DEFAULT_NEXT_BATCH_SIZE,
+        timeout_s: float | None = None,
+    ) -> FinalAuditReport:
+        """Run ONE Final Auditor call over the completed batch.
+
+        Generic role path only: ``AgentRole.FINAL_AUDITOR`` → role config
+        (honouring ``same_as_orchestrator``) → driver registry →
+        ``SessionManager``.  The packet is built from durable facts; the
+        repository is fingerprinted before/after and ANY modification by the
+        auditor BLOCKS the final audit.  The one answer carries BOTH the
+        cumulative verdict and (on PASS) the next batch plan; on PASS the
+        batch becomes BATCH_COMPLETE and the next plan is persisted — never
+        started.
+        """
+        guard = self._claim_unit("the final audit")
+        if guard is not None:
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.STOPPED,
+                phase=self.controller.machine.phase,
+                message=guard.message,
+            )
+        try:
+            return self._final_audit(
+                next_batch_size=next_batch_size, timeout_s=timeout_s
+            )
+        except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
+            self._fail_hard(exc)
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.FAILED,
+                phase=self.controller.machine.phase,
+                message=f"Executor error: {type(exc).__name__}: {exc}",
+                started_at=utc_now(),
+                finished_at=utc_now(),
+            )
+        finally:
+            with self._runner_lock:
+                self._active = False
+
+    def _build_final_audit_packet(self, batch: Any, *, next_batch_size: int) -> FinalAuditPacket:
+        """Assemble the packet from durable facts only (batch row + plan + tasks)."""
+        plan_record = batch.plan
+        plan = plan_record.plan if plan_record is not None else None
+        task_rows: list[dict[str, Any]] = []
+        for task in batch.tasks:
+            task_rows.append(
+                {
+                    "index": task.index,
+                    "title": task.title,
+                    "implementation_prompt": task.prompt,
+                    "acceptance_criteria": list(task.acceptance_criteria or []),
+                    "audit_focus": list(task.audit_focus or []),
+                    "attempts": task.attempts,
+                    "audit_rounds": task.audit_rounds,
+                    "final_verdict": task.latest_verdict,
+                    "builder_session_id": task.builder_session_id,
+                    "fix_session_id": task.fix_session_id,
+                    "auditor_session_id": task.auditor_session_id,
+                }
+            )
+        builder_ids = [t.builder_session_id for t in batch.tasks if t.builder_session_id]
+        auditor_ids = {t.auditor_session_id for t in batch.tasks if t.auditor_session_id}
+        shared_auditor = next(iter(auditor_ids)) if len(auditor_ids) == 1 else None
+        return FinalAuditPacket(
+            batch_id=batch.batch_id,
+            batch_title=batch.batch_title,
+            batch_objective=batch.batch_objective,
+            project_brief=batch.project_brief,
+            planned_titles=[t.title for t in (plan.tasks if plan else [])],
+            tasks=task_rows,
+            batch_summary_json=(
+                plan_record.batch_summary_json if plan_record is not None else ""
+            ),
+            builder_session_ids=builder_ids,
+            shared_task_auditor_session_id=shared_auditor,
+            orchestrator_session_id=(
+                plan_record.orchestrator_session_id if plan_record is not None else None
+            ),
+            baseline_head=(plan_record.baseline_head if plan_record is not None else ""),
+            current_head=batch.current_head,
+            workspace_path=self.controller.state.workspace.repo_path,
+            next_batch_size=int(next_batch_size),
+        )
+
+    def _final_audit(
+        self, *, next_batch_size: int, timeout_s: float | None
+    ) -> FinalAuditReport:
+        machine = self.controller.machine
+        if machine.phase is not PipelinePhase.READY_FOR_FINAL_AUDIT:
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    "The final audit only runs from READY_FOR_FINAL_AUDIT; "
+                    f"current phase is {machine.phase.value}."
+                ),
+            )
+        if next_batch_size < MIN_NEXT_BATCH_SIZE or next_batch_size > MAX_NEXT_BATCH_SIZE:
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    f"Next batch size must be {MIN_NEXT_BATCH_SIZE}.."
+                    f"{MAX_NEXT_BATCH_SIZE}; got {next_batch_size}."
+                ),
+            )
+        batch = self.controller.state.batch
+        if batch is None or not batch.tasks:
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.REJECTED,
+                phase=machine.phase,
+                message="No completed batch exists to final-audit.",
+            )
+        if not all(t.state is TaskState.APPROVED for t in batch.tasks):
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.REJECTED,
+                phase=machine.phase,
+                message="Not every task is APPROVED; the batch is not ready for the final audit.",
+            )
+
+        role, config, engine = self._resolve_role(FINAL_AUDITOR_ROLE)
+        blocked = self._preflight(config, engine, role=role)
+        if blocked is not None:
+            self.events.error(blocked, source="executor")
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.BLOCKED, phase=machine.phase, message=blocked
+            )
+
+        capabilities = self.registry.capabilities(engine)
+        driver: BaseDriver | None = None
+        try:
+            driver = self.registry.create(engine, runner=self._driver_runner)
+            request = self._session_request(config, role=role)
+            session = driver.start_session(request)
+        except (DriverError, DriverNotImplementedError) as exc:
+            message = f"Driver '{engine}' refused to start a Final Auditor session: {exc}"
+            self.events.error(message, source="executor")
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.BLOCKED, phase=machine.phase, message=message
+            )
+
+        # FINAL_AUDITOR policy: configurable → continuity preferred but never
+        # required; a REUSE resume failure fails honestly (never fabricated).
+        decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if decision.action is SessionAction.REUSE and decision.session_id:
+            try:
+                session = driver.resume_session(decision.session_id, request)
+            except (DriverError, DriverNotImplementedError) as exc:
+                message = (
+                    f"Session policy wanted to resume Final Auditor session "
+                    f"{decision.session_id}, but: {exc}"
+                )
+                self.events.error(message, source="executor")
+                return FinalAuditReport(
+                    outcome=FinalAuditOutcome.FAILED, phase=machine.phase, message=message
+                )
+        self.events.info(
+            f"Session policy for {role.value}: {decision.action.value} — {decision.reason}",
+            source="executor",
+        )
+
+        # Read-only repository fingerprint BEFORE the call.
+        before = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+
+        packet = self._build_final_audit_packet(batch, next_batch_size=next_batch_size)
+        handle = driver.send_prompt(session, packet.render())
+        self.events.info(
+            f"Final audit dispatched via driver '{engine}' "
+            f"(profile '{config.project_profile or '(none)'}'"
+            + (f", model '{config.model}'" if config.model else "")
+            + f") — requesting verdict + next {next_batch_size} tasks in ONE call.",
+            source="executor",
+        )
+        result = driver.wait_for_completion(handle, timeout_s=timeout_s)
+
+        started = bool(self._recorder and self._recorder.launched)
+        session_id = result.session_id
+        raw_text = result.text or ""
+
+        if not result.ok:
+            if machine.can_go_to(PipelinePhase.FAILED):
+                self._transition(
+                    PipelinePhase.FAILED,
+                    f"Final audit failed: {result.error}",
+                )
+            self._persist()
+            self.events.error(
+                f"Final audit FAILED: {result.error}",
+                source="executor",
+                payload={"ok": False, "error": result.error},
+            )
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.FAILED,
+                phase=machine.phase,
+                message=result.error or "The Final Auditor process reported failure.",
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+                finished_at=utc_now(),
+            )
+
+        self._record_session(config, session, result, engine, role=role)
+
+        # Guard: the final audit is READ/TEST-ONLY.  A worktree modification
+        # BLOCKS the audit; the modifications are surfaced, never discarded.
+        after = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+        if not fingerprints_equal(before, after):
+            detail = _fingerprint_violation(before, after)
+            message = (
+                "FINAL AUDITOR READ-ONLY GUARD VIOLATION: the final-audit call "
+                f"modified the supervised repository ({detail}). The final audit "
+                "is BLOCKED; the modifications are left untouched for the operator."
+            )
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(PipelinePhase.BLOCKED, f"Final audit blocked: {message}")
+            self._persist()
+            self.events.error(
+                message,
+                source="executor",
+                payload={"ok": False, "guard_violation": True, "error": message},
+            )
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                guard_violation=True,
+                output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+                finished_at=utc_now(),
+            )
+
+        # The answer is untrusted model output: parse strictly, fail closed.
+        try:
+            parsed = parse_final_audit(raw_text, expected_next_tasks=next_batch_size)
+        except FinalAuditParseError as exc:
+            detail = f"{exc.reason}: {str(exc)}"[:400]
+            message = f"Malformed Final Auditor answer: {detail}"
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(PipelinePhase.BLOCKED, f"Final audit blocked: {message}")
+            self._persist()
+            self.events.error(
+                message,
+                source="executor",
+                payload={"ok": False, "malformed": True, "error": message},
+            )
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+                finished_at=utc_now(),
+            )
+
+        structured_json = json.dumps(parsed.to_dict(), ensure_ascii=False, sort_keys=True)
+        findings_json = json.dumps(
+            [f.to_dict() for f in parsed.findings], ensure_ascii=False, sort_keys=True
+        )
+
+        if parsed.verdict.value == "NEEDS_FIX":
+            # Persist the findings and stop in an explicit operator state —
+            # no uncontrolled global fix loop is entered (brief §8).
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(
+                    PipelinePhase.BLOCKED,
+                    "Final audit NEEDS_FIX: operator/supervisor handling required "
+                    "(findings persisted; no automatic batch-wide fix runs).",
+                )
+            if self.database is not None:
+                self.database.save_final_audit(
+                    batch.batch_id,
+                    verdict="NEEDS_FIX",
+                    summary=parsed.summary,
+                    findings_json=findings_json,
+                    audit_json=structured_json,
+                    auditor_session_id=session_id,
+                    next_plan_id=None,
+                )
+            self._persist()
+            self.events.error(
+                f"Final audit NEEDS_FIX: {parsed.summary or '(no summary)'}",
+                source="executor",
+                payload={"final_verdict": "NEEDS_FIX", "findings": len(parsed.findings)},
+            )
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.NEEDS_FIX,
+                phase=machine.phase,
+                message=(
+                    f"Final audit NEEDS_FIX ({len(parsed.findings)} finding(s)); "
+                    "operator handling required."
+                ),
+                result=parsed,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+                finished_at=utc_now(),
+            )
+
+        if parsed.verdict.value == "BLOCKED":
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(
+                    PipelinePhase.BLOCKED,
+                    "Final audit BLOCKED by the auditor: operator/manual decision "
+                    "required.",
+                )
+            if self.database is not None:
+                self.database.save_final_audit(
+                    batch.batch_id,
+                    verdict="BLOCKED",
+                    summary=parsed.summary,
+                    findings_json=findings_json,
+                    audit_json=structured_json,
+                    auditor_session_id=session_id,
+                    next_plan_id=None,
+                )
+            self._persist()
+            self.events.error(
+                f"Final audit BLOCKED: {parsed.summary or '(no summary)'}",
+                source="executor",
+                payload={"final_verdict": "BLOCKED"},
+            )
+            return FinalAuditReport(
+                outcome=FinalAuditOutcome.BLOCKED,
+                phase=machine.phase,
+                message="Final audit BLOCKED by the auditor.",
+                result=parsed,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+                finished_at=utc_now(),
+            )
+
+        # -- PASS: persist next plan, complete the batch, start nothing -------
+        plan_id = f"nextplan_{batch.batch_id}"
+        if self.database is not None:
+            self.database.save_pending_next_plan(
+                plan_id=plan_id,
+                source_batch_id=batch.batch_id,
+                requested_size=next_batch_size,
+                plan_json=json.dumps(
+                    parsed.next_batch.to_dict(), ensure_ascii=False, sort_keys=True
+                ),
+            )
+            self.database.save_final_audit(
+                batch.batch_id,
+                verdict="PASS",
+                summary=parsed.summary,
+                findings_json=findings_json,
+                audit_json=structured_json,
+                auditor_session_id=session_id,
+                next_plan_id=plan_id,
+            )
+        if batch.plan is not None:
+            batch.plan.final_phase = PipelinePhase.BATCH_COMPLETE.value
+        batch.status = BatchStatus.COMPLETE
+        self._transition(
+            PipelinePhase.BATCH_COMPLETE,
+            f"FINAL AUDIT PASS: batch {batch.batch_id} is COMPLETE; the next "
+            f"batch plan ({next_batch_size} tasks) is persisted — press "
+            "START NEXT BATCH to run it. Nothing auto-starts.",
+        )
+        self._persist()
+        self.events.info(
+            f"Final audit PASS; batch {batch.batch_id} COMPLETE; next plan "
+            f"{plan_id} persisted ({next_batch_size} tasks).",
+            source="executor",
+            payload={
+                "final_verdict": "PASS",
+                "next_plan_id": plan_id,
+                "next_batch_size": next_batch_size,
+                "final_auditor_session_id": session_id,
+            },
+        )
+        return FinalAuditReport(
+            outcome=FinalAuditOutcome.PASSED,
+            phase=self.controller.machine.phase,
+            message=(
+                f"FINAL AUDIT PASS; batch COMPLETE; next batch plan persisted "
+                f"({next_batch_size} tasks), waiting for the operator."
+            ),
+            result=parsed,
+            session_id=session_id,
+            executor_started=started,
+            prompt_result=result,
+            next_plan_id=plan_id,
+            output_excerpt=raw_text[:OUTPUT_EXCERPT_CHARS],
+            stop_requested=self.stop_requested,
+            finished_at=utc_now(),
+        )
+
+    # -- next-batch handoff (Session 005) --------------------------------------
+    def start_next_batch(self) -> StartNextBatchReport:
+        """Materialise the persisted next plan into a new batch — NO AI calls.
+
+        The plan was generated by the PASSing Final Audit and persisted; this
+        deterministic handoff creates a NEW batch generation, materialises the
+        already-planned tasks as PENDING, preserves the completed batch's
+        history, and never contacts the Orchestrator or the Final Auditor.
+        The new batch then waits for the operator's normal START controls.
+        """
+        machine = self.controller.machine
+        if machine.phase not in (PipelinePhase.IDLE, PipelinePhase.BATCH_COMPLETE):
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    "START NEXT BATCH is only available from IDLE or "
+                    f"BATCH_COMPLETE; current phase is {machine.phase.value}."
+                ),
+            )
+        if self.database is None:
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message="No database is attached; the persisted next plan is unreadable.",
+            )
+        pending = self.database.load_open_pending_next_plan()
+        if pending is None:
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message="No pending next-batch plan is persisted.",
+            )
+        try:
+            plan_payload = json.loads(pending["plan_json"])
+            plan = BatchPlan.from_dict(plan_payload)
+        except (ValueError, TypeError) as exc:
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message=f"The persisted next plan is unreadable: {exc}",
+            )
+        if not plan.tasks:
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message="The persisted next plan holds no tasks.",
+            )
+        source_batch_id = str(pending["source_batch_id"])
+
+        # Leave BATCH_COMPLETE over its legal edge (IDLE), then start a new
+        # batch generation — the same request_start the normal flow uses.
+        if machine.phase is PipelinePhase.BATCH_COMPLETE:
+            self._transition(
+                PipelinePhase.IDLE,
+                "START NEXT BATCH: leaving the completed batch.",
+            )
+        # Preserve the previous batch's Project Brief? No — the new batch
+        # carries the NEXT plan's objective; the completed batch row keeps its
+        # own brief and history untouched.
+        start = self.controller.request_start(len(plan.tasks))
+        if start.outcome.name == "REJECTED":
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message=start.message,
+            )
+        batch = self.controller.state.batch
+        if batch is None:  # pragma: no cover - request_start always creates one
+            return StartNextBatchReport(
+                outcome=StartNextBatchOutcome.REJECTED,
+                phase=machine.phase,
+                message="No batch was created for the persisted next plan.",
+            )
+        batch.project_brief = plan.batch_objective or plan.batch_title
+        for planned in plan.tasks:
+            batch.tasks.append(
+                TaskStateRecord(
+                    index=planned.index,
+                    title=planned.title,
+                    prompt=planned.implementation_prompt,
+                    acceptance_criteria=list(planned.acceptance_criteria),
+                    audit_focus=list(planned.audit_focus),
+                    state=TaskState.PENDING,
+                )
+            )
+        record = BatchPlanRecord(
+            plan=plan,
+            project_brief=batch.project_brief,
+            requested_size=len(plan.tasks),
+            plan_status="PLANNED",
+            orchestrator_session_id=None,
+            planned_at=utc_now(),
+        )
+        batch.plan = record
+        # The new batch's own HEAD is captured by the fingerprint guard when
+        # its tasks run; the source batch keeps its own history untouched.
+        batch.current_head = ""
+        self.database.mark_pending_next_plan_consumed(str(pending["plan_id"]), batch.batch_id)
+        self._persist()
+        self.events.info(
+            f"START NEXT BATCH: batch {batch.batch_id} materialised from persisted "
+            f"plan {pending['plan_id']} ({len(plan.tasks)} PENDING tasks; source "
+            f"batch {source_batch_id} preserved). No AI call was made — press "
+            "the normal START controls to run it.",
+            source="executor",
+            payload={
+                "batch_id": batch.batch_id,
+                "task_count": len(plan.tasks),
+                "source_plan_id": str(pending["plan_id"]),
+            },
+        )
+        return StartNextBatchReport(
+            outcome=StartNextBatchOutcome.READY,
+            phase=self.controller.machine.phase,
+            message=(
+                f"Next batch {batch.batch_id} ready with {len(plan.tasks)} tasks "
+                "(from the persisted plan); no AI call was made."
+            ),
+            batch_id=batch.batch_id,
+            task_count=len(plan.tasks),
         )
 
     def _finalize_batch(self, batch: Any) -> None:

@@ -34,6 +34,12 @@ from .enums import (
     TaskState,
     TERMINAL_PIPELINE_PHASES,
 )
+from .final_audit import (
+    FINAL_VERDICTS,
+    FinalAuditPacket,
+    FinalAuditResult,
+    FinalVerdict,
+)
 from .models import (
     AgentRoleConfig,
     BatchState,
@@ -64,6 +70,10 @@ __all__ = [
     "BatchState",
     "BatchStatus",
     "EventLevel",
+    "FINAL_VERDICTS",
+    "FinalAuditPacket",
+    "FinalAuditResult",
+    "FinalVerdict",
     "FindingSeverity",
     "InvalidTransitionError",
     "PAUSE_RESUME_TARGETS",

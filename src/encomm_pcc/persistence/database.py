@@ -39,7 +39,7 @@ from ..domain.models import new_id
 
 __all__ = ["SCHEMA_PATH", "SCHEMA_VERSION", "Database", "PersistenceError"]
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -211,6 +211,43 @@ class Database:
                         finalized_at TEXT,
                         batch_summary_json TEXT,
                         FOREIGN KEY (batch_id) REFERENCES batches (batch_id) ON DELETE CASCADE
+                    )
+                    """
+                )
+        if from_version <= 4:
+            # v4 → v5: Session 005 final auditing — the durable Final Audit on
+            # batch_plans plus the pending_next_plans handoff table (the
+            # generated next batch persists until the operator starts it).
+            plan_columns = {
+                str(r["name"]) for r in conn.execute("PRAGMA table_info(batch_plans)")
+            }
+            for column in (
+                "final_verdict",
+                "final_summary",
+                "final_findings_json",
+                "final_audit_json",
+                "final_auditor_session_id",
+                "final_audited_at",
+                "final_next_plan_id",
+            ):
+                if column not in plan_columns:
+                    conn.execute(f"ALTER TABLE batch_plans ADD COLUMN {column} TEXT")
+            tables = {str(r["name"]) for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+            if "pending_next_plans" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE pending_next_plans (
+                        plan_id         TEXT PRIMARY KEY,
+                        source_batch_id TEXT NOT NULL,
+                        requested_size  INTEGER NOT NULL,
+                        plan_json       TEXT NOT NULL,
+                        created_at      TEXT NOT NULL,
+                        consumed_at     TEXT,
+                        consumed_batch_id TEXT,
+                        FOREIGN KEY (source_batch_id) REFERENCES batches (batch_id)
+                            ON DELETE CASCADE
                     )
                     """
                 )
@@ -561,6 +598,112 @@ class Database:
             (workspace_id,),
         ).fetchone()
         return self.load_batch(str(row["batch_id"])) if row else None
+
+    # -- final audit (Session 005) ------------------------------------------
+    def save_final_audit(
+        self,
+        batch_id: str,
+        *,
+        verdict: str,
+        summary: str,
+        findings_json: str,
+        audit_json: str,
+        auditor_session_id: str | None,
+        next_plan_id: str | None,
+    ) -> None:
+        """Persist the durable Final Audit on the batch's ``batch_plans`` row."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE batch_plans SET
+                    final_verdict = ?,
+                    final_summary = ?,
+                    final_findings_json = ?,
+                    final_audit_json = ?,
+                    final_auditor_session_id = ?,
+                    final_audited_at = ?,
+                    final_next_plan_id = ?
+                WHERE batch_id = ?
+                """,
+                (
+                    verdict,
+                    summary,
+                    findings_json,
+                    audit_json,
+                    auditor_session_id,
+                    utc_now(),
+                    next_plan_id,
+                    batch_id,
+                ),
+            )
+
+    def load_final_audit(self, batch_id: str) -> dict[str, Any] | None:
+        """The durable Final Audit columns for a batch, or None."""
+        row = self.connection.execute(
+            """
+            SELECT final_verdict, final_summary, final_findings_json,
+                   final_audit_json, final_auditor_session_id,
+                   final_audited_at, final_next_plan_id
+            FROM batch_plans WHERE batch_id = ?
+            """,
+            (batch_id,),
+        ).fetchone()
+        if row is None or not row["final_verdict"]:
+            return None
+        return dict(row)
+
+    # -- pending next-batch plans (Session 005 handoff) ----------------------
+    def save_pending_next_plan(
+        self,
+        *,
+        plan_id: str,
+        source_batch_id: str,
+        requested_size: int,
+        plan_json: str,
+    ) -> str:
+        """Persist the generated next BatchPlan until the operator starts it."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO pending_next_plans (
+                    plan_id, source_batch_id, requested_size, plan_json, created_at
+                ) VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (plan_id) DO UPDATE SET
+                    plan_json = excluded.plan_json,
+                    requested_size = excluded.requested_size
+                """,
+                (plan_id, source_batch_id, requested_size, plan_json, utc_now()),
+            )
+        return plan_id
+
+    def load_pending_next_plan(self, plan_id: str) -> dict[str, Any] | None:
+        row = self.connection.execute(
+            "SELECT * FROM pending_next_plans WHERE plan_id = ?", (plan_id,)
+        ).fetchone()
+        return dict(row) if row else None
+
+    def load_open_pending_next_plan(self) -> dict[str, Any] | None:
+        """The most recent pending (not yet consumed) next plan, if any."""
+        row = self.connection.execute(
+            """
+            SELECT * FROM pending_next_plans
+            WHERE consumed_at IS NULL
+            ORDER BY created_at DESC LIMIT 1
+            """
+        ).fetchone()
+        return dict(row) if row else None
+
+    def mark_pending_next_plan_consumed(self, plan_id: str, batch_id: str) -> None:
+        """Record that the operator materialised the plan into ``batch_id``."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE pending_next_plans
+                SET consumed_at = ?, consumed_batch_id = ?
+                WHERE plan_id = ?
+                """,
+                (utc_now(), batch_id, plan_id),
+            )
 
     def list_batches(self, workspace_id: str, limit: int = 20) -> list[BatchState]:
         rows = self.connection.execute(

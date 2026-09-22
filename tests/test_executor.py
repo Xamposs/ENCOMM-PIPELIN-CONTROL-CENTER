@@ -440,8 +440,8 @@ def test_state_after_a_dispatch_reloads_from_sqlite_alone(
 
 
 # -- schema guard ---------------------------------------------------------------
-def test_schema_is_v4_with_the_planning_columns(database) -> None:  # noqa: ANN001
-    assert database.schema_version() == 4
+def test_schema_is_v5_with_the_final_audit_columns(database) -> None:  # noqa: ANN001
+    assert database.schema_version() == 5
     columns = {
         row["name"]
         for row in database.connection.execute("PRAGMA table_info(tasks)").fetchall()
@@ -465,6 +465,23 @@ def test_schema_is_v4_with_the_planning_columns(database) -> None:  # noqa: ANN0
         ).fetchall()
     }
     assert "batch_plans" in tables
+    assert "pending_next_plans" in tables
+    plan_columns = {
+        row["name"]
+        for row in database.connection.execute(
+            "PRAGMA table_info(batch_plans)"
+        ).fetchall()
+    }
+    for column in (
+        "final_verdict",
+        "final_summary",
+        "final_findings_json",
+        "final_audit_json",
+        "final_auditor_session_id",
+        "final_audited_at",
+        "final_next_plan_id",
+    ):
+        assert column in plan_columns
 
 
 def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
@@ -497,7 +514,7 @@ def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
 
     reopened = Database(tmp_path / "legacy.db").open()
     try:
-        assert reopened.schema_version() == 4
+        assert reopened.schema_version() == 5
         columns = {
             row["name"]
             for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
@@ -542,7 +559,7 @@ def test_a_v2_database_is_upgraded_in_place(tmp_path: Path) -> None:
 
     reopened = Database(tmp_path / "legacy_v2.db").open()
     try:
-        assert reopened.schema_version() == 4
+        assert reopened.schema_version() == 5
         columns = {
             row["name"]
             for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
