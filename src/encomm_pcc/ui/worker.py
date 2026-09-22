@@ -16,7 +16,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
 
-from ..core import BatchRunReport, BatchRunner
+from ..core import BatchRunReport, BatchRunner, FinalAuditReport
 from ..core.executor import ExecutionOutcome, ExecutionReport, Executor, TaskSpec
 
 __all__ = ["ExecutorWorker", "start_executor_worker"]
@@ -36,6 +36,7 @@ class ExecutorWorker(QObject):
         resume: bool = False,
         project_brief: str = "",
         batch_size: int | None = None,
+        next_batch_size: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
@@ -43,21 +44,28 @@ class ExecutorWorker(QObject):
         self.spec = spec
         self.timeout_s = timeout_s
         #: ``dispatch`` (Builder run) | ``audit`` (Task Auditor) | ``fix`` |
-        #: ``batch`` (autonomous multi-task batch run, Session 004).
+        #: ``batch`` (autonomous multi-task batch run, Session 004) |
+        #: ``final_audit`` (ONE Final Auditor call, Session 005).
         self.action = action
         self.resume = bool(resume)
         self.project_brief = project_brief
         self.batch_size = batch_size
+        self.next_batch_size = next_batch_size
 
     def run(self) -> None:
         """Slot connected to ``QThread.started``."""
-        report: ExecutionReport | BatchRunReport | None = None
+        report: ExecutionReport | BatchRunReport | FinalAuditReport | None = None
         try:
             if self.action == "batch":
                 report = BatchRunner(self.executor).run_batch(
                     project_brief=self.project_brief,
                     batch_size=self.batch_size,
                     resume=self.resume,
+                    timeout_s=self.timeout_s,
+                )
+            elif self.action == "final_audit":
+                report = self.executor.run_final_audit(
+                    next_batch_size=int(self.next_batch_size or 5),
                     timeout_s=self.timeout_s,
                 )
             elif self.action == "audit":

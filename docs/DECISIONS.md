@@ -761,3 +761,114 @@ truth must survive the process that created it.
 **Consequence.** `load_batch` attaches the plan row; `next_task_action` derives
 the safe next step from task states; the offline suite proves a
 partially-finished batch reloads and resumes with the same session identities.
+
+---
+
+## D-030 — The Final Auditor runs through the generic role path and is guarded read-only
+
+**Date:** Session 005
+**Status:** Accepted
+
+**Context.** `BATCH_COMPLETE` was reachable only from `FINAL_AUDIT_RUNNING`
+(structural guarantee since D-025), but no real Final Auditor existed. The
+brief forbids engine-specific audit logic and requires the final model to
+inspect the ACTUAL repository, not approve the Batch Summary.
+
+**Decision.** `Executor.run_final_audit()` resolves
+`AgentRole.FINAL_AUDITOR` → role config (honouring
+`same_as_orchestrator`) → driver registry → `SessionManager` — zero
+final-audit-specific engine code, exactly like the Orchestrator (D-027).
+The repository is fingerprinted read-only BEFORE and AFTER the call; ANY
+worktree modification BLOCKS the final audit (violation surfaced, files
+never auto-discarded, nothing persisted from the violating answer). The
+packet (`FinalAuditPacket`) is assembled from durable facts only (batch
+row, plan record, task rows, heads) and explicitly instructs: inspect the
+actual repository and cumulative diff, RUN the deterministic tests, read
+complete failure output, treat the Batch Summary as evidence only, and DO
+NOT EDIT FILES.
+
+**Consequence.** A later Codex/Claude/Kimi driver fills the role by
+configuration alone. `FINAL_AUDIT_RUNNING` is also accepted as input —
+restart recovery after a crash mid-audit — but a PASS then still requires
+a REAL new model call; an interrupted audit never silently becomes green.
+
+---
+
+## D-031 — Strict final-audit parser fails closed; one call returns verdict AND next plan
+
+**Date:** Session 005
+**Status:** Accepted
+
+**Context.** The Final Auditor's answer gates batch completion AND, on
+pass, produces the next batch. Two expensive model calls (audit, then
+planning) contradict the cost contract; a lenient parser would let a
+malformed answer become a green batch.
+
+**Decision.** ONE call must return BOTH: the cumulative verdict and, on
+PASS only, the next `BatchPlan` (exactly `next_batch_size` tasks, 4 or 5;
+default 5). `core/final_audit_parser.py` treats the answer as untrusted:
+bounded raw input, `json.loads` only (no eval/exec/YAML), envelope
+`<<<FINAL_AUDIT_START>>>…<<<FINAL_AUDIT_END>>>` with a balanced-brace
+fallback, boolean `batch_assessment.tests_verified/diff_verified`
+required. The nested next plan is validated by the SAME strict
+`plan_parser` rules as an Orchestrator plan (D-026) — no second weaker
+parser. PASS with an unresolved critical/high finding is rejected;
+NEEDS_FIX requires findings and forbids next_batch; BLOCKED forbids
+next_batch. Any violation raises `FinalAuditParseError` and the batch is
+BLOCKED — a malformed result can never become PASS.
+
+**Consequence.** `REAL_MODEL_OPERATIONS = 1` per completed batch cycle.
+The exact next-batch count is operator-authoritative.
+
+---
+
+## D-032 — Schema v5: durable Final Audit + `pending_next_plans` handoff; the operator starts the next batch
+
+**Date:** Session 005
+**Status:** Accepted
+
+**Context.** After a PASS the app must show, across restarts: the
+completed batch (with verdict/findings/auditor session), the generated
+next plan READY, and no auto-started work. `BATCH_COMPLETE` is terminal
+in the phase graph, so the next generation needs a durable, non-phase
+home.
+
+**Decision.** Targeted in-place **v4 → v5** upgrade (D-008 discipline):
+`batch_plans` gains the Final Audit columns (`final_verdict`,
+`final_summary`, `final_findings_json`, `final_audit_json`,
+`final_auditor_session_id`, `final_audited_at`, `final_next_plan_id`);
+a new `pending_next_plans` table holds the generated next plan (plan
+JSON + requested size) until `start_next_batch()` consumes it
+(`consumed_at`/`consumed_batch_id` recorded — a plan can never be
+materialised twice). `start_next_batch()` is deterministic and makes NO
+model call: it leaves `BATCH_COMPLETE` over its legal IDLE edge, calls
+`request_start(N)` (a NEW batch generation), materialises the persisted
+tasks as PENDING with their criteria/audit focus, and stops — the
+operator then uses the normal START controls. The completed batch row,
+its tasks and its Final Audit remain queryable forever.
+
+**Consequence.** Closing the app after a PASS and reopening still shows
+the next plan READY; START NEXT BATCH after a restart uses the persisted
+plan without contacting the Orchestrator or the Final Auditor.
+
+---
+
+## D-033 — Final-audit failures land in explicit operator states, never an automatic global fix loop
+
+**Date:** Session 005
+**Status:** Accepted
+
+**Context.** A NEEDS_FIX from the Final Auditor means the WHOLE batch has
+defects; an uncontrolled batch-wide fix loop would burn model budget and
+the phase graph has no safe automatic return path to task fixing.
+
+**Decision.** On NEEDS_FIX the findings, summary and structured JSON are
+persisted and the pipeline moves to `BLOCKED` with the verdict recorded
+(`next_task_action` reports BLOCKED — never COMPLETE — because the
+BLOCKED/FAILED phase now dominates all-APPROVED task states in the
+action derivation). On BLOCKED the same persistence happens with verdict
+BLOCKED. Both states require operator/supervisor handling; no automatic
+fix, no automatic re-audit.
+
+**Consequence.** Failure can never become COMPLETE; every non-green
+final-audit outcome is loud, durable and human-actionable.

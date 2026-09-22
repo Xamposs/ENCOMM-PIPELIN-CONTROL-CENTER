@@ -164,21 +164,57 @@ Exit criteria met (all four):
 
 ---
 
-## Phase 4 — Final auditor + batch completion
+## Phase 4 — Final auditor + batch completion ✅ DONE (Session 005)
 
 **Goal:** a completed batch audit and a durable report.
 
-Scope:
+Delivered:
 
-- `FINAL_AUDITOR` runs with its `configurable` session policy and the
-  "same as orchestrator" option honoured end to end.
-- `FINAL_AUDIT_RUNNING → BATCH_COMPLETE`, or back to `FIX_REQUIRED` on failure.
-- A written batch report artefact under `docs/reports/` (or a configured path).
+- **Real FINAL_AUDITOR** through the generic role/driver architecture
+  (`AgentRole.FINAL_AUDITOR` → role config (`same_as_orchestrator` honoured)
+  → `DriverRegistry` → `SessionManager`) — no final-audit-specific engine
+  code.
+- **One-call contract (D-031):** the single Final Auditor response contains
+  BOTH the cumulative verdict AND, on PASS, the next batch plan (exactly the
+  operator-requested 4–5 tasks, default 5) — validated by the SAME strict
+  plan rules as an Orchestrator plan.
+- **Strict final-audit parser** (`core/final_audit_parser.py`): fails closed;
+  envelope `<<<FINAL_AUDIT_START>>>…`; `json.loads` only; bounded; PASS
+  with critical/high findings, PASS without next_batch, wrong task count,
+  NEEDS_FIX/BLOCKED with next_batch — all rejected.
+- **Read-only guard** (D-030): the repository is fingerprinted before/after
+  the call; an auditor that modified the worktree BLOCKS the audit, files
+  surfaced and never auto-discarded.
+- **`FinalAuditPacket`**: deterministic prompt from durable facts — Project
+  Brief, original plan, Batch Summary (evidence only), per-task contracts,
+  session ids, heads, DO-NOT-EDIT instruction, inspect-actual-repo-and-tests
+  requirement.
+- **State machine made real**: `READY_FOR_FINAL_AUDIT → FINAL_AUDIT_RUNNING →
+  BATCH_COMPLETE` on a strictly parsed PASS (a crash mid-audit recovers to
+  RUNNING and requires a real re-run — never a silent green).
+- **Schema v5** (D-032): durable Final Audit on `batch_plans` (verdict,
+  findings, summary, auditor session, structured JSON) + the
+  `pending_next_plans` handoff table (consumed exactly once).
+- **START NEXT BATCH**: deterministic materialisation of the persisted plan
+  into a new batch generation — zero AI calls; the operator controls the
+  start; the completed batch remains queryable.
+- **Operator states on failure** (D-033): final-audit NEEDS_FIX/BLOCKED
+  persist findings and land in `BLOCKED` — no automatic global fix loop.
+- **UI**: FINAL AUDIT section — batch/verdict state, resolved auditor,
+  next-batch size (4–5), RUN FINAL AUDIT / VIEW NEXT TASKS / START NEXT
+  BATCH, enabled only from legal persisted states.
+- **367 passing tests** (was 334), including the 33-case final-audit matrix.
+- **Real smoke** `scripts/session_005_final_audit_smoke.py`: `--fake` proves
+  every post-processing path first; the real run uses exactly ONE Final
+  Auditor call (PASS + 4 next tasks in one response, worktree clean,
+  restart-safe handoff re-verified from SQLite).
 
-Exit criteria:
+Exit criteria met:
 
-- `BATCH_COMPLETE` is reachable and produces a report file.
-- A failing final audit re-enters the fix loop correctly.
+- `BATCH_COMPLETE` is reachable and persists a durable audit record (schema
+  v5) — and the next plan is persisted without starting it.
+- A failing final audit lands in an explicit, persisted operator state
+  (findings kept); failure can never become COMPLETE.
 
 ---
 
@@ -188,11 +224,13 @@ Exit criteria:
 
 Order (each is one class + one registry entry):
 
-1. `ClaudeCodeDriver`
-2. `OpenCodeDriver`
-3. `OllamaDriver` (local models)
-4. `KimiDriver`
-5. `GenericCliDriver` gains a configurable argv field in role config
+1. `CodexDriver` — **next session (006)**: the expensive
+   Orchestrator/FINAL_AUDITOR roles become switchable to Codex from the UI.
+2. `ClaudeCodeDriver`
+3. `OpenCodeDriver`
+4. `OllamaDriver` (local models)
+5. `KimiDriver`
+6. `GenericCliDriver` gains a configurable argv field in role config
 
 Exit criteria: adding each engine changes no role, UI or executor code — only
 the driver module and `IMPLEMENTED_DRIVERS`. Any required change elsewhere is a

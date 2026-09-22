@@ -29,7 +29,9 @@ from PySide6.QtWidgets import (
 from ..core import (
     DEFAULT_BATCH_SIZE,
     MAX_BATCH_SIZE,
+    MAX_NEXT_BATCH_SIZE,
     MIN_BATCH_SIZE,
+    MIN_NEXT_BATCH_SIZE,
     ROLE_SESSION_POLICY_DESCRIPTION,
     ExecutionReport,
     LogRecord,
@@ -40,6 +42,7 @@ from ..drivers import PLANNED_DRIVERS, DriverRegistry
 
 __all__ = [
     "BatchPanel",
+    "FinalAuditPanel",
     "LogPanel",
     "RolePanel",
     "TaskPanel",
@@ -513,6 +516,152 @@ class BatchPanel(QGroupBox):
             f"Builder: {builder_sid or 'NOT_EXPOSED'}",
         ]
         return " | ".join(parts)
+
+
+class FinalAuditPanel(QGroupBox):
+    """FINAL AUDIT section (Session 005).
+
+    Shows the current batch state, the resolved Final Auditor engine/
+    profile/provider/model/session, the next-batch size (4 or 5) and the
+    three operator controls:
+
+    * ``RUN FINAL AUDIT`` — ONE real Final Auditor call (verdict + next
+      plan).  Never auto-run; the operator presses it.
+    * After PASS: ``VIEW NEXT TASKS`` (durable pending plan) and
+      ``START NEXT BATCH`` (deterministic materialisation — no AI call).
+    """
+
+    #: int — the requested next-batch size for the one Final Auditor call.
+    final_audit_requested = Signal(int)
+    #: START NEXT BATCH — no AI call; materialises the persisted plan.
+    start_next_batch_requested = Signal()
+
+    def __init__(self, controller: PipelineController, parent: QWidget | None = None) -> None:
+        super().__init__("FINAL AUDIT", parent)
+        self._controller = controller
+
+        self.batch_state_label = QLabel()
+        self.batch_state_label.setWordWrap(True)
+
+        self.auditor_label = QLabel()
+        self.auditor_label.setWordWrap(True)
+
+        self.size_spin = QSpinBox()
+        self.size_spin.setRange(MIN_NEXT_BATCH_SIZE, MAX_NEXT_BATCH_SIZE)
+        self.size_spin.setValue(MAX_NEXT_BATCH_SIZE)
+        self.size_spin.setToolTip(
+            "A PASSing Final Auditor must return EXACTLY this many tasks "
+            "for the next batch — in the same single call."
+        )
+
+        self.run_button = QPushButton("RUN FINAL AUDIT")
+        self.run_button.setToolTip(
+            "One real Final Auditor call over the completed batch: the "
+            "cumulative verdict AND the next batch plan, parsed strictly "
+            "and applied fail-closed. The repository must not change."
+        )
+        self.run_button.clicked.connect(
+            lambda: self.final_audit_requested.emit(self.size_spin.value())
+        )
+
+        self.view_next_button = QPushButton("VIEW NEXT TASKS")
+        self.view_next_button.clicked.connect(self._show_pending_tasks)
+        self.next_tasks_label = QLabel("")
+        self.next_tasks_label.setWordWrap(True)
+        self.next_tasks_label.setStyleSheet("color: palette(mid);")
+
+        self.start_next_button = QPushButton("START NEXT BATCH")
+        self.start_next_button.setToolTip(
+            "Materialise the persisted next plan into a new batch — a "
+            "deterministic handoff, no Orchestrator and no Final Auditor "
+            "call. The new batch then waits for the normal START controls."
+        )
+        self.start_next_button.clicked.connect(self.start_next_batch_requested.emit)
+
+        form = QFormLayout(self)
+        form.addRow("Current batch", self.batch_state_label)
+        form.addRow("Final Auditor", self.auditor_label)
+        form.addRow("Next batch size", self.size_spin)
+        buttons = QWidget()
+        row = QHBoxLayout(buttons)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.run_button)
+        row.addWidget(self.view_next_button)
+        row.addWidget(self.start_next_button)
+        form.addRow("Controls", buttons)
+        form.addRow("Next tasks", self.next_tasks_label)
+
+        self.refresh()
+
+    def _resolved_auditor_text(self) -> str:
+        state = self._controller.state
+        config = state.config_for(AgentRole.FINAL_AUDITOR)
+        engine = state.resolved_engine_for(AgentRole.FINAL_AUDITOR)
+        parts = [f"engine: {engine or '(none)'}, profile: {config.project_profile or '(none)'}"]
+        if config.provider:
+            parts.append(f"provider: {config.provider}")
+        if config.model:
+            parts.append(f"model: {config.model}")
+        parts.append(f"session: {config.session_id or '(none)'}")
+        if config.same_as_orchestrator:
+            parts.append("(same as orchestrator)")
+        return " | ".join(parts)
+
+    def _show_pending_tasks(self) -> None:
+        database = self._controller.database
+        pending = database.load_open_pending_next_plan() if database is not None else None
+        if pending is None:
+            self.next_tasks_label.setText("No next batch plan is persisted.")
+            return
+        import json
+
+        try:
+            plan = json.loads(pending["plan_json"])
+            titles = [t.get("title", "?") for t in (plan.get("tasks") or [])]
+        except (ValueError, TypeError):  # pragma: no cover - stored data is ours
+            titles = ["(unreadable plan)"]
+        self.next_tasks_label.setText(
+            f"Persisted plan {pending['plan_id']} — {len(titles)} task(s): "
+            + "; ".join(titles)
+        )
+
+    def refresh(self) -> None:
+        controller = self._controller
+        phase = controller.machine.phase
+        batch = controller.state.batch
+        if batch is None:
+            self.batch_state_label.setText("No batch yet.")
+        else:
+            final = None
+            database = controller.database
+            stored = database.load_final_audit(batch.batch_id) if database else None
+            if stored is not None:
+                final = stored.get("final_verdict")
+            self.batch_state_label.setText(
+                f"{batch.batch_id} — {batch.status.value} — {phase.value}"
+                + (f" — FINAL AUDIT: {final}" if final else "")
+            )
+        self.auditor_label.setText(self._resolved_auditor_text())
+
+        # RUN FINAL AUDIT: only from the ready phase, with a real executor.
+        self.run_button.setEnabled(
+            controller.executor_attached
+            and phase is PipelinePhase.READY_FOR_FINAL_AUDIT
+        )
+        # START NEXT BATCH / VIEW NEXT TASKS: only when a plan is persisted
+        # and the pipeline can legally hand off.
+        database = controller.database
+        has_pending = (
+            database.load_open_pending_next_plan() is not None
+            if database is not None
+            else False
+        )
+        self.view_next_button.setEnabled(has_pending)
+        self.start_next_button.setEnabled(
+            controller.executor_attached
+            and has_pending
+            and phase in (PipelinePhase.IDLE, PipelinePhase.BATCH_COMPLETE)
+        )
 
 
 class LogPanel(QGroupBox):

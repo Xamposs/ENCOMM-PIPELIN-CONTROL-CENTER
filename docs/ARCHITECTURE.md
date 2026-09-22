@@ -1,7 +1,7 @@
 # Architecture — ENCOMM Pipeline Control Center
 
-**Version:** 0.4 (orchestrated multi-task batches + real Orchestrator)
-**Status:** accurate as of Session 004. This document describes what the code
+**Version:** 0.5 (one-call Final Auditor + next-batch handoff)
+**Status:** accurate as of Session 005. This document describes what the code
 actually does today, including what it deliberately does *not* do.
 
 ---
@@ -15,21 +15,22 @@ when needed, and a **final auditor** audits the completed batch.
 
 **v0.1 delivered the architecture and the shell; v0.2 added the first real
 execution path; v0.3 closed the single-task loop; v0.4 generalises the loop to
-a real multi-task batch**: the ORCHESTRATOR plans exactly N tasks through the
-same generic role/driver path, the strict plan parser fails closed, a
-read-only fingerprint guards the workspace during planning, and a
-deterministic batch runner drives every task (fresh Builder → Task Auditor →
-capped fix loop → next task) until `READY_FOR_FINAL_AUDIT` — with durable
-Project Briefs, batch plans, session identities and a Batch Summary in SQLite.
+a real multi-task batch; v0.5 adds the real FINAL_AUDITOR**: the completed
+batch is closed by ONE real Final Auditor call that returns BOTH the
+cumulative verdict AND the next batch plan (strict fails-closed parsing,
+read-only guard), the batch becomes `BATCH_COMPLETE`, and the next plan waits
+in SQLite until the operator presses START NEXT BATCH — a deterministic
+zero-AI materialisation. Durable Project Briefs, batch plans, session
+identities, the Batch Summary and now the Final Audit itself all live in
+SQLite (schema v5).
 
-### Explicit non-goals for v0.4
+### Explicit non-goals for v0.5
 
-- No real Final Auditor, no reachable `BATCH_COMPLETE` — successful batches
-  stop at `READY_FOR_FINAL_AUDIT`; `BATCH_COMPLETE` is reachable only from
-  `FINAL_AUDIT_RUNNING` (Session 005).
-- No automatic next-batch generation.
-- No real Codex / Claude Code / OpenCode / Ollama / Kimi integration. Only
-  Hermes is real; the other adapters remain refusing placeholders.
+- No real Codex / Claude Code / OpenCode / Ollama / Kimi driver — only
+  Hermes is real; the other adapters remain refusing placeholders
+  (the Codex adapter is Session 006).
+- No automatic next-batch generation or auto-start: START NEXT BATCH is an
+  operator action and makes no AI call.
 - No web server, Electron, browser frontend, Docker or cloud backend.
 - No scheduled tasks, services, installer or system-wide installs.
 - No automatic resume of AI processes at application start (recovery only
@@ -405,6 +406,49 @@ real Orchestrator session id, the baseline fingerprint, the final phase and
 the Batch Summary; each task keeps its acceptance criteria and audit focus and
 passes them to the auditor packet.
 
+### Session 005 — the one-call Final Auditor + next-batch handoff
+
+`READY_FOR_FINAL_AUDIT` becomes a real handoff to the FINAL_AUDITOR role,
+resolved through the SAME generic path as every other role:
+
+1. **`run_final_audit()`** from `READY_FOR_FINAL_AUDIT` (or
+   `FINAL_AUDIT_RUNNING` after a crash mid-audit — recovery still requires a
+   real new call, never a silent green):
+   - resolves `FINAL_AUDITOR` (role config; `same_as_orchestrator`
+     honoured), preflights, applies the `configurable` session policy,
+   - moves over the legal edge to `FINAL_AUDIT_RUNNING` **after** preflight
+     (a refused configuration leaves the batch READY, re-runnable),
+   - fingerprints the repository read-only BEFORE the call,
+   - sends the deterministic `FinalAuditPacket` (durable facts only: brief,
+     original plan, per-task contracts, Batch Summary as evidence, session
+     ids, heads; explicit DO-NOT-EDIT + inspect-actual-repo-and-tests
+     instructions), waits for the real process,
+   - on child failure/timeout → pipeline `FAILED`; a worktree-modifying
+     auditor → `BLOCKED` guard violation (files surfaced, never discarded);
+   - parses the answer with `core/final_audit_parser.py` as untrusted input:
+     ONE JSON object carrying BOTH the cumulative verdict AND — on PASS only
+     — the next batch plan (exactly the requested 4–5 tasks, validated by
+     the SAME strict rules as an Orchestrator plan);
+   - applies the strict verdict: **PASS** → the plan is persisted in
+     `pending_next_plans`, the verdict/findings/summary/auditor-session/
+     structured JSON land on `batch_plans` (schema v5), the phase walks
+     `FINAL_AUDIT_RUNNING → BATCH_COMPLETE`, batch `COMPLETE` — and NOTHING
+     auto-starts; **NEEDS_FIX** → findings persisted, pipeline `BLOCKED`
+     (operator handling, no global fix loop, D-033); **BLOCKED** → the same
+     persisted operator state.
+2. **`start_next_batch()`** from `BATCH_COMPLETE`/`IDLE`: deterministic,
+   zero-AI materialisation of the persisted plan — leaves `BATCH_COMPLETE`
+   over its legal IDLE edge, calls `request_start(N)` (a NEW batch
+   generation), materialises the already-generated tasks as PENDING with
+   their criteria/audit focus, marks the plan consumed (exactly once), and
+   stops. The completed batch row, its tasks and its Final Audit remain
+   queryable. The operator then uses the normal START controls.
+
+**Why one call:** the brief's cost contract — a completed batch cycle costs
+ONE Final Auditor operation, not two (audit, then planning). The nested next
+plan is validated by the existing strict plan parser, so no second, weaker
+parser exists (D-031).
+
 ### Session 002 dispatch sequence (one task, stops at `AUDITING_TASK`)
 
 `Executor.dispatch_single_task()` implements exactly this order, and each step is
@@ -535,16 +579,14 @@ The Qt event loop drives the UI, and **no AI process ever runs on it**.
 
 Stated plainly so no future session mistakes a placeholder for a feature:
 
-- **No Final Auditor.** `FINAL_AUDIT_RUNNING` is a graph node only;
-  `BATCH_COMPLETE` is reachable **only** from it (Session 005 makes it real).
-  A successful batch ends `READY_FOR_FINAL_AUDIT` with a durable Batch Summary.
-- **No automatic next-batch generation**, no batch-size dispatch beyond
-  planning.
-- **`CodexDriver` and `GenericCliDriver` do nothing.** Both raise
-  `DriverNotImplementedError` for every real operation and report
-  `implemented=False`. `PLANNED_DRIVERS` (`claude_code`, `opencode`, `ollama`,
-  `kimi`) still has no code. The Orchestrator role is engine-agnostic by
-  construction — swapping engines is configuration-only.
+- **No real Codex / Claude Code / OpenCode / Ollama / Kimi driver.** The
+  FINAL_AUDITOR and ORCHESTRATOR roles run through the generic path with
+  Hermes today; swapping engines is configuration-only, but the Codex
+  adapter itself is Session 006. `PLANNED_DRIVERS` (`claude_code`,
+  `opencode`, `ollama`, `kimi`) still has no code.
+- **No automatic next-batch generation or auto-start.** The PASS-generated
+  plan waits in `pending_next_plans` until the operator presses START NEXT
+  BATCH; START NEXT BATCH itself makes no AI call.
 - **No mid-prompt cancellation** (`supports_cancellation=False`) and no streaming
   surface (`supports_streaming=False`).
 - **No task parsing or plan generation outside the deterministic builders.**
@@ -572,21 +614,24 @@ Stated plainly so no future session mistakes a placeholder for a feature:
 
 ---
 
-## 14. Verification status (v0.4)
+## 14. Verification status (v0.5)
 
 | Check | Result |
 |---|---|
-| `python -m pytest` | **334 passed, 0 failed** (18 files) |
+| `python -m pytest` | **367 passed, 0 failed** (19 files; 334 prior + 33 final-audit tests) |
 | Real audit/fix smoke (`scripts/session_003_audit_fix_smoke.py`) | **See `docs/reports/SESSION_003_AUDITOR_FIX_LOOP.md`** — loop intact; terminal is now `READY_FOR_FINAL_AUDIT` (ADR D-025) |
-| Real orchestrated batch smoke (`scripts/session_004_multitask_smoke.py`) | **See `docs/reports/SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md`** — 1 Orchestrator call → exactly 4 tasks → 4 fresh Builder sessions → 1 shared auditor session → `READY_FOR_FINAL_AUDIT`, reloaded from SQLite |
-| Fake-mode smoke (offline cost guard) | `session_004_multitask_smoke.py --fake` → **SMOKE PASSED** before any real call |
+| Real orchestrated batch smoke (`scripts/session_004_multitask_smoke.py`) | **See `docs/reports/SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md`** — 1 Orchestrator call → exactly 4 tasks → 4 fresh Builder sessions → 1 shared auditor session → `READY_FOR_FINAL_AUDIT`, re-read from SQLite |
+| Real final-audit smoke (`scripts/session_005_final_audit_smoke.py`) | **See `docs/reports/SESSION_005_FINAL_AUDIT_NEXT_BATCH.md`** — ONE Final Auditor call → FINAL PASS + exactly 4 next tasks in the same response → `BATCH_COMPLETE`, next plan persisted, START NEXT BATCH materialised with zero AI calls |
+| Fake-mode smokes (offline cost guard) | both `--fake` smokes → **SMOKE PASSED** before any real call |
 | Plan parser fails closed | Asserted by the offline matrix (valid 1/4/5-task plans; count mismatch; duplicate/non-contiguous indices; duplicate titles; empty/oversized fields; malformed JSON; no-JSON) |
-| Orchestrator read-only guard | Asserted offline: a planning call that writes a file BLOCKS the plan, leaves the file, materialises nothing |
-| 5-task batch offline | `test_five_task_batch_is_supported_offline` → READY_FOR_FINAL_AUDIT |
+| Final-audit parser fails closed | Asserted by `tests/test_final_audit.py`: PASS without next_batch, wrong count, PASS+critical/high, NEEDS_FIX/BLOCKED with next_batch, malformed JSON, non-boolean assessment — every failure non-green |
+| Final-auditor read-only guard | Asserted offline: an audit call that writes a file BLOCKS the audit, leaves the file, persists nothing |
+| 5-task next plan offline | parser + START NEXT BATCH matrix (`expected_next_tasks=5`) |
 | Session isolation across a batch | 4 distinct Builder sessions; ONE auditor session; re-audit resumes it |
 | Restart recovery mid-batch | `test_restart_recovery_after_task_two_resumes_without_rework` — no duplicate work |
-| No path reaches BATCH_COMPLETE | Graph test: only incoming edge is `FINAL_AUDIT_RUNNING` |
+| Restart-safe next-batch handoff | `test_start_next_batch_after_restart_uses_persisted_plan` — plan survives a real close/reopen; no AI call |
+| `BATCH_COMPLETE` only via a strict PASS | Graph test (single incoming edge) + executor matrix (malformed/failing audits land BLOCKED/FAILED) |
 | Verdict parser fails closed | Asserted by 30 offline tests (unchanged) |
 | UI stays responsive during a dispatch | Asserted by offscreen test (event loop ticks while the worker sleeps) |
-| Repository contains no secrets | Pattern-scanned before commit — see Session 004 report §SECURITY_CHECK |
+| Repository contains no secrets | Pattern-scanned before commit — see Session 005 report §SECURITY_CHECK |
 | Hermes profiles/config modified | **None** — read-only discovery plus `-p <existing profile>` only |

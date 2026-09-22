@@ -248,6 +248,14 @@ def next_task_action(
         if task.state is TaskState.FAILED:
             return TaskNextAction.FAILED
 
+    # A BLOCKED/FAILED pipeline phase dominates the batch action: with every
+    # task APPROVED this is exactly the final-audit NEEDS_FIX/BLOCKED
+    # signature — operator/supervisor handling required, never "complete".
+    if phase is PipelinePhase.BLOCKED:
+        return TaskNextAction.BLOCKED
+    if phase is PipelinePhase.FAILED:
+        return TaskNextAction.FAILED
+
     if all(task.state is TaskState.APPROVED for task in batch.tasks):
         return TaskNextAction.COMPLETE
 
@@ -274,10 +282,6 @@ def next_task_action(
         if task.latest_verdict == AuditVerdict.BLOCKED.value:
             return TaskNextAction.BLOCKED
         return TaskNextAction.AUDIT
-    if phase is PipelinePhase.BLOCKED:
-        return TaskNextAction.BLOCKED
-    if phase is PipelinePhase.FAILED:
-        return TaskNextAction.FAILED
     if phase is PipelinePhase.READY_FOR_FINAL_AUDIT:
         return TaskNextAction.COMPLETE
     if phase is PipelinePhase.BATCH_COMPLETE:
@@ -1264,7 +1268,13 @@ class Executor:
         self, *, next_batch_size: int, timeout_s: float | None
     ) -> FinalAuditReport:
         machine = self.controller.machine
-        if machine.phase is not PipelinePhase.READY_FOR_FINAL_AUDIT:
+        if machine.phase not in (
+            PipelinePhase.READY_FOR_FINAL_AUDIT,
+            PipelinePhase.FINAL_AUDIT_RUNNING,
+        ):
+            # FINAL_AUDIT_RUNNING is accepted only as a restart recovery: a
+            # process death mid-audit left the phase persisted with no result;
+            # re-running requires a REAL new model call — never a silent PASS.
             return FinalAuditReport(
                 outcome=FinalAuditOutcome.REJECTED,
                 phase=machine.phase,
@@ -1339,6 +1349,17 @@ class Executor:
 
         # Read-only repository fingerprint BEFORE the call.
         before = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+
+        # The audit is RUNNING: move over the legal edge only now — after
+        # preflight/session setup, so a refused configuration leaves the batch
+        # at READY_FOR_FINAL_AUDIT and the operator can re-run without reset.
+        if machine.phase is PipelinePhase.READY_FOR_FINAL_AUDIT:
+            self._transition(
+                PipelinePhase.FINAL_AUDIT_RUNNING,
+                f"Final audit of batch {batch.batch_id} is running "
+                "(one call: cumulative verdict + next plan).",
+            )
+            self._persist()
 
         packet = self._build_final_audit_packet(batch, next_batch_size=next_batch_size)
         handle = driver.send_prompt(session, packet.render())

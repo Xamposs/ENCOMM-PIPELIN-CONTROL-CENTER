@@ -5,19 +5,25 @@ orchestrator agents, builders, task auditors and final auditors, with
 configurable session policies, multi-task batches, automatic audit/fix loops
 and final batch audits.
 
-**Current version: 0.4.0 — orchestrated multi-task batches.** The architecture,
+**Current version: 0.5.0 — one-call final audit + next-batch handoff.** The architecture,
 the desktop shell, the **first real engine integration**, the **complete
-controlled audit/fix loop** (Session 003), and now the **first real
-multi-task batch** exist and are tested: one autonomous run plans exactly N
-tasks through the real ORCHESTRATOR role (a strict, fails-closed plan parser;
-a read-only guard that BLOCKS any plan whose call modified the repository),
-then executes every task deterministically — a BRAND-NEW Builder session per
-task, a Task Auditor that reuses ONE session for the whole batch, the capped
-fix loop inside the batch (NEEDS_FIX → fix in a fresh session → same auditor
-re-audits, `MAX_AUDIT_ROUNDS = 3`), boundary-safe pause/resume/stop, and
-crash recovery from SQLite. A fully passing batch stops at
-**READY_FOR_FINAL_AUDIT** — never at BATCH_COMPLETE, which only the real
-Final Auditor (a later session) may produce. The Codex and Generic-CLI
+controlled audit/fix loop** (Session 003), the **real multi-task batch**
+(Session 004), and now the **real Final Auditor** (Session 005) exist and are
+tested: one autonomous run plans exactly N tasks through the real ORCHESTRATOR
+role (a strict, fails-closed plan parser; a read-only guard that BLOCKS any
+plan whose call modified the repository), then executes every task
+deterministically — a BRAND-NEW Builder session per task, a Task Auditor that
+reuses ONE session for the whole batch, the capped fix loop inside the batch
+(NEEDS_FIX → fix in a fresh session → same auditor re-audits,
+`MAX_AUDIT_ROUNDS = 3`), boundary-safe pause/resume/stop, and crash recovery
+from SQLite. A fully passing batch lands on **READY_FOR_FINAL_AUDIT**; the
+operator then presses **RUN FINAL AUDIT** — ONE real Final Auditor call that
+inspects the actual repository, runs the tests, and returns BOTH the
+cumulative verdict AND the next batch plan in the same response (strict
+fails-closed parsing; a read-only guard BLOCKS an auditor that modified the
+repo). On PASS the batch becomes BATCH_COMPLETE and the next plan is
+persisted — **nothing auto-starts**: START NEXT BATCH materialises the
+persisted plan deterministically with no AI call. The Codex and Generic-CLI
 adapters remain deliberate placeholders that refuse to do real work. See
 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5 for the precise list of
 what is and is not implemented.
@@ -48,9 +54,9 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-334 tests covering imports/compile, the domain model (including the audit
+367 tests covering imports/compile, the domain model (including the audit
 verdict contract and the strict batch-plan contract), the phase state machine,
-persistence round-trips (schema v4 + the v1→v2→v3→v4 upgrade chain), driver
+persistence round-trips (schema v5 + the v1→…→v5 upgrade chain), driver
 refusal behaviour, the Hermes CLI contract, the real driver's mapping of a
 child process onto a `PromptResult`, the executor's transitions and failure
 propagation, the strict verdict and plan parsers' fail-closed behaviour, the
@@ -68,7 +74,9 @@ separate, explicitly invoked scripts:
 python scripts/session_002_smoke.py --profile <hermes-profile>          # builder path
 python scripts/session_003_audit_fix_smoke.py --profile <hermes-profile>  # audit/fix loop
 python scripts/session_004_multitask_smoke.py --profile <hermes-profile>  # orchestrated batch
-python scripts/session_004_multitask_smoke.py --fake                       # offline post-processing proof
+python scripts/session_004_multitask_smoke.py --fake                       # offline batch proof
+python scripts/session_005_final_audit_smoke.py --profile <hermes-profile>  # one-call final audit
+python scripts/session_005_final_audit_smoke.py --fake                     # offline final-audit proof
 ```
 
 ---
@@ -125,7 +133,7 @@ Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 |---|---|
 | [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) | **Canonical handoff file.** Read first in every new session. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The actual architecture, including deliberate non-goals |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-029 with reasons |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-033 with reasons |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased plan from foundation to operational hardening |
 | [docs/reports/](docs/reports/) | Per-session reports |
 

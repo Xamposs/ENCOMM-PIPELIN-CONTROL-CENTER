@@ -26,10 +26,11 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core import APP_NAME, ExecutionReport, PipelineController, TaskSpec
+from ..core import APP_NAME, ExecutionReport, FinalAuditReport, PipelineController, TaskSpec
+from ..core.executor import StartNextBatchReport
 from ..domain import AgentRole, PipelinePhase
 from ..drivers import PLANNED_DRIVERS
-from .panels import BatchPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
+from .panels import BatchPanel, FinalAuditPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
 from .worker import start_executor_worker
 
 __all__ = ["MainWindow"]
@@ -64,6 +65,7 @@ class MainWindow(QMainWindow):
             for role in AgentRole
         }
         self.batch_panel = BatchPanel(controller)
+        self.final_audit_panel = FinalAuditPanel(controller)
         self.task_panel = TaskPanel(
             controller, profiles=self._profiles, profile_method=self._profile_method
         )
@@ -84,6 +86,7 @@ class MainWindow(QMainWindow):
         config_layout.addWidget(roles_group)
 
         config_layout.addWidget(self.batch_panel)
+        config_layout.addWidget(self.final_audit_panel)
         config_layout.addWidget(self.task_panel)
 
         planned = QLabel(
@@ -128,6 +131,8 @@ class MainWindow(QMainWindow):
         self.batch_panel.stop_requested.connect(self._on_stop)
         self.batch_panel.plan_and_start_requested.connect(self._on_plan_and_start)
         self.batch_panel.resume_batch_requested.connect(self._on_resume_batch)
+        self.final_audit_panel.final_audit_requested.connect(self._on_run_final_audit)
+        self.final_audit_panel.start_next_batch_requested.connect(self._on_start_next_batch)
         self.task_panel.dispatch_requested.connect(self._on_dispatch_requested)
         self.task_panel.audit_requested.connect(self._on_audit_requested)
         self.task_panel.fix_requested.connect(self._on_fix_requested)
@@ -274,6 +279,87 @@ class MainWindow(QMainWindow):
             else 5
         )
         self._start_batch_worker(brief=brief, size=size, resume=True)
+
+    def _on_run_final_audit(self, next_batch_size: int) -> None:
+        """RUN FINAL AUDIT: ONE real Final Auditor call, off the UI thread."""
+        executor = self.controller.executor
+        if executor is None:
+            self.controller.events.error(
+                "Final audit requested, but no executor is attached.", source="ui"
+            )
+            self.statusBar().showMessage("No executor attached — nothing was started.")
+            return
+        if executor.is_running or (self._thread is not None and self._thread.isRunning()):
+            self.statusBar().showMessage("An executor action is already running.")
+            return
+        self.final_audit_panel.run_button.setEnabled(False)
+        self.controller.events.info(
+            f"FINAL AUDIT requested (next batch size {next_batch_size}) — one real "
+            "Final Auditor call, running off the UI thread.",
+            source="ui",
+        )
+        self.statusBar().showMessage(
+            "FINAL AUDIT running — one call: cumulative verdict + next plan…"
+        )
+        thread, worker = start_executor_worker(
+            executor,
+            TaskSpec(title="", prompt=""),
+            timeout_s=self._dispatch_timeout_s,
+            action="final_audit",
+            next_batch_size=next_batch_size,
+            parent=self,
+        )
+        worker.finished.connect(self._on_final_audit_finished)
+        thread.finished.connect(self._on_dispatch_thread_finished)
+        self._thread, self._worker = thread, worker
+        thread.start()
+
+    def _on_final_audit_finished(self, report: object) -> None:
+        self._after_control("", self.controller.machine.phase)
+        if isinstance(report, FinalAuditReport):
+            self.controller.events.info(
+                f"Final audit finished — {report.summary()}", source="ui"
+            )
+            if report.outcome.value == "PASSED":
+                self.statusBar().showMessage(
+                    "FINAL AUDIT: PASS — batch COMPLETE. The next batch plan is "
+                    "persisted; press START NEXT BATCH when ready (nothing auto-runs)."
+                )
+            elif report.outcome.value == "NEEDS_FIX":
+                self.statusBar().showMessage(
+                    "FINAL AUDIT: NEEDS_FIX — findings persisted; operator handling "
+                    "required."
+                )
+            else:
+                self.statusBar().showMessage(
+                    f"FINAL AUDIT: {report.outcome.value} — {report.message}"
+                )
+            return
+        self.statusBar().showMessage("Final audit finished without a report.")
+
+    def _on_start_next_batch(self) -> None:
+        """START NEXT BATCH: deterministic handoff — never an AI call."""
+        executor = self.controller.executor
+        if executor is None:
+            self.controller.events.error(
+                "START NEXT BATCH requested, but no executor is attached.", source="ui"
+            )
+            return
+        if executor.is_running or (self._thread is not None and self._thread.isRunning()):
+            self.statusBar().showMessage("An executor action is already running.")
+            return
+        report = executor.start_next_batch()
+        if isinstance(report, StartNextBatchReport):
+            self.controller.events.info(
+                f"START NEXT BATCH — {report.message}", source="ui"
+            )
+            self.statusBar().showMessage(
+                f"Next batch ready: {report.task_count} tasks "
+                f"({report.batch_id}) — press the normal START controls."
+                if report.ok
+                else f"START NEXT BATCH refused: {report.message}"
+            )
+        self._after_control("", self.controller.machine.phase)
 
     def _start_batch_worker(self, *, brief: str, size: int, resume: bool) -> None:
         self.controller.events.info(
