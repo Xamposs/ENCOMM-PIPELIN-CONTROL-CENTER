@@ -321,7 +321,9 @@ def test_missing_workspace_blocks_before_anything_starts(
 
 
 def test_placeholder_engine_blocks(builder_controller, database) -> None:  # noqa: ANN001
-    builder_controller.set_role_config(AgentRole.BUILDER, engine="codex")
+    # generic_cli is the standing placeholder: codex became a real driver in
+    # Session 006 and its refusal depends on live evidence, not identity.
+    builder_controller.set_role_config(AgentRole.BUILDER, engine="generic_cli")
     executor = Executor(
         builder_controller,
         runner=PermissiveRunner(),

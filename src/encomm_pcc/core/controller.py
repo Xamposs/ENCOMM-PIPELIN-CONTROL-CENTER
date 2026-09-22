@@ -21,6 +21,7 @@ from ..domain import (
     AgentRoleConfig,
     BatchState,
     BatchStatus,
+    ExternalSessionBinding,
     PipelinePhase,
     PipelineState,
     SessionPolicy,
@@ -215,6 +216,53 @@ class PipelineController:
 
     def role_config(self, role: AgentRole) -> AgentRoleConfig:
         return self.state.config_for(role)
+
+    # -- external session binding (Session 006) --------------------------------
+    def bind_external_session(
+        self,
+        role: AgentRole,
+        driver_id: str,
+        external_session_id: str,
+        *,
+        title: str | None = None,
+        workspace_path: str | None = None,
+        metadata: dict | None = None,
+    ) -> ExternalSessionBinding:
+        """Bind a discovered external session to ``role`` — never contacts the engine.
+
+        The binding is durable state on the role config (persisted with the
+        rest of the configuration).  No model call happens here; the engine is
+        contacted only when the role actually executes.
+        """
+        extra = dict(metadata or {})
+        binding = ExternalSessionBinding(
+            driver_id=str(driver_id),
+            external_session_id=str(external_session_id),
+            title=extra.get("title") or title,
+            workspace_path=extra.get("workspace_path") or workspace_path,
+        )
+        config = self.state.config_for(role)
+        config.set_external_session_binding(binding)
+        self._persist()
+        self.events.info(
+            f"{role.value}: external session bound to driver '{driver_id}' "
+            f"({external_session_id}). No engine contact was made.",
+            source="controller",
+        )
+        return binding
+
+    def clear_external_session(self, role: AgentRole) -> bool:
+        """Clear the role's external binding (the NEW SESSION operation)."""
+        config = self.state.config_for(role)
+        removed = config.clear_stale_external_session_binding()
+        if removed:
+            self._persist()
+            self.events.info(
+                f"{role.value}: external session binding cleared — the next real "
+                "execution will create a new engine session.",
+                source="controller",
+            )
+        return removed
 
     # -- driver introspection ------------------------------------------------
     def driver_capabilities(self) -> list[Mapping[str, Any]]:

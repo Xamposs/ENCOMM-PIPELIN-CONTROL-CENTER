@@ -1,4 +1,4 @@
-"""ENCOMM Pipeline Control Center — v0.5 (one-call final audit + next-batch handoff)."""
+"""ENCOMM Pipeline Control Center — v0.6 (real Codex driver + session discovery/selector)."""
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = ["__version__"]

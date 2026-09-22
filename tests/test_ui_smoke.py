@@ -70,10 +70,23 @@ def test_orchestrator_has_a_new_session_button(window) -> None:  # noqa: ANN001
 
 
 def test_new_session_button_starts_nothing(qapp, window, controller) -> None:  # noqa: ANN001
-    window.role_panels[AgentRole.ORCHESTRATOR].new_session_button.click()
+    """NEW SESSION clears the binding; it never contacts the engine (006)."""
+    panel = window.role_panels[AgentRole.ORCHESTRATOR]
+    controller.set_role_config(AgentRole.ORCHESTRATOR, engine="codex")
+    controller.bind_external_session(AgentRole.ORCHESTRATOR, "codex", "019d-test-binding")
+    panel.refresh_from_controller()
+    assert controller.role_config(AgentRole.ORCHESTRATOR).external_session_binding() is not None
+
+    panel.new_session_button.click()
+    qapp.processEvents()
+
+    config = controller.role_config(AgentRole.ORCHESTRATOR)
+    assert config.external_session_binding() is None
     assert controller.sessions.current_session_id(AgentRole.ORCHESTRATOR) is None
     messages = [r.message for r in controller.events.history()]
-    assert any("placeholder only" in m for m in messages)
+    assert any("binding cleared" in m for m in messages)
+    assert panel.session_combo.currentIndex() == 0
+    assert panel.session_combo.currentData() == ""
 
 
 def test_engine_dropdowns_list_the_registered_drivers(window) -> None:  # noqa: ANN001

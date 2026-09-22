@@ -156,8 +156,11 @@ def test_driver_capabilities_are_exposed(controller: PipelineController) -> None
     assert {r["driver_id"] for r in rows} == {"codex", "generic_cli", "hermes"}
     by_id = {r["driver_id"]: r for r in rows}
     # Still-unimplemented placeholders must not claim capability…
-    assert by_id["codex"]["implemented"] is False
     assert by_id["generic_cli"]["implemented"] is False
+    # …Codex gates its flag on live evidence (D-018)…
+    from encomm_pcc.drivers.codex import _LIVE_SMOKE_VERIFIED
+
+    assert by_id["codex"]["implemented"] == _LIVE_SMOKE_VERIFIED
     # …and Hermes reports its own verification state, which is a bool either way.
     assert isinstance(by_id["hermes"]["implemented"], bool)
 

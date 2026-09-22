@@ -5,10 +5,11 @@ orchestrator agents, builders, task auditors and final auditors, with
 configurable session policies, multi-task batches, automatic audit/fix loops
 and final batch audits.
 
-**Current version: 0.5.0 — one-call final audit + next-batch handoff.** The architecture,
+**Current version: 0.6.0 — real Codex driver + session discovery/selector.** The architecture,
 the desktop shell, the **first real engine integration**, the **complete
 controlled audit/fix loop** (Session 003), the **real multi-task batch**
-(Session 004), and now the **real Final Auditor** (Session 005) exist and are
+(Session 004), the **real Final Auditor** (Session 005), and the **real Codex
+adapter with an existing-session selector** (Session 006) exist and are
 tested: one autonomous run plans exactly N tasks through the real ORCHESTRATOR
 role (a strict, fails-closed plan parser; a read-only guard that BLOCKS any
 plan whose call modified the repository), then executes every task
@@ -54,15 +55,20 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-367 tests covering imports/compile, the domain model (including the audit
-verdict contract and the strict batch-plan contract), the phase state machine,
+417 tests covering imports/compile, the domain model (including the audit
+verdict contract, the strict batch-plan contract and the external-session
+binding), the phase state machine,
 persistence round-trips (schema v5 + the v1→…→v5 upgrade chain), driver
-refusal behaviour, the Hermes CLI contract, the real driver's mapping of a
+refusal behaviour, the Hermes CLI contract, the Codex CLI contract (argv,
+stdin transport, sandbox allowlist, JSONL protocol incl. the live 0.154
+shapes), read-only Codex session discovery, the real drivers' mapping of a
 child process onto a `PromptResult`, the executor's transitions and failure
 propagation, the strict verdict and plan parsers' fail-closed behaviour, the
 capped audit/fix loop (session isolation, round cap, recovery), the
 deterministic multi-task batch runner (session lifecycles, pause/resume/stop,
-restart recovery, the read-only planning guard), the read-only repository
+restart recovery, the read-only planning guard), the Codex session
+binding/selector matrix (restart-safe binding, engine-switch invalidation,
+zero-model-call refresh/select/new), the read-only repository
 fingerprint, profile discovery, session policy resolution, the controller
 control surface, the worker-thread dispatch path, and the UI in Qt offscreen
 mode.

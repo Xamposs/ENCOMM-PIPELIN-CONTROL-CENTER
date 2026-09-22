@@ -825,6 +825,7 @@ class Executor:
             self.events.error(message, source="executor")
             return PlanReport(outcome=PlanOutcome.BLOCKED, phase=machine.phase, message=message)
 
+        self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
         if decision.action is SessionAction.REUSE and decision.session_id:
             try:
@@ -1086,6 +1087,7 @@ class Executor:
 
         # BUILDER's `always_new` policy: the decision must be NEW — a build
         # never reuses a Builder session (session isolation is a hard contract).
+        self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
         if decision.action is SessionAction.REUSE:
             self.events.error(
@@ -1329,6 +1331,7 @@ class Executor:
 
         # FINAL_AUDITOR policy: configurable → continuity preferred but never
         # required; a REUSE resume failure fails honestly (never fabricated).
+        self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
         if decision.action is SessionAction.REUSE and decision.session_id:
             try:
@@ -1978,6 +1981,7 @@ class Executor:
 
         # Restart recovery: reuse the persisted auditor session for a re-audit.
         self._restore_auditor_session(task)
+        self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
         if decision.action is SessionAction.REUSE and decision.session_id:
             try:
@@ -2271,6 +2275,7 @@ class Executor:
 
         # BUILDER's `always_new` policy: the decision must be NEW — the fix
         # never reuses a Builder session (session isolation is a hard contract).
+        self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
         if decision.action is SessionAction.REUSE:
             self.events.error(
@@ -2415,6 +2420,30 @@ class Executor:
         config = self.controller.state.config_for(role)
         engine = self.controller.state.resolved_engine_for(role)
         return role, config, engine
+
+    def _seed_binding_session(
+        self, role: AgentRole, engine: str, config: AgentRoleConfig
+    ) -> None:
+        """Seed the durable external-session binding into ``SessionManager``.
+
+        A session selected in the UI is bound to the role as durable state
+        (``config.extra``, restart-safe).  Before the session policy decides,
+        the binding is re-seeded into the in-memory manager so a REUSE decision
+        resumes that real external session — after a restart too.  This is
+        bookkeeping only: no engine contact, and the binding stays invisible
+        if the role's engine has changed (stale bindings can never leak).
+        """
+        binding = config.external_session_binding()
+        if binding is None:
+            return
+        sessions = self.controller.sessions
+        if sessions.current_session_id(role) is None:
+            sessions.restore_session(role, binding.external_session_id)
+            self.events.info(
+                f"{role.value}: using bound external session "
+                f"{binding.external_session_id} (driver '{engine}').",
+                source="executor",
+            )
 
     def _stored_verdict(self, task: TaskStateRecord) -> AuditVerdictResult | None:
         """Reconstruct the last strict verdict from its persisted JSON."""
@@ -2617,25 +2646,26 @@ class Executor:
                 f"Driver '{engine}' is a placeholder (implemented=False) and refuses real "
                 "work. Configure an implemented engine for this role."
             )
-        if not config.project_profile.strip():
+        if capabilities.requires_profile and not config.project_profile.strip():
             return (
                 f"Driver '{engine}' needs a Hermes profile for {role.value}; "
                 "the field is empty."
             )
 
-        discovery = self._safe_discovery()
-        if discovery is not None and discovery.ok and config.project_profile not in discovery.profiles:
-            available = ", ".join(discovery.profiles) or "(none found)"
-            return (
-                f"Hermes profile '{config.project_profile}' was not found by "
-                f"{discovery.method} discovery. Available profiles: {available}."
-            )
-        if discovery is not None and not discovery.ok:
-            self.events.warning(
-                "Hermes profile discovery failed "
-                f"({discovery.error}); the profile name will be validated by the CLI itself.",
-                source="executor",
-            )
+        if capabilities.requires_profile:
+            discovery = self._safe_discovery()
+            if discovery is not None and discovery.ok and config.project_profile not in discovery.profiles:
+                available = ", ".join(discovery.profiles) or "(none found)"
+                return (
+                    f"Hermes profile '{config.project_profile}' was not found by "
+                    f"{discovery.method} discovery. Available profiles: {available}."
+                )
+            if discovery is not None and not discovery.ok:
+                self.events.warning(
+                    "Hermes profile discovery failed "
+                    f"({discovery.error}); the profile name will be validated by the CLI itself.",
+                    source="executor",
+                )
         return None
 
     def _safe_discovery(self) -> ProfileDiscoveryResult | None:

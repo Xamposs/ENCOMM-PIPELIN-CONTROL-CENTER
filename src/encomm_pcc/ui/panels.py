@@ -120,9 +120,19 @@ class WorkspacePanel(QGroupBox):
 
 
 class RolePanel(QGroupBox):
-    """One role's configuration block (ORCHESTRATOR / FINAL AUDITOR / TASK AUDITOR / BUILDER)."""
+    """One role's configuration block (ORCHESTRATOR / FINAL AUDITOR / TASK AUDITOR / BUILDER).
+
+    Session 006: roles whose engine supports session discovery show a real
+    existing-session selector.  The panel never talks to an engine and never
+    mutates the controller directly — selection/refresh emit signals that the
+    window resolves through the controller (zero model calls either way).
+    """
 
     changed = Signal(object, dict)
+    #: (role, external_session_id or "" for NEW) — window binds/clears.
+    session_selected = Signal(object, str)
+    #: (role,) — window runs driver discovery and calls update_session_options.
+    sessions_refresh_requested = Signal(object)
 
     def __init__(
         self,
@@ -179,6 +189,9 @@ class RolePanel(QGroupBox):
         # -- session ----------------------------------------------------------
         self.session_combo: QComboBox | None = None
         self.new_session_button: QPushButton | None = None
+        self.refresh_sessions_button: QPushButton | None = None
+        self.session_note_label: QLabel | None = None
+        self._session_descriptors: list = []
         if "session" in self._fields:
             self.session_combo = QComboBox()
             self.session_combo.setEditable(False)
@@ -186,14 +199,33 @@ class RolePanel(QGroupBox):
             row_layout = QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.addWidget(self.session_combo, 1)
-            if role is AgentRole.ORCHESTRATOR:
+            if role in (AgentRole.ORCHESTRATOR, AgentRole.FINAL_AUDITOR):
+                # NEW SESSION is real behaviour (Session 006): clear the bound
+                # session so the next actual execution creates a new one.  No
+                # engine contact, no model call.
                 self.new_session_button = QPushButton("New Session")
                 self.new_session_button.setToolTip(
-                    "Placeholder: records the request only. No engine session is started in v0.1."
+                    "Clears the selected/reusable session for this role. The "
+                    "next real execution creates a NEW engine session. No "
+                    "model call is made now."
                 )
                 self.new_session_button.clicked.connect(self._on_new_session_clicked)
                 row_layout.addWidget(self.new_session_button)
+                self.refresh_sessions_button = QPushButton("Refresh Sessions")
+                self.refresh_sessions_button.setToolTip(
+                    "List the sessions that already exist for this engine "
+                    "(read-only discovery — no model call)."
+                )
+                self.refresh_sessions_button.clicked.connect(
+                    self._on_refresh_sessions_clicked
+                )
+                row_layout.addWidget(self.refresh_sessions_button)
             form.addRow("Session", row)
+
+            self.session_note_label = QLabel("")
+            self.session_note_label.setWordWrap(True)
+            self.session_note_label.setStyleSheet("color: palette(mid);")
+            form.addRow("", self.session_note_label)
 
         # -- same as orchestrator ------------------------------------------------
         self.same_as_check: QCheckBox | None = None
@@ -226,18 +258,95 @@ class RolePanel(QGroupBox):
             self.model_edit.editingFinished.connect(self._emit_changed)
         if self.same_as_check is not None:
             self.same_as_check.toggled.connect(self._emit_changed)
+        if self.session_combo is not None:
+            # ``activated`` fires on USER selection only — programmatic
+            # rebuilds never loop back into binding/clearing.
+            self.session_combo.activated.connect(self._on_session_activated)
 
     def _on_new_session_clicked(self) -> None:
-        self._controller.events.info(
-            f"New Session requested for {self.role.value} — placeholder only; "
-            "no engine session is started in the v0.1 foundation.",
-            source="ui",
-        )
+        """NEW SESSION: clear the binding; the next real run creates a session."""
+        self.session_selected.emit(self.role, "")
+
+    def _on_refresh_sessions_clicked(self) -> None:
+        self.sessions_refresh_requested.emit(self.role)
+
+    def _on_session_activated(self, index: int) -> None:
+        if self.session_combo is None:
+            return
+        data = self.session_combo.itemData(index)
+        session_id = str(data or "")
+        # "" selects NEW SESSION; a full external id selects that session.
+        self.session_selected.emit(self.role, session_id)
+
+    # -- session options (Session 006) --------------------------------------
+    def _engine_supports_discovery(self) -> bool:
+        engine = self.engine_combo.currentData() or ""
+        if not engine or not self._registry.is_registered(engine):
+            return False
+        caps = self._registry.capabilities(engine)
+        if not caps.implemented:
+            return False
+        return hasattr(self._registry.get_class(engine), "discover_sessions")
+
+    def update_session_options(self, result, descriptors) -> None:
+        """Render a discovery result (window-provided; the panel never probes)."""
+        self._session_descriptors = list(descriptors or [])
+        if self.session_note_label is not None:
+            if result is None:
+                self.session_note_label.setText("")
+            elif not result.ok:
+                self.session_note_label.setText(
+                    f"Session discovery failed: {result.error or 'unknown error'}"
+                )
+            else:
+                note = (
+                    f"{len(result.sessions)} session(s) found via "
+                    f"{result.mechanism or 'discovery'}"
+                )
+                if result.error:
+                    note += f" — {result.error}"
+                self.session_note_label.setText(note)
+        self._rebuild_session_combo()
+
+    def _rebuild_session_combo(self) -> None:
+        if self.session_combo is None:
+            return
+        config = self._controller.role_config(self.role)
+        binding = config.external_session_binding()
+        self.session_combo.blockSignals(True)
+        try:
+            self.session_combo.clear()
+            self.session_combo.addItem("New session (next run creates one)", "")
+            if binding is not None:
+                import os
+
+                parts = [binding.title or "Bound session"]
+                if binding.workspace_path:
+                    parts.append(os.path.basename(binding.workspace_path))
+                head = " | ".join(p for p in parts if p)
+                label = f"[bound] {head}  ({binding.external_session_id})"
+                if len(label) > 90:
+                    label = label[:89] + "…"
+                self.session_combo.addItem(label, binding.external_session_id)
+            for descriptor in self._session_descriptors:
+                if binding is not None and descriptor.session_id == binding.external_session_id:
+                    continue  # already shown as the bound row
+                label = descriptor.label(90)
+                self.session_combo.addItem(label, descriptor.session_id)
+        finally:
+            self.session_combo.blockSignals(False)
+        if binding is not None:
+            index = self.session_combo.findData(binding.external_session_id)
+            self.session_combo.setCurrentIndex(index if index >= 0 else 0)
+        else:
+            self.session_combo.setCurrentIndex(0)
 
     def _emit_changed(self, *_args: Any) -> None:
         if self._loading:
             return
         self.changed.emit(self.role, self.values())
+        self._rebuild_session_combo()
+        self._update_session_enablement()
         self._update_capability_hint()
 
     # -- data -------------------------------------------------------------
@@ -281,14 +390,35 @@ class RolePanel(QGroupBox):
             description = ROLE_SESSION_POLICY_DESCRIPTION[self.role]
             self.policy_label.setText(f"{description}  ({config.session_policy.value})")
 
-        if self.session_combo is not None:
-            self.session_combo.clear()
-            session_id = self._controller.sessions.current_session_id(self.role)
-            self.session_combo.addItem(session_id or "(none)", session_id or "")
-            if self.same_as_check is not None and self.same_as_check.isChecked():
-                self.session_combo.setEnabled(False)
-            else:
-                self.session_combo.setEnabled(True)
+        self._rebuild_session_combo()
+        self._update_session_enablement()
+        self._update_capability_hint()
+
+    def _update_session_enablement(self) -> None:
+        """Discovery-capable engines get a live selector; others show why not."""
+        if self.session_combo is None:
+            return
+        engine = self.engine_combo.currentData() or ""
+        same_as = self.same_as_check is not None and self.same_as_check.isChecked()
+        if same_as:
+            # FINAL_AUDITOR inheriting: its own session field is not editable.
+            self.session_combo.setEnabled(False)
+            if self.new_session_button is not None:
+                self.new_session_button.setEnabled(False)
+            if self.refresh_sessions_button is not None:
+                self.refresh_sessions_button.setEnabled(False)
+            return
+        discovery = self._engine_supports_discovery() if engine else False
+        self.session_combo.setEnabled(True)
+        if self.new_session_button is not None:
+            self.new_session_button.setEnabled(True)
+        if self.refresh_sessions_button is not None:
+            self.refresh_sessions_button.setEnabled(discovery)
+            if engine and not discovery:
+                self.refresh_sessions_button.setToolTip(
+                    "This engine does not support session discovery (or is not "
+                    "implemented yet)."
+                )
 
     def _update_capability_hint(self) -> None:
         engine = self.engine_combo.currentData() or ""
@@ -299,16 +429,16 @@ class RolePanel(QGroupBox):
         state = "placeholder — not implemented" if not caps.implemented else "implemented"
         binary = "binary found on PATH" if self._registry.get_class(engine).probe_availability() else "binary not found on PATH"
         sessions = "sessions supported" if caps.supports_sessions else "stateless engine"
-        self.capability_label.setText(f"{state}; {sessions}; {binary}.")
+        discovery = (
+            "; existing-session discovery available"
+            if self._engine_supports_discovery()
+            else ""
+        )
+        self.capability_label.setText(f"{state}; {sessions}; {binary}{discovery}.")
 
     def refresh_session_field(self) -> None:
-        if self.session_combo is None:
-            return
-        session_id = self._controller.sessions.current_session_id(self.role)
-        self.session_combo.clear()
-        self.session_combo.addItem(session_id or "(none)", session_id or "")
-        if self.same_as_check is not None:
-            self.session_combo.setEnabled(not self.same_as_check.isChecked())
+        self._rebuild_session_combo()
+        self._update_session_enablement()
 
 
 class BatchPanel(QGroupBox):

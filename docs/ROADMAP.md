@@ -224,8 +224,12 @@ Exit criteria met:
 
 Order (each is one class + one registry entry):
 
-1. `CodexDriver` — **next session (006)**: the expensive
-   Orchestrator/FINAL_AUDITOR roles become switchable to Codex from the UI.
+1. `CodexDriver` — ✅ DONE (Session 006): the expensive
+   Orchestrator/FINAL_AUDITOR roles are switchable to Codex from the UI.
+   Includes the generic session-discovery abstraction, the durable
+   external-session binding (engine-switch-safe) and the real session
+   selector (ADR D-034…D-038). Live-proven: new session + resume through the
+   generic FINAL_AUDITOR path with exactly 2 model operations.
 2. `ClaudeCodeDriver`
 3. `OpenCodeDriver`
 4. `OllamaDriver` (local models)
@@ -234,7 +238,9 @@ Order (each is one class + one registry entry):
 
 Exit criteria: adding each engine changes no role, UI or executor code — only
 the driver module and `IMPLEMENTED_DRIVERS`. Any required change elsewhere is a
-design bug to fix, not a workaround to accept.
+design bug to fix, not a workaround to accept. Session 006's only generic
+change was capability-driven (`requires_profile` on `DriverCapabilities`),
+which future engines inherit for free.
 
 ---
 

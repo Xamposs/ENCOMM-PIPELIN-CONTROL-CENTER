@@ -31,7 +31,7 @@ explicitly.
 
 ## 1. Version
 
-`0.5.0` — one-call Final Audit + next-batch handoff. Session 005.
+`0.6.0` — real Codex driver + generic session discovery/selector. Session 006.
 
 ---
 
@@ -43,7 +43,7 @@ explicitly.
 | Main window sections | **Works** | WORKSPACE, ROLES (4 role panels), BATCH, TASK, LOG PANEL |
 | Role-based architecture (4 independent roles) | **Works** | `AgentRole`, `AgentRoleConfig`, one `RolePanel` per role |
 | Engine abstraction (no engine hardcoding) | **Works** | `BaseDriver` ABC + `DriverRegistry`; engines are config values |
-| SQLite persistence | **Works** | Schema **v3**, 7 tables, on-disk DB created and written on launch |
+| SQLite persistence | **Works** | Schema **v5**, 9 tables, on-disk DB created and written on launch |
 | Session policy engine | **Works** | `decide_session_action()`; all four brief-mandated rules enforced |
 | Pipeline phase state machine | **Works** | Declarative graph + validator; illegal edges rejected |
 | **Deterministic executor** | **Works** | `core/executor.py`: read-only gate + preflight, one task, `IDLE → PLANNING_BATCH → RUNNING_TASK → AUDITING_TASK` |
@@ -57,7 +57,7 @@ explicitly.
 | **UI shows the loop** | **Works** | Next action (AUDIT/FIX/RE-AUDIT/COMPLETE/BLOCKED), verdict, audit round, session readouts, Run-Auditor / Run-fix buttons |
 | Failure propagation | **Works** | Non-zero exit → task `FAILED`, pipeline `FAILED`, error persisted |
 | UI dispatch off the UI thread | **Works** | `ExecutorWorker` on a `QThread`; audit/fix run through the same worker |
-| Automated tests | **Works** | 334 passed, 0 failed (280 at Session 003, 18 files) |
+| Automated tests | **Works** | 367 passed, 0 failed at the Session 005 baseline (280 at Session 003; 334 at Session 004) |
 | **Real ORCHESTRATOR planning** | **Works — Session 004** | `plan_batch()` through role config → driver registry → `SessionManager`; one planning call per batch; strict plan parser fails closed; exact task count honoured |
 | **Orchestrator read-only guard** | **Works** | `core/repo_fingerprint.py`: HEAD + porcelain-status fingerprint before/after planning; a planning call that modified the worktree BLOCKS the plan (violation surfaced, never discarded) |
 | **Multi-task autonomous runner** | **Works** | `core/batch_runner.py`: PLAN → per-task BUILD → AUDIT → fix loop → next task → READY_FOR_FINAL_AUDIT; boundary-safe pause/resume/stop; idempotent resume from SQLite |
@@ -70,8 +70,9 @@ explicitly.
 | **BATCH_COMPLETE reachable** | **Works — Session 005** | `READY_FOR_FINAL_AUDIT → FINAL_AUDIT_RUNNING → BATCH_COMPLETE` on a strictly parsed PASS; verdict/findings/summary/auditor session/structured JSON persisted (schema v5) |
 | **Next-batch handoff** | **Works** | PASS persists the plan in `pending_next_plans`; START NEXT BATCH materialises it deterministically (new batch generation, PENDING tasks, criteria/focus) with **zero AI calls**; plan consumed exactly once; nothing auto-starts |
 | **Restart-safe handoff** | **Works** | READY_FOR_FINAL_AUDIT, FINAL_AUDIT_RUNNING (recovery requires a real re-run), completed audit and the pending next plan all survive restart; UI re-enables buttons from persisted state |
-| `CodexDriver`, `GenericCliDriver` | **Placeholder** | Still raise `DriverNotImplementedError`; `implemented=False` |
-| Real Codex adapter / engine switching UI | **Not implemented** | Deliberate — Session 006 |
+| `CodexDriver` — real adapter | **Works — Session 006** | `codex exec --json -s <sandbox> -C <ws> -` with the prompt on stdin; live-proven new session (`01a0cb24…`, marker, exit 0) and resume through the generic FINAL_AUDITOR path (strict PASS + 4-task next plan, same thread id) |
+| Generic session discovery + selector | **Works — Session 006** | driver-neutral `SessionDiscoverer`; read-only Codex rollout discovery (dedupe, newest-first, workspace-match); RolePanel selector binds existing sessions with zero model calls; NEW SESSION clears the binding |
+| Real Codex adapter / engine switching UI | **Works — Session 006** | Codex is selectable for ORCHESTRATOR/FINAL_AUDITOR from the UI (configuration only); `GenericCliDriver` remains the standing placeholder |
 
 ### Verified at the end of Session 003
 
@@ -131,9 +132,11 @@ ENCOMM PIPELINE CONTROL CENTER/
 ├── scripts/
 │   ├── session_002_smoke.py    Real Hermes executor smoke (Session 002)
 │   ├── session_003_audit_fix_smoke.py  Real audit/fix loop smoke (Session 003)
-│   └── session_004_multitask_smoke.py  Real orchestrated batch smoke (Session 004; --fake offline mode)
+│   ├── session_004_multitask_smoke.py  Real orchestrated batch smoke (Session 004; --fake offline mode)
+│   ├── session_005_final_audit_smoke.py  Real one-call final-audit smoke (Session 005; --fake offline mode)
+│   └── session_006_codex_smoke.py  Real Codex new-session + resume/final-audit smoke (Session 006)
 ├── src/encomm_pcc/
-│   ├── __init__.py             __version__ = "0.5.0"
+│   ├── __init__.py             __version__ = "0.6.0"
 │   ├── app.py                  run(), build_controller(), attach_default_executor(),
 │   │                           restore_state(), discover_hermes_profiles()
 │   ├── domain/
@@ -298,19 +301,19 @@ touch them:
 
 ## 7. Exact next recommended phase
 
-**Session 006 — the real Codex adapter + engine switching (Phase 5).**
+**Session 007 — the next engine or operational hardening (Phase 5/6).**
 
-1. Implement a real `CodexDriver` (evidence-gated capabilities, same
-   `BaseDriver` contract) and register it; the Orchestrator and
-   FINAL_AUDITOR roles can then be switched to Codex **from the UI** —
-   configuration only, no role/executor changes.
-2. Keep Hermes as the Builder/Task Auditor workhorse; prove role/engine
-   separation live by running the Final Auditor through Codex against a
-   scratch batch.
-3. `GenericCliDriver` gains its configurable argv (the last Phase 5 item)
-   or Claude/OpenCode follow; operational hardening (Phase 6) after that.
+Session 006 delivered the real Codex adapter, the generic session-discovery
+abstraction, the binding model and the UI selector. Reasonable next steps,
+in the order the architecture prefers:
 
-**Do not start** Session 006 until this session's final-audit path has been
-independently reviewed. Automatic batch chaining, packaging, and the
-Claude/OpenCode/Ollama/Kimi adapters beyond Codex remain strictly out of
-scope. See `ROADMAP.md`.
+1. `GenericCliDriver` gains its configurable argv (the last Phase 5 item) or
+   `ClaudeCodeDriver` reuses the Session 006 discovery/binding infrastructure.
+2. Operational hardening (Phase 6): packaging, `app_events` retention,
+   config export/import.
+3. A UI pass surfacing the executor's final-audit report details (token
+   usage from the Codex `turn.completed` usage payload is already parsed
+   and carried in metadata).
+
+**Do not start** automatic batch chaining, cloud backends, or parallel
+batches — they remain strictly out of scope. See `ROADMAP.md`.

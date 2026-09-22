@@ -68,6 +68,10 @@ class DriverCapabilities:
     supports_cancellation: bool = False
     #: Engine exposes a selectable model.
     supports_model_selection: bool = True
+    #: Engine requires a Hermes-style profile for dispatch (Session 006).
+    #: Engines that don't (e.g. Codex, which uses a workspace + model) are
+    #: exempt from the profile preflight and from Hermes profile discovery.
+    requires_profile: bool = True
     #: False while the adapter is a v0.1 placeholder.
     implemented: bool = False
     notes: str = ""

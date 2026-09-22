@@ -43,6 +43,7 @@ from .final_audit import (
 from .models import (
     AgentRoleConfig,
     BatchState,
+    ExternalSessionBinding,
     PipelineState,
     TaskStateRecord,
     WorkspaceConfig,
@@ -70,6 +71,7 @@ __all__ = [
     "BatchState",
     "BatchStatus",
     "EventLevel",
+    "ExternalSessionBinding",
     "FINAL_VERDICTS",
     "FinalAuditPacket",
     "FinalAuditResult",

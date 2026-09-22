@@ -872,3 +872,140 @@ fix, no automatic re-audit.
 
 **Consequence.** Failure can never become COMPLETE; every non-green
 final-audit outcome is loud, durable and human-actionable.
+
+---
+
+## D-034 — The Codex CLI contract is a pure module; stdin prompts; least privilege
+
+**Date:** Session 006
+**Status:** Accepted
+
+**Context.** Session 006 had to make a real Codex adapter without inventing
+syntax. The installed build (`codex-cli 0.154.0`) was inspected first
+(`--help` surfaces for `exec`, `exec resume`, `resume`), and one live usage
+error was converted into contract knowledge (see D-035's evidence rule).
+
+**Decision.** `drivers/codex_cli.py` holds the entire verified contract as
+pure data/functions: `codex exec --json -s <sandbox> -C <ws> [-m <model>] -`
+for a fresh prompt and `codex exec resume <SESSION_ID> --json [-m <model>] -`
+for a resume — **the prompt always travels on stdin** (the trailing `-`), so
+Windows argv length limits and shell quoting are unreachable. Only
+`read-only` (default) and `workspace-write` sandboxes are constructible;
+`danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`,
+`--dangerously-bypass-hook-trust`, `--ephemeral` and `--ignore-user-config`
+are refused by construction. The child receives the same filtered
+environment discipline as Hermes (D-015), extended by `CODEX_HOME` and
+`ENCOMM_PCC_*` drops so a supervisor override can never redirect the child's
+state or data directories.
+
+**Consequence.** Argument construction and JSONL parsing are unit-testable
+with no network and no engine. The bypass surface is unreachable from role
+configuration. `codex resume` (interactive TUI) and `--last` are never used.
+
+---
+
+## D-035 — Codex resume takes no `-s`/`-C`; the installed CLI is the only authority
+
+**Date:** Session 006
+**Status:** Accepted
+
+**Context.** The first live resume attempt (2026-09-23) exited 2 in 0.2 s:
+the CLI rejected `-s` with `unexpected argument '-s' found` — before any
+model work. The preserved raw stderr identified the cause: `exec resume`
+does not accept sandbox/cwd overrides; a resumed thread **inherits** the
+original session's sandbox and working root.
+
+**Decision.** `build_exec_resume_argv` constructs only flags the installed
+`exec resume` help actually lists (`--json`, `-m`, `--skip-git-repo-check`,
+config overrides). The help text captured at discovery time was treated as
+provisional; the live exit-2 evidence is what fixed the contract, exactly per
+the evidence-retry discipline: preserve the scratch state, fix local code
+from the raw evidence, re-run only the failed operation.
+
+**Consequence.** The retried resume ran the Session 005 final-audit pipeline
+through Codex (exit 0, 137 s, same thread id re-reported). The parser also
+gained the live protocol shapes (`thread.started` / `item.completed` /
+`turn.completed` top-level records) as pinned regression tests.
+
+---
+
+## D-036 — Read-only Codex session discovery behind a driver-neutral interface
+
+**Date:** Session 006
+**Status:** Accepted
+
+**Context.** The installed CLI has no machine-readable session-list
+subcommand (`codex exec --help`: resume/fork/review only). The UI needed a
+real existing-session selector without Codex filesystem knowledge leaking
+into widgets.
+
+**Decision.** A generic contract (`drivers/session_discovery.py`:
+`ExternalSessionDescriptor`, `SessionDiscoveryResult`, `SessionDiscoverer`
+protocol) plus a Codex-specific implementation
+(`drivers/codex_discovery.py`) that READ-ONLY scans
+`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-*.jsonl` first-line
+`session_meta` records (real id + cwd), titles from
+`session_index.jsonl` when present, never inventing labels. Missing,
+malformed, locked and schema-drifted state fail soft (skipped + message);
+results are deduplicated (one session owns several rollout files), bounded,
+newest-first, and workspace-matched first (case-insensitive). No credential
+material is ever read; nothing is ever written.
+
+**Consequence.** Future drivers (Claude/OpenCode/…) implement the same
+protocol without new UI code. Discovery makes zero model calls, verified by
+tests where any launch would raise.
+
+---
+
+## D-037 — External-session binding is durable config state, invalidated by engine switch
+
+**Date:** Session 006
+**Status:** Accepted
+
+**Context.** A session selected in the UI must survive a restart, must never
+be reused after switching the role's engine, and binding must never contact
+the engine.
+
+**Decision.** `ExternalSessionBinding` (driver id + full external id + title
++ workspace + timestamp) lives in `AgentRoleConfig.extra` — it round-trips
+through the existing `role_configs.extra_json` with **no schema change**.
+`config.external_session_binding()` returns `None` when the binding's driver
+does not match the currently configured engine, so a codex-bound session can
+never leak into a hermes-configured role (and re-selecting the original
+engine restores it). The executor's `_seed_binding_session()` re-seeds the
+binding into `SessionManager` before every session decision, making the
+REUSE decision resume the bound real id — after a restart too. Binding is
+pure bookkeeping; durable pipeline truth remains SQLite + repository state.
+
+**Consequence.** NEW SESSION (`clear_external_session`) deletes the binding
+and the next real execution creates a fresh engine session. Engine switching
+needs no extra code — the driver-mismatch rule already isolates stale
+bindings.
+
+---
+
+## D-038 — The selector is a capability-driven UI surface; `requires_profile` joins the capability contract
+
+**Date:** Session 006
+**Status:** Accepted
+
+**Context.** The executor preflight required a Hermes profile for every
+role, and the session combo showed only the role's live session id. Codex is
+configured with a workspace + model, not a Hermes profile — and the brief
+forbids engine-specific branches in role/preflight logic.
+
+**Decision.** `DriverCapabilities.requires_profile` (default `True`) gates
+both the profile-required check and Hermes profile discovery in
+`_preflight`; Codex declares `requires_profile=False`. The `RolePanel`
+session field becomes a real selector for roles whose engine implements
+`discover_sessions` and is implemented: "New session (next run creates one)"
++ discovered rows (full id as item data, bounded display label), REFRESH
+SESSIONS (read-only discovery, zero model calls), and NEW SESSION (clears
+the binding). Panels emit signals; the window resolves them through the
+controller — panels never touch drivers. FINAL_AUDITOR keeps
+`Same as Orchestrator` semantics unchanged (it resolves the engine — and
+therefore the whole session surface — from the Orchestrator).
+
+**Consequence.** Switching an expensive role between Hermes and Codex stays
+configuration-only; the selector appears or disables itself from
+capabilities alone, with no Codex names in role/executor code.

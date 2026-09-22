@@ -136,6 +136,9 @@ class MainWindow(QMainWindow):
         self.task_panel.dispatch_requested.connect(self._on_dispatch_requested)
         self.task_panel.audit_requested.connect(self._on_audit_requested)
         self.task_panel.fix_requested.connect(self._on_fix_requested)
+        for panel in self.role_panels.values():
+            panel.session_selected.connect(self._on_session_selected)
+            panel.sessions_refresh_requested.connect(self._on_sessions_refresh)
 
     def _subscribe_to_events(self) -> None:
         self.controller.events.subscribe(self._on_event)
@@ -197,6 +200,84 @@ class MainWindow(QMainWindow):
         if role is AgentRole.ORCHESTRATOR:
             self.role_panels[AgentRole.FINAL_AUDITOR].refresh_session_field()
         self.task_panel.refresh()
+
+    # -- external session selector (Session 006) ---------------------------
+    def _on_sessions_refresh(self, role: AgentRole) -> None:
+        """Run driver discovery for ``role``'s engine and render the options.
+
+        Read-only and offline: discovery never contacts the engine's model and
+        never launches a process.
+        """
+        panel = self.role_panels[role]
+        engine = self.controller.state.resolved_engine_for(role)
+        driver = None
+        if engine and self.controller.registry.is_registered(engine):
+            driver = self.controller.registry.create(engine)
+        discoverer = getattr(driver, "discover_sessions", None) if driver else None
+        if not callable(discoverer):
+            panel.update_session_options(None, [])
+            self.controller.events.warning(
+                f"{role.value}: engine '{engine or '(none)'}' does not support "
+                "session discovery.",
+                source="ui",
+            )
+            return
+        workspace = self.controller.state.workspace.repo_path or None
+        try:
+            result = discoverer(workspace_path=workspace)
+        except Exception as exc:  # noqa: BLE001 - discovery must never break the UI
+            self.controller.events.error(
+                f"{role.value}: session discovery failed: {exc}", source="ui"
+            )
+            panel.update_session_options(None, [])
+            return
+        panel.update_session_options(result, result.sessions)
+        self.controller.events.info(
+            f"{role.value}: session discovery via {result.mechanism or engine} "
+            f"found {len(result.sessions)} session(s).",
+            source="ui",
+        )
+
+    def _on_session_selected(self, role: AgentRole, external_session_id: str) -> None:
+        """Bind a discovered session — or clear the binding (NEW).  Zero AI calls."""
+        panel = self.role_panels[role]
+        session_id = str(external_session_id or "").strip()
+        if not session_id:
+            self.controller.clear_external_session(role)
+            panel._rebuild_session_combo()  # noqa: SLF001 - render the cleared binding
+            self.statusBar().showMessage(
+                f"{role.value}: New session — the next real execution creates one."
+            )
+            return
+        engine = self.controller.state.resolved_engine_for(role)
+        if not engine or not self.controller.registry.is_registered(engine):
+            self.controller.events.error(
+                f"{role.value}: cannot bind a session without a configured engine.",
+                source="ui",
+            )
+            return
+        descriptor = next(
+            (
+                d
+                for d in panel._session_descriptors  # noqa: SLF001 - window-owned state
+                if d.session_id == session_id
+            ),
+            None,
+        )
+        self.controller.bind_external_session(
+            role,
+            engine,
+            session_id,
+            title=descriptor.title if descriptor else None,
+            workspace_path=(
+                descriptor.workspace_path if descriptor
+                else self.controller.state.workspace.repo_path or None
+            ),
+        )
+        panel._rebuild_session_combo()  # noqa: SLF001
+        self.statusBar().showMessage(
+            f"{role.value}: external session {session_id} bound to '{engine}'."
+        )
 
     def _on_start(self, size: int) -> None:
         result = self.controller.request_start(size)

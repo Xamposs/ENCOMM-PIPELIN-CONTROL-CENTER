@@ -43,11 +43,15 @@ def test_registry_contains_the_three_v01_adapters(registry: DriverRegistry) -> N
 def test_only_unimplemented_drivers_are_marked_unimplemented(registry: DriverRegistry) -> None:
     """`implemented` is a claim about real capability, not a snapshot.
 
-    Codex and GenericCli remain deliberate placeholders.  Hermes is the first
-    real adapter and reports its own verification state (see test_hermes_driver).
+    GenericCli remains a deliberate placeholder.  Hermes and Codex gate their
+    flags on live evidence (D-018): the flags mirror the drivers' own
+    verification markers, so they can only be True after a real run.
     """
-    assert registry.capabilities("codex").implemented is False
     assert registry.capabilities("generic_cli").implemented is False
+    from encomm_pcc.drivers.codex import _LIVE_RESUME_VERIFIED, _LIVE_SMOKE_VERIFIED
+
+    assert registry.capabilities("codex").implemented == _LIVE_SMOKE_VERIFIED
+    assert registry.capabilities("codex").supports_resume == _LIVE_RESUME_VERIFIED
     assert isinstance(registry.capabilities("hermes").implemented, bool)
 
 
@@ -113,12 +117,9 @@ def test_registry_rejects_a_driver_without_an_id() -> None:
         DriverRegistry().register(Nameless)
 
 
-@pytest.mark.parametrize("driver_id", ["codex", "generic_cli"])
-def test_placeholders_refuse_every_real_operation(
-    registry: DriverRegistry, driver_id: str
-) -> None:
-    """Placeholders still refuse real work — only Hermes is real now."""
-    driver = registry.create(driver_id)
+def test_placeholder_refuses_every_real_operation(registry: DriverRegistry) -> None:
+    """GenericCli still refuses real work — Codex joined Hermes as real (006)."""
+    driver = registry.create("generic_cli")
     request = SessionRequest(
         role=AgentRole.BUILDER, project_profile="p", session_policy=SessionPolicy.ALWAYS_NEW
     )

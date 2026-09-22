@@ -98,6 +98,50 @@ class WorkspaceConfig:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ExternalSessionBinding:
+    """A real external session bound to a role (Session 006).
+
+    ``external_session_id`` is the engine's own full id, verbatim — never
+    shortened, never invented.  ``driver_id`` records which engine the session
+    belongs to so switching engines can invalidate the binding safely (a
+    session recorded under one driver must never be reused under another).
+    The binding is durable state carried in ``AgentRoleConfig.extra`` (it
+    round-trips through ``role_configs.extra_json`` with no schema change).
+    """
+
+    driver_id: str
+    external_session_id: str
+    title: str | None = None
+    workspace_path: str | None = None
+    bound_at: str = field(default_factory=utc_now)
+
+    def __post_init__(self) -> None:
+        if not str(self.driver_id or "").strip():
+            raise ValueError("ExternalSessionBinding requires a driver_id")
+        if not str(self.external_session_id or "").strip():
+            raise ValueError("ExternalSessionBinding requires an external_session_id")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "driver_id": self.driver_id,
+            "external_session_id": self.external_session_id,
+            "title": self.title,
+            "workspace_path": self.workspace_path,
+            "bound_at": self.bound_at,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "ExternalSessionBinding":
+        return cls(
+            driver_id=str(data.get("driver_id") or ""),
+            external_session_id=str(data.get("external_session_id") or ""),
+            title=(str(data["title"]) if data.get("title") else None),
+            workspace_path=(str(data["workspace_path"]) if data.get("workspace_path") else None),
+            bound_at=str(data.get("bound_at") or utc_now()),
+        )
+
+
 @dataclass(slots=True)
 class AgentRoleConfig:
     """Configuration for exactly one role.
@@ -127,6 +171,45 @@ class AgentRoleConfig:
     def is_placeholder(self) -> bool:
         """True when the role still carries only default placeholder values."""
         return not (self.engine and self.project_profile)
+
+    # -- external session binding (Session 006) -----------------------------
+    def set_external_session_binding(self, binding: "ExternalSessionBinding | None") -> None:
+        """Bind/unbind a discovered external session (durable via ``extra``)."""
+        extra = dict(self.extra or {})
+        if binding is None:
+            extra.pop("external_session_binding", None)
+        else:
+            if not isinstance(binding, ExternalSessionBinding):
+                raise TypeError("binding must be an ExternalSessionBinding or None")
+            extra["external_session_binding"] = binding.to_dict()
+        self.extra = extra
+
+    def external_session_binding(self) -> "ExternalSessionBinding | None":
+        """The binding for the CURRENTLY configured engine, or ``None``.
+
+        A binding recorded under another driver is invisible here (stale) —
+        it survives in ``extra`` only until the operator selects a different
+        session or clears it; it can never be silently reused across engines.
+        """
+        data = (self.extra or {}).get("external_session_binding")
+        if not isinstance(data, dict) or not data:
+            return None
+        try:
+            binding = ExternalSessionBinding.from_dict(data)
+        except (ValueError, TypeError):
+            return None
+        if binding.driver_id != self.engine:
+            return None
+        return binding
+
+    def clear_stale_external_session_binding(self) -> bool:
+        """Drop the stored binding entirely (returns True when something went)."""
+        if "external_session_binding" not in (self.extra or {}):
+            return False
+        extra = dict(self.extra)
+        extra.pop("external_session_binding")
+        self.extra = extra
+        return True
 
     def to_dict(self) -> dict[str, Any]:
         return {
