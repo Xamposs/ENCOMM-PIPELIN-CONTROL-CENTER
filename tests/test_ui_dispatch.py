@@ -219,6 +219,41 @@ def test_start_then_dispatch_then_stop_is_coherent(qapp, window) -> None:  # noq
     assert not win.task_panel.dispatch_button.isEnabled() or True
 
 
+def test_task_panel_shows_the_audit_loop_readouts(qapp, window) -> None:  # noqa: ANN001
+    """Session 003 UI: next action, auditor/fix buttons and session readouts."""
+    win, controller, executor = window
+
+    # seeded task ready for its initial audit
+    executor.prepare_task_for_audit(TaskSpec(title="audit me", prompt="p"))
+    win.task_panel.refresh()
+    qapp.processEvents()
+
+    assert "AUDIT" in win.task_panel.next_action_label.text()
+    assert win.task_panel.audit_button.isEnabled() is True
+    assert win.task_panel.fix_button.isEnabled() is False
+    assert "audit rounds 0/3" in win.task_panel.task_state_label.text()
+    assert "auditor session:" in win.task_panel.audit_info_label.text()
+
+    # a NEEDS_FIX verdict moves the next action to FIX (new Builder session)
+    task = controller.state.batch.tasks[0]
+    task.state = TaskState.FIX_REQUIRED
+    task.latest_verdict = "NEEDS_FIX"
+    task.audit_rounds = 1
+    task.fix_prompt = "change add() to return a + b"
+    task.auditor_session_id = "auditor_live_sess"
+    controller.machine.transition_to(PipelinePhase.FIX_REQUIRED)
+    controller.state.phase = controller.machine.phase
+    win.task_panel.refresh()
+    qapp.processEvents()
+
+    assert "FIX" in win.task_panel.next_action_label.text()
+    assert win.task_panel.fix_button.isEnabled() is True
+    assert win.task_panel.audit_button.isEnabled() is False
+    assert "auditor_live_sess" in win.task_panel.audit_info_label.text()
+    assert "audit rounds 1/3" in win.task_panel.task_state_label.text()
+    assert "NEW Builder session" in win.task_panel.fix_button.text()
+
+
 def test_worker_reports_an_executor_exception_instead_of_losing_it(qapp, prepared_controller, registry) -> None:  # noqa: ANN001
     FakeDriver.scripted = [ok_result()]
 

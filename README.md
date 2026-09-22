@@ -5,14 +5,17 @@ orchestrator agents, builders, task auditors and final auditors, with
 configurable session policies, multi-task batches, automatic audit/fix loops
 and final batch audits.
 
-**Current version: 0.2.0 — real executor path.** The architecture, the desktop
-shell and the **first real engine integration** exist and are tested: one
-controlled task can be dispatched through the deterministic executor to a real
-Hermes session, with the real process exit code and a real session id persisted.
-The Codex and Generic-CLI adapters remain deliberate placeholders that refuse to
-do real work, and the task auditor, fix loop and orchestrator do not exist yet.
-See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5 for the precise list of
-what is and is not implemented.
+**Current version: 0.3.0 — task auditor + capped fix loop.** The architecture,
+the desktop shell, the **first real engine integration**, and now the **first
+complete controlled loop** exist and are tested: one controlled task can be
+dispatched through the deterministic executor to a real Hermes session, then a
+real Task Auditor audits it with a strict structured verdict (PASS /
+NEEDS_FIX / BLOCKED), a fix runs in a brand-new Builder session, and the same
+auditor session re-audits — capped at `MAX_AUDIT_ROUNDS = 3`, escalating to
+BLOCKED. The Codex and Generic-CLI adapters remain deliberate placeholders that
+refuse to do real work, and the orchestrator, final auditor and multi-task
+batches do not exist yet. See [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5
+for the precise list of what is and is not implemented.
 
 ---
 
@@ -40,18 +43,21 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-221 tests covering imports/compile, the domain model, the phase state machine,
-persistence round-trips, driver refusal behaviour, the Hermes CLI contract,
-the real driver's mapping of a child process onto a `PromptResult`, the
-executor's transitions and failure propagation, profile discovery, session
-policy resolution, the controller control surface, the worker-thread dispatch
-path, and the UI in Qt offscreen mode.
+280 tests covering imports/compile, the domain model (including the audit
+verdict contract), the phase state machine, persistence round-trips, driver
+refusal behaviour, the Hermes CLI contract, the real driver's mapping of a
+child process onto a `PromptResult`, the executor's transitions and failure
+propagation, the strict verdict parser's fail-closed behaviour, the capped
+audit/fix loop (session isolation, round cap, recovery), profile discovery,
+session policy resolution, the controller control surface, the worker-thread
+dispatch path, and the UI in Qt offscreen mode.
 
-The suite never touches a network or a real engine. One real end-to-end run is a
-separate, explicitly invoked script:
+The suite never touches a network or a real engine. Real end-to-end runs are
+separate, explicitly invoked scripts:
 
 ```bash
-python scripts/session_002_smoke.py --profile <hermes-profile>
+python scripts/session_002_smoke.py --profile <hermes-profile>          # builder path
+python scripts/session_003_audit_fix_smoke.py --profile <hermes-profile>  # audit/fix loop
 ```
 
 ---
@@ -66,7 +72,7 @@ python scripts/session_002_smoke.py --profile <hermes-profile>
 | **TASK AUDITOR** | Engine, Hermes profile, provider, model, session policy "Persistent per batch" |
 | **BUILDER** | Engine, Hermes profile, provider, model, session policy "Always new" |
 | **BATCH** | Batch size (default 5), current phase, current status, Start / Pause / Resume / Stop |
-| **TASK** | Hermes driver availability + discovered profiles, task title/prompt, **Dispatch task**, task state, status, failure and the real result |
+| **TASK** | Hermes driver availability + discovered profiles, task title/prompt, **Dispatch task**, the deterministic **next action** (AUDIT/FIX/RE-AUDIT/COMPLETE/BLOCKED), **Run Task Auditor** and **Run fix (NEW Builder session)**, audit-loop readouts (verdict, auditor/fix session ids, audit rounds), task state, status, failure and the real result |
 | **LOG PANEL** | Timestamped local event log |
 
 Start / Pause / Resume / Stop drive the **state machine and batch records**. They
@@ -107,7 +113,7 @@ Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 |---|---|
 | [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) | **Canonical handoff file.** Read first in every new session. |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The actual architecture, including deliberate non-goals |
-| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-018 with reasons |
+| [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions D-001…D-024 with reasons |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | Phased plan from foundation to operational hardening |
 | [docs/reports/](docs/reports/) | Per-session reports |
 

@@ -4,18 +4,35 @@
 
     IDLE → PLANNING_BATCH → RUNNING_TASK → AUDITING_TASK   (stop)
 
-``AUDITING_TASK`` here means "the Builder finished and the task is ready for the
-future Task Auditor" — there is no auditor, no fix loop and no multi-task batch
-in this session.  Those are later phases (see ``docs/ROADMAP.md``).
+**Session 003 scope.**  The ``AUDITING_TASK`` stop is lifted for a *single
+task*: the Task Auditor runs through the same generic role/driver path, its
+structured verdict is parsed by a strict parser, and a capped fix loop
+closes the audit::
+
+    AUDITING_TASK ──PASS──▶ BATCH_COMPLETE
+        │
+        ├──NEEDS_FIX──▶ FIX_REQUIRED ──▶ RUNNING_FIX ──▶ AUDITING_TASK (re-audit)
+        │                   ▲                                  │
+        │                   └────── cap (MAX_AUDIT_ROUNDS) ────┴──▶ BLOCKED
+        │
+        └──BLOCKED / malformed──▶ BLOCKED
+
+The loop is **hard-capped** (:data:`MAX_AUDIT_ROUNDS`, initially 3): the
+initial audit is round 1; Fix 1 → Audit 2; Fix 2 → Audit 3; a NEEDS_FIX on
+round 3 escalates to ``BLOCKED`` — a third fix is never started beyond the
+cap.  No infinite loop is reachable by construction.
 
 Two invariants shape every line below:
 
 * **The model never drives state.**  Transitions are chosen by this
   deterministic code from the state machine's legal edges.  Nothing an engine
-  prints can move the pipeline.
+  prints can move the pipeline — a verdict is *data* the executor validates
+  (via ``core/verdict_parser.py``) and only then applies.
 * **Failure is never silent.**  A child process that exits non-zero, times out,
   or produces no verifiable result marks the task ``FAILED`` and the pipeline
-  ``FAILED``; the run then stops.  There is no "continue anyway" path.
+  ``FAILED``.  A malformed auditor verdict, a missing fix prompt and a
+  round-cap exhaustion mark the task ``BLOCKED``.  None of these can ever
+  become a green task.
 
 Everything the executor does is persisted **before and after** each significant
 boundary, so a crash or a restart can be reconciled from SQLite instead of from
@@ -24,6 +41,7 @@ memory.
 
 from __future__ import annotations
 
+import json
 import threading
 from dataclasses import dataclass, field
 from enum import Enum
@@ -32,6 +50,8 @@ from typing import Any, Callable
 from ..domain import (
     AgentRole,
     AgentRoleConfig,
+    AuditVerdict,
+    AuditVerdictResult,
     BatchStatus,
     PipelinePhase,
     TaskState,
@@ -50,40 +70,136 @@ from ..drivers import (
     default_registry,
 )
 from ..persistence import Database
+from .audit_packet import AuditPacket, render_audit_prompt, render_fix_prompt
 from .events import EventLog, NullEventLog
 from .hermes_profiles import ProfileDiscoveryResult, discover_profiles
 from .session_manager import SessionAction
+from .verdict_parser import VerdictParseError, parse_audit_verdict
 
 __all__ = [
+    "AUDITOR_ROLE",
     "ExecutionOutcome",
     "ExecutionReport",
     "Executor",
+    "MAX_AUDIT_ROUNDS",
+    "TaskNextAction",
     "TaskSpec",
+    "next_task_action",
 ]
 
 #: The role the executor dispatches in Session 002.  The auditor roles arrive
 #: with their own phases in later sessions.
 DEFAULT_TASK_ROLE = AgentRole.BUILDER
 
+#: The role that audits each task (Session 003).  Resolved through the same
+#: role config → driver registry → SessionManager path as the Builder.
+AUDITOR_ROLE = AgentRole.TASK_AUDITOR
+
+#: Hard cap on audit/fix rounds for ONE task (brief semantics): Audit 1 is the
+#: initial audit; Fix 1 → Audit 2; Fix 2 → Audit 3.  A NEEDS_FIX returned by
+#: round 3 escalates to BLOCKED — no fix is ever started beyond this cap.
+#: For a fix to be allowed, ``task.audit_rounds`` must be < this value; for an
+#: audit to be allowed, the same check applies before incrementing.
+MAX_AUDIT_ROUNDS = 3
+
 #: Cap on how much real engine output is stored in the event log payload.  The
 #: complete text stays on the returned :class:`PromptResult`; the log keeps a
 #: bounded excerpt so the database cannot be filled by one verbose answer.
 OUTPUT_EXCERPT_CHARS = 4000
 
+#: Cap on the serialised structured verdict stored on ``tasks.verdict_json``.
+#: The parser already bounds the input; this is a second defence for storage.
+VERDICT_STORE_CHARS = 80_000
+
 
 class ExecutionOutcome(str, Enum):
     """How one dispatch ended."""
 
-    #: The Builder completed and the task reached ``AUDITING_TASK``.
+    #: The unit of work completed and produced a verifiable result: a Builder
+    #: run reaching AUDITING_TASK, a fix run returning the task to audit, or
+    #: an audit that returned PASS and approved the task.
     COMPLETED = "COMPLETED"
     #: The child process failed; the task and the pipeline are FAILED.
     FAILED = "FAILED"
-    #: Preflight refused to start (missing workspace/profile/engine/CLI).
+    #: An audit returned NEEDS_FIX; the task moved to FIX_REQUIRED.  Not a
+    #: green outcome (`ok` is False): the loop must continue with a fix.
+    NEEDS_FIX = "NEEDS_FIX"
+    #: Preflight refused, the auditor verdict was BLOCKED, the verdict was
+    #: malformed, or the round cap was exhausted.  Non-green.
     BLOCKED = "BLOCKED"
     #: The request was illegal for the current phase (no state was changed).
     REJECTED = "REJECTED"
     #: A stop request was honoured at the pre-dispatch boundary.
     STOPPED = "STOPPED"
+
+
+class TaskNextAction(str, Enum):
+    """The deterministic next step for the current task (drives UI + recovery)."""
+
+    #: No task materialised / nothing to do.
+    IDLE = "IDLE"
+    #: Run the initial audit (audit_rounds == 0).
+    AUDIT = "AUDIT"
+    #: Run a fix (FIX_REQUIRED) — always in a brand-new Builder session.
+    FIX = "FIX"
+    #: Re-audit after a fix (resume the same auditor session).
+    RE_AUDIT = "RE_AUDIT"
+    #: The task passed its audit; the batch is complete.
+    COMPLETE = "COMPLETE"
+    #: Cap exhausted, malformed verdict, or auditor BLOCKED.  Requires a human.
+    BLOCKED = "BLOCKED"
+    #: A child process failed; the task/pipeline are FAILED.
+    FAILED = "FAILED"
+
+    def __str__(self) -> str:  # pragma: no cover - display helper
+        return self.value
+
+
+def next_task_action(
+    *,
+    batch: Any,  # BatchState | None
+    phase: PipelinePhase,
+) -> TaskNextAction:
+    """Decide the single deterministic next step from persisted state.
+
+    The task row is the primary signal — after a restart only SQLite survives,
+    and the persisted task state (plus the recovered batch ``phase``) must be
+    enough to decide AUDIT / FIX / RE-AUDIT / COMPLETE / BLOCKED.  The pipeline
+    phase is a secondary signal for the edge cases where no task exists yet.
+
+    Pure and offline: recovery and the UI both call this, and it never starts
+    anything — it only reports what the next legal action is.
+    """
+    if batch is None or not batch.tasks:
+        return TaskNextAction.IDLE
+    task = batch.tasks[0]
+    if task.state is TaskState.BLOCKED:
+        return TaskNextAction.BLOCKED
+    if task.state is TaskState.FAILED:
+        return TaskNextAction.FAILED
+    if task.state is TaskState.APPROVED:
+        return TaskNextAction.COMPLETE
+    if task.state is TaskState.FIX_REQUIRED:
+        return TaskNextAction.FIX
+    if task.state is TaskState.RUNNING_FIX:
+        return TaskNextAction.FIX
+    if task.state is TaskState.AUDITING:
+        if task.audit_rounds >= MAX_AUDIT_ROUNDS and not task.latest_verdict:
+            return TaskNextAction.BLOCKED
+        if task.audit_rounds == 0 or not task.latest_verdict:
+            return TaskNextAction.AUDIT
+        if task.latest_verdict == AuditVerdict.NEEDS_FIX.value:
+            return TaskNextAction.RE_AUDIT
+        if task.latest_verdict == AuditVerdict.BLOCKED.value:
+            return TaskNextAction.BLOCKED
+        return TaskNextAction.AUDIT
+    if phase is PipelinePhase.BLOCKED:
+        return TaskNextAction.BLOCKED
+    if phase is PipelinePhase.FAILED:
+        return TaskNextAction.FAILED
+    if phase is PipelinePhase.BATCH_COMPLETE:
+        return TaskNextAction.COMPLETE
+    return TaskNextAction.IDLE
 
 
 @dataclass(slots=True)
@@ -119,6 +235,8 @@ class ExecutionReport:
     executor_started: bool = False
     session_id: str | None = None
     prompt_result: PromptResult | None = None
+    #: The strict verdict when this report is the result of an audit run.
+    audit_verdict: AuditVerdictResult | None = None
     stop_requested: bool = False
     started_at: str = field(default_factory=utc_now)
     finished_at: str | None = None
@@ -315,6 +433,666 @@ class Executor:
             with self._runner_lock:
                 self._active = False
 
+    # -- audit / fix loop (Session 003) ------------------------------------
+    def prepare_task_for_audit(self, spec: TaskSpec, *, index: int | None = None) -> TaskStateRecord:
+        """Materialise a task and place it directly into ``AUDITING_TASK``.
+
+        Used when a task must reach the auditor **without** an initial Builder
+        run — the Session 003 smoke seeds a deliberately defective scratch
+        repository this way.  Walks ``IDLE/PLANNING_BATCH → RUNNING_TASK →
+        AUDITING_TASK`` over legal edges only.
+        """
+        machine = self.controller.machine
+        if machine.phase not in (PipelinePhase.IDLE, PipelinePhase.PLANNING_BATCH):
+            raise ValueError(
+                f"Cannot prepare a task for audit from phase {machine.phase.value}."
+            )
+        if machine.phase is PipelinePhase.IDLE:
+            start = self.controller.request_start(1)
+            if start.outcome.name == "REJECTED":  # pragma: no cover - guarded above
+                raise ValueError(start.message)
+        batch = self.controller.state.batch
+        if batch is None:  # pragma: no cover - request_start always creates one
+            raise ValueError("No batch exists; cannot prepare a task for audit.")
+        if batch.tasks:
+            raise ValueError(
+                "This batch already holds a task; prepare one task per batch."
+            )
+        task = self.materialise_task(spec, index=index)
+        task.state = TaskState.RUNNING
+        self._transition(
+            PipelinePhase.RUNNING_TASK, f"Task {task.task_id} prepared for audit."
+        )
+        task.state = TaskState.AUDITING
+        batch.status = BatchStatus.RUNNING
+        self._transition(
+            PipelinePhase.AUDITING_TASK,
+            f"Task {task.task_id} is ready for the Task Auditor.",
+        )
+        self._persist()
+        self.events.info(
+            f"Task {task.task_id} prepared for audit (no Builder run); awaiting the auditor.",
+            source="executor",
+        )
+        return task
+
+    def run_task_audit(self, *, timeout_s: float | None = None) -> ExecutionReport:
+        """Dispatch the Task Auditor for the current task and apply its verdict.
+
+        The auditor is resolved through the same generic path as the Builder:
+        ``AgentRole.TASK_AUDITOR`` → role config → driver registry →
+        ``SessionManager``.  Its session policy is ``persistent_per_batch``:
+        the first audit of a batch opens a NEW auditor session; a re-audit
+        after a fix resumes the SAME session.
+        """
+        guard = self._claim_unit("an audit")
+        if guard is not None:
+            return guard
+        try:
+            return self._audit(timeout_s=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
+            self._fail_hard(exc)
+            return ExecutionReport(
+                outcome=ExecutionOutcome.FAILED,
+                phase=self.controller.machine.phase,
+                message=f"Executor error: {type(exc).__name__}: {exc}",
+                started_at=utc_now(),
+                finished_at=utc_now(),
+            )
+        finally:
+            with self._runner_lock:
+                self._active = False
+
+    def run_task_fix(self, *, timeout_s: float | None = None) -> ExecutionReport:
+        """Run a corrective Builder pass for the current task.
+
+        The fix **must** use a brand-new Builder session (the role's
+        ``always_new`` policy guarantees a NEW decision; the driver starts a
+        fresh session).  The fix Builder receives the original task, the
+        auditor's findings and the auditor's ``fix_prompt`` — never the prior
+        Builder conversation.
+        """
+        guard = self._claim_unit("a fix")
+        if guard is not None:
+            return guard
+        try:
+            return self._fix(timeout_s=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
+            self._fail_hard(exc)
+            return ExecutionReport(
+                outcome=ExecutionOutcome.FAILED,
+                phase=self.controller.machine.phase,
+                message=f"Executor error: {type(exc).__name__}: {exc}",
+                started_at=utc_now(),
+                finished_at=utc_now(),
+            )
+        finally:
+            with self._runner_lock:
+                self._active = False
+
+    def next_action(self) -> TaskNextAction:
+        """The deterministic next step for the current task (UI + recovery)."""
+        return next_task_action(
+            batch=self.controller.state.batch,
+            phase=self.controller.machine.phase,
+        )
+
+    # -- audit loop internals ----------------------------------------------
+    def _claim_unit(self, operation: str) -> ExecutionReport | None:
+        """Claim the executor for one unit of work; error report when busy/stopped."""
+        with self._runner_lock:
+            phase = self.controller.machine.phase
+            if self._active:
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.REJECTED,
+                    phase=phase,
+                    message=(
+                        f"A {operation} is already running; the executor runs "
+                        "one unit of work at a time."
+                    ),
+                )
+            if self._stop_requested:
+                self._stop_requested = False
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.STOPPED,
+                    phase=phase,
+                    message=(
+                        "Stop was requested before the run; nothing was started."
+                    ),
+                )
+            if self._pause_requested:
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.STOPPED,
+                    phase=phase,
+                    message=(
+                        "Pause was requested before the run; nothing was started."
+                    ),
+                )
+            self._active = True
+        return None
+
+    def _current_task(self) -> TaskStateRecord | None:
+        batch = self.controller.state.batch
+        if batch is None or not batch.tasks:
+            return None
+        return batch.tasks[0]
+
+    def _ensure_work_phase(self, target: PipelinePhase) -> bool:
+        """Advance a freshly-restored machine (IDLE) to an in-flight work phase.
+
+        A restart normally restores the phase from the batch row, so this is a
+        no-op.  When the machine is still IDLE but a task exists in an
+        in-flight state, walk the legal edges to ``target`` — bookkeeping only,
+        never starting a process (the operator still triggered this run).
+        Returns False when ``target`` is not reachable from the current phase.
+        """
+        machine = self.controller.machine
+        if machine.phase is target:
+            return True
+        if machine.phase is not PipelinePhase.IDLE:
+            return False
+        batch = self.controller.state.batch
+        if batch is None or not batch.tasks:
+            return False
+        chain = (
+            PipelinePhase.PLANNING_BATCH,
+            PipelinePhase.RUNNING_TASK,
+            PipelinePhase.AUDITING_TASK,
+            PipelinePhase.FIX_REQUIRED,
+        )
+        if target not in chain:
+            return False
+        for step in chain:
+            if machine.phase is target:
+                return True
+            if machine.can_go_to(step):
+                self._transition(
+                    step,
+                    f"Recovered after restart: pipeline advanced to {step.value}.",
+                )
+        return machine.phase is target
+
+    def _restore_auditor_session(self, task: TaskStateRecord) -> None:
+        """Rebind the persisted auditor session id after a restart.
+
+        Sessions are bookkeeping (never the source of truth): this re-populates
+        ``SessionManager`` from a value the database already holds so the
+        ``persistent_per_batch`` decision can REUSE the same external session
+        for a re-audit without contacting the engine beforehand.
+        """
+        sessions = self.controller.sessions
+        if task.auditor_session_id and sessions.current_session_id(AUDITOR_ROLE) is None:
+            sessions.restore_session(AUDITOR_ROLE, task.auditor_session_id)
+
+    def _audit(self, *, timeout_s: float | None) -> ExecutionReport:
+        machine = self.controller.machine
+        if not self._ensure_work_phase(PipelinePhase.AUDITING_TASK):
+            return ExecutionReport(
+                outcome=ExecutionOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    "The auditor only runs from AUDITING_TASK; current phase is "
+                    f"{machine.phase.value}."
+                ),
+            )
+        task = self._current_task()
+        if task is None:
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message="No task in this batch to audit.",
+            )
+        if task.audit_rounds >= MAX_AUDIT_ROUNDS:
+            return self._block_task(
+                task,
+                f"MAX_AUDIT_ROUNDS={MAX_AUDIT_ROUNDS} reached; a further audit is "
+                "outside the configured cap. The task is BLOCKED.",
+                phase=PipelinePhase.BLOCKED,
+            )
+        if task.state is not TaskState.AUDITING:
+            return ExecutionReport(
+                outcome=ExecutionOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    f"Task {task.task_id} is in state {task.state.value}, not "
+                    "AUDITING; nothing to audit."
+                ),
+            )
+
+        role, config, engine = self._resolve_role(AUDITOR_ROLE)
+        blocked = self._preflight(config, engine, role=role)
+        if blocked is not None:
+            self.events.error(blocked, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=blocked,
+            )
+
+        capabilities = self.registry.capabilities(engine)
+        driver: BaseDriver | None = None
+        try:
+            driver = self.registry.create(engine, runner=self._driver_runner)
+            request = self._session_request(config, role=role)
+            session = driver.start_session(request)
+        except (DriverError, DriverNotImplementedError) as exc:
+            message = f"Driver '{engine}' refused to start an auditor session: {exc}"
+            self.events.error(message, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+            )
+
+        # Restart recovery: reuse the persisted auditor session for a re-audit.
+        self._restore_auditor_session(task)
+        decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if decision.action is SessionAction.REUSE and decision.session_id:
+            try:
+                session = driver.resume_session(decision.session_id, request)
+            except (DriverError, DriverNotImplementedError) as exc:
+                message = (
+                    f"Session policy wanted to resume auditor session "
+                    f"{decision.session_id}, but: {exc}"
+                )
+                return self._fail_task(task, message, session_id=decision.session_id)
+        self.events.info(
+            f"Session policy for {role.value}: {decision.action.value} — {decision.reason}",
+            source="executor",
+        )
+
+        # Persist the audit boundary BEFORE the prompt: a crash mid-audit must
+        # not be indistinguishable from a never-audited task.
+        task.audit_rounds += 1
+        task.state = TaskState.AUDITING
+        task.updated_at = utc_now()
+        self._persist()
+        self.events.info(
+            f"Audit round {task.audit_rounds}/{MAX_AUDIT_ROUNDS} starting for "
+            f"task {task.task_id} via driver '{engine}' "
+            f"(profile '{config.project_profile or '(none)'}').",
+            source="executor",
+        )
+
+        previous = self._stored_verdict(task) if task.audit_rounds > 1 else None
+        packet = AuditPacket(
+            task_id=task.task_id,
+            title=task.title,
+            implementation_prompt=task.prompt,
+            workspace_path=self.controller.state.workspace.repo_path,
+            attempt=task.attempts,
+            audit_round=task.audit_rounds,
+            batch_id=getattr(self.controller.state.batch, "batch_id", ""),
+            auditor_session_id=decision.session_id or session.session_id,
+            previous=previous,
+        )
+        handle = driver.send_prompt(session, packet.render())
+        result = driver.wait_for_completion(handle, timeout_s=timeout_s)
+
+        started = bool(self._recorder and self._recorder.launched)
+        session_id = result.session_id
+        if not result.ok:
+            return self._fail_task(
+                task,
+                result.error or "The auditor process reported failure.",
+                session_id=session_id,
+                prompt_result=result,
+                executor_started=started,
+            )
+
+        self._record_session(config, session, result, engine, role=role)
+        if session_id:
+            task.auditor_session_id = session_id
+
+        # The verdict is untrusted model output: parse strictly, fail closed.
+        try:
+            verdict = parse_audit_verdict(result.text)
+        except VerdictParseError as exc:
+            detail = f"{exc.reason}: {str(exc)}"[:400]
+            return self._block_task(
+                task,
+                f"Malformed auditor output: {detail}",
+                phase=PipelinePhase.BLOCKED,
+                session_id=session_id,
+                prompt_result=result,
+                executor_started=started,
+            )
+
+        task.latest_verdict = verdict.verdict.value
+        task.verdict_json = json.dumps(
+            verdict.to_dict(), ensure_ascii=False, sort_keys=True
+        )[:VERDICT_STORE_CHARS]
+        task.fix_prompt = verdict.fix_prompt.strip() or None
+        task.updated_at = utc_now()
+
+        # -- apply the strict verdict --------------------------------------
+        if verdict.verdict is AuditVerdict.PASS:
+            task.state = TaskState.APPROVED
+            task.last_error = None
+            batch = self.controller.state.batch
+            if batch is not None:
+                batch.status = BatchStatus.COMPLETE
+            self._transition(
+                PipelinePhase.BATCH_COMPLETE,
+                f"Task {task.task_id} PASSED audit round {task.audit_rounds}; "
+                "the single-task batch is complete.",
+            )
+            self._persist()
+            self.events.info(
+                f"Task {task.task_id} PASSED audit (round {task.audit_rounds}); "
+                f"session {session_id or 'NOT_EXPOSED'}.",
+                source="executor",
+                payload={"task_id": task.task_id, "verdict": "PASS",
+                         "audit_round": task.audit_rounds},
+            )
+            return ExecutionReport(
+                outcome=ExecutionOutcome.COMPLETED,
+                phase=self.controller.machine.phase,
+                message=f"Task {task.task_id} PASSED audit; batch complete.",
+                task_id=task.task_id,
+                task_state=task.state,
+                executor_started=started,
+                session_id=session_id,
+                prompt_result=result,
+                audit_verdict=verdict,
+                stop_requested=self.stop_requested,
+                finished_at=utc_now(),
+            )
+
+        if verdict.verdict is AuditVerdict.NEEDS_FIX:
+            if task.audit_rounds >= MAX_AUDIT_ROUNDS:
+                self.events.error(
+                    f"Audit round {task.audit_rounds} returned NEEDS_FIX, which "
+                    f"exhausts MAX_AUDIT_ROUNDS={MAX_AUDIT_ROUNDS}; escalating to BLOCKED.",
+                    source="executor",
+                    payload={"task_id": task.task_id, "verdict": "NEEDS_FIX"},
+                )
+                return self._block_task(
+                    task,
+                    f"Max audit rounds ({MAX_AUDIT_ROUNDS}) reached and the audit "
+                    "still returns NEEDS_FIX; no further fix is allowed.",
+                    phase=PipelinePhase.BLOCKED,
+                    session_id=session_id,
+                    prompt_result=result,
+                    executor_started=started,
+                    verdict=verdict,
+                )
+            task.state = TaskState.FIX_REQUIRED
+            task.last_error = None
+            self._transition(
+                PipelinePhase.FIX_REQUIRED,
+                f"Task {task.task_id} NEEDS_FIX after audit round "
+                f"{task.audit_rounds}; a fix runs in a NEW Builder session.",
+            )
+            self._persist()
+            self.events.info(
+                f"Task {task.task_id} NEEDS_FIX (round {task.audit_rounds}); "
+                f"fix_prompt={len(verdict.fix_prompt)} chars, "
+                f"findings={len(verdict.findings)}.",
+                source="executor",
+                payload={"task_id": task.task_id, "verdict": "NEEDS_FIX",
+                         "audit_round": task.audit_rounds,
+                         "fix_prompt_chars": len(verdict.fix_prompt)},
+            )
+            return ExecutionReport(
+                outcome=ExecutionOutcome.NEEDS_FIX,
+                phase=self.controller.machine.phase,
+                message=(
+                    f"Task {task.task_id} NEEDS_FIX; a fix runs next in a "
+                    "brand-new Builder session."
+                ),
+                task_id=task.task_id,
+                task_state=task.state,
+                executor_started=started,
+                session_id=session_id,
+                prompt_result=result,
+                audit_verdict=verdict,
+                stop_requested=self.stop_requested,
+                finished_at=utc_now(),
+            )
+
+        # audit verdict is BLOCKED
+        self.events.error(
+            f"Task {task.task_id} was BLOCKED by the auditor: "
+            f"{(verdict.summary or '(no summary)')[:300]}",
+            source="executor",
+            payload={"task_id": task.task_id, "verdict": "BLOCKED",
+                     "audit_round": task.audit_rounds},
+        )
+        return self._block_task(
+            task,
+            f"Auditor verdict BLOCKED: {verdict.summary or 'no summary provided'}",
+            phase=PipelinePhase.BLOCKED,
+            session_id=session_id,
+            prompt_result=result,
+            executor_started=started,
+            verdict=verdict,
+        )
+
+    def _fix(self, *, timeout_s: float | None) -> ExecutionReport:
+        machine = self.controller.machine
+        if not self._ensure_work_phase(PipelinePhase.FIX_REQUIRED):
+            return ExecutionReport(
+                outcome=ExecutionOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    "A fix only runs from FIX_REQUIRED; current phase is "
+                    f"{machine.phase.value}."
+                ),
+            )
+        task = self._current_task()
+        if task is None:
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message="No task in this batch to fix.",
+            )
+        if task.state is not TaskState.FIX_REQUIRED:
+            return ExecutionReport(
+                outcome=ExecutionOutcome.REJECTED,
+                phase=machine.phase,
+                message=f"Task {task.task_id} is {task.state.value}, not FIX_REQUIRED.",
+            )
+        if task.audit_rounds >= MAX_AUDIT_ROUNDS:
+            return self._block_task(
+                task,
+                f"MAX_AUDIT_ROUNDS={MAX_AUDIT_ROUNDS} reached; a fix is outside "
+                "the configured cap. The task is BLOCKED.",
+                phase=PipelinePhase.BLOCKED,
+            )
+        if not (task.fix_prompt or "").strip():
+            return self._block_task(
+                task,
+                "A fix was requested but no fix_prompt was persisted; the task "
+                "cannot be corrected deterministically.",
+                phase=PipelinePhase.BLOCKED,
+            )
+
+        role, config, engine = self._resolve_role(self.role)
+        blocked = self._preflight(config, engine, role=role)
+        if blocked is not None:
+            self.events.error(blocked, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=blocked,
+            )
+
+        capabilities = self.registry.capabilities(engine)
+        driver: BaseDriver | None = None
+        try:
+            driver = self.registry.create(engine, runner=self._driver_runner)
+            request = self._session_request(config, role=role)
+            session = driver.start_session(request)
+        except (DriverError, DriverNotImplementedError) as exc:
+            message = f"Driver '{engine}' refused to start a fix session: {exc}"
+            self.events.error(message, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+            )
+
+        # BUILDER's `always_new` policy: the decision must be NEW — the fix
+        # never reuses a Builder session (session isolation is a hard contract).
+        decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if decision.action is SessionAction.REUSE:
+            self.events.error(
+                f"Fix run for task {task.task_id}: session policy returned REUSE "
+                f"({decision.session_id}); the policy must be 'always_new' — "
+                "refusing to reuse a Builder session for a fix.",
+                source="executor",
+            )
+            return self._block_task(
+                task,
+                "Cannot start a fix: the Builder session policy must be "
+                "'always_new' so every fix runs in a NEW session.",
+                phase=PipelinePhase.BLOCKED,
+            )
+        self.events.info(
+            f"Session policy for {role.value} (fix): {decision.action.value} — "
+            f"{decision.reason}",
+            source="executor",
+        )
+
+        # Persist the fix boundary BEFORE the prompt.
+        task.state = TaskState.RUNNING_FIX
+        task.attempts += 1
+        task.updated_at = utc_now()
+        batch = self.controller.state.batch
+        if batch is not None:
+            batch.status = BatchStatus.RUNNING
+        self._transition(
+            PipelinePhase.RUNNING_FIX,
+            f"Task {task.task_id} fix #{(task.attempts - 1)} running in a NEW "
+            "Builder session.",
+        )
+        self._persist()
+
+        verdict = self._stored_verdict(task) or self._minimal_verdict(task)
+        prompt = render_fix_prompt(
+            task_id=task.task_id,
+            title=task.title,
+            implementation_prompt=task.prompt,
+            workspace_path=self.controller.state.workspace.repo_path,
+            verdict=verdict,
+        )
+        handle = driver.send_prompt(session, prompt)
+        self.events.info(
+            f"Fix prompt dispatched via driver '{engine}' "
+            f"(profile '{config.project_profile or '(none)'}'"
+            + (f", model '{config.model}'" if config.model else "")
+            + ").",
+            source="executor",
+        )
+        result = driver.wait_for_completion(handle, timeout_s=timeout_s)
+
+        started = bool(self._recorder and self._recorder.launched)
+        session_id = result.session_id
+        if not result.ok:
+            return self._fail_task(
+                task,
+                result.error or "The fix Builder process reported failure.",
+                session_id=session_id,
+                prompt_result=result,
+                executor_started=started,
+            )
+
+        self._record_session(config, session, result, engine, role=role)
+        if session_id:
+            task.fix_session_id = session_id
+
+        task.state = TaskState.AUDITING
+        task.last_error = None
+        task.updated_at = utc_now()
+        self._transition(
+            PipelinePhase.AUDITING_TASK,
+            f"Task {task.task_id} fix finished; returning to the SAME Task "
+            "Auditor session for re-audit.",
+        )
+        self._persist()
+        self.events.info(
+            f"Task {task.task_id} fix completed (attempt {task.attempts}); "
+            f"fix session {session_id or 'NOT_EXPOSED'}; awaiting re-audit.",
+            source="executor",
+            payload={"task_id": task.task_id, "attempts": task.attempts,
+                     "audit_rounds": task.audit_rounds},
+        )
+        return ExecutionReport(
+            outcome=ExecutionOutcome.COMPLETED,
+            phase=self.controller.machine.phase,
+            message=(
+                f"Task {task.task_id} fix completed in a NEW Builder session; "
+                "the task returns to the Task Auditor for re-audit."
+            ),
+            task_id=task.task_id,
+            task_state=task.state,
+            executor_started=started,
+            session_id=session_id,
+            prompt_result=result,
+            stop_requested=self.stop_requested,
+            finished_at=utc_now(),
+        )
+
+    def _block_task(
+        self,
+        task: TaskStateRecord,
+        message: str,
+        *,
+        phase: PipelinePhase = PipelinePhase.BLOCKED,
+        session_id: str | None = None,
+        prompt_result: PromptResult | None = None,
+        executor_started: bool = False,
+        verdict: AuditVerdictResult | None = None,
+    ) -> ExecutionReport:
+        """Mark the task (and pipeline) BLOCKED.  Never a green outcome."""
+        task.state = TaskState.BLOCKED
+        task.last_error = message
+        task.updated_at = utc_now()
+        if self.controller.machine.can_go_to(phase):
+            self._transition(phase, f"Task {task.task_id} BLOCKED: {message}")
+        self._persist()
+        payload = {"task_id": task.task_id, "ok": False, "error": message}
+        if verdict is not None:
+            payload["verdict"] = verdict.verdict.value
+        self.events.error(f"Task {task.task_id} BLOCKED: {message}", source="executor", payload=payload)
+        return ExecutionReport(
+            outcome=ExecutionOutcome.BLOCKED,
+            phase=self.controller.machine.phase,
+            message=message,
+            task_id=task.task_id,
+            task_state=task.state,
+            executor_started=executor_started,
+            session_id=session_id,
+            prompt_result=prompt_result,
+            audit_verdict=verdict,
+            stop_requested=self.stop_requested,
+            finished_at=utc_now(),
+        )
+
+    def _resolve_role(self, role: AgentRole) -> tuple[AgentRole, AgentRoleConfig, str]:
+        """Resolve role config + engine through the generic role path."""
+        config = self.controller.state.config_for(role)
+        engine = self.controller.state.resolved_engine_for(role)
+        return role, config, engine
+
+    def _stored_verdict(self, task: TaskStateRecord) -> AuditVerdictResult | None:
+        """Reconstruct the last strict verdict from its persisted JSON."""
+        if not task.verdict_json:
+            return None
+        try:
+            return AuditVerdictResult.from_dict(json.loads(task.verdict_json))
+        except (ValueError, TypeError):  # pragma: no cover - stored data is ours
+            return None
+
+    def _minimal_verdict(self, task: TaskStateRecord) -> AuditVerdictResult:
+        """Fallback verdict for a fix when only ``fix_prompt`` was persisted."""
+        return AuditVerdictResult(
+            verdict=AuditVerdict.NEEDS_FIX,
+            summary="See fix_prompt (persisted without a full verdict payload).",
+            fix_prompt=task.fix_prompt or "",
+        )
+
     # -- internals ----------------------------------------------------------
     def _dispatch(self, spec: TaskSpec, *, timeout_s: float | None) -> ExecutionReport:
         machine = self.controller.machine
@@ -435,6 +1213,8 @@ class Executor:
             )
         else:
             self._record_session(config, session, result, engine)
+            if session_id:
+                task.builder_session_id = session_id
             task.state = TaskState.AUDITING
             task.last_error = None
             task.updated_at = utc_now()
@@ -468,8 +1248,15 @@ class Executor:
         return report
 
     # -- preflight ----------------------------------------------------------
-    def _preflight(self, config: AgentRoleConfig, engine: str) -> str | None:
-        """Return a blocking reason, or ``None`` when dispatch may proceed."""
+    def _preflight(
+        self, config: AgentRoleConfig, engine: str, role: AgentRole | None = None
+    ) -> str | None:
+        """Return a blocking reason, or ``None`` when dispatch may proceed.
+
+        Role-agnostic since Session 003: the same checks guard Builder,
+        Auditor and fix-Builder dispatches.
+        """
+        role = role or self.role
         workspace = self.controller.state.workspace
         if not workspace.repo_path.strip():
             return (
@@ -480,7 +1267,7 @@ class Executor:
             return f"Workspace path does not exist: {workspace.repo_path}"
 
         if not engine:
-            return f"No engine is configured for {self.role.value}."
+            return f"No engine is configured for {role.value}."
         if not self.registry.is_registered(engine):
             return f"Engine '{engine}' is not registered (registered: {self.registry.driver_ids()})."
 
@@ -492,7 +1279,7 @@ class Executor:
             )
         if not config.project_profile.strip():
             return (
-                f"Driver '{engine}' needs a Hermes profile for {self.role.value}; "
+                f"Driver '{engine}' needs a Hermes profile for {role.value}; "
                 "the field is empty."
             )
 
@@ -519,9 +1306,9 @@ class Executor:
             self.events.warning(f"Hermes profile discovery error: {exc}", source="executor")
             return None
 
-    def _session_request(self, config: AgentRoleConfig) -> SessionRequest:
+    def _session_request(self, config: AgentRoleConfig, role: AgentRole | None = None) -> SessionRequest:
         return SessionRequest(
-            role=self.role,
+            role=role or self.role,
             workspace_path=self.controller.state.workspace.repo_path,
             project_profile=config.project_profile,
             provider=config.provider,
@@ -544,13 +1331,15 @@ class Executor:
         session: DriverSession,
         result: PromptResult,
         engine: str,
+        role: AgentRole | None = None,
     ) -> None:
         """Mirror a real external session id into SQLite (never a fake one)."""
+        role = role or self.role
         session_id = result.session_id
         if not session_id:
             return
         self.controller.sessions.register_session(
-            self.role,
+            role,
             session_id,
             engine,
             external=True,
@@ -660,6 +1449,7 @@ class Executor:
             "role": self.role.value,
             "runner": type(self._runner).__name__ if self._runner is not None else "none",
             "processes_launched": len(self._recorder.launched) if self._recorder else 0,
+            "max_audit_rounds": MAX_AUDIT_ROUNDS,
             "stop_requested": self.stop_requested,
             "pause_requested": self.pause_requested,
             "running": self.is_running,

@@ -35,7 +35,7 @@ from ..core import (
     LogRecord,
     PipelineController,
 )
-from ..domain import AgentRole, PipelinePhase, SessionPolicy
+from ..domain import AgentRole, PipelinePhase, SessionPolicy, TaskState
 from ..drivers import PLANNED_DRIVERS, DriverRegistry
 
 __all__ = [
@@ -435,15 +435,21 @@ class LogPanel(QGroupBox):
 class TaskPanel(QGroupBox):
     """TASK section — one controlled task, dispatched through the executor.
 
-    Session 002 deliberately has no planner and no batch editor: this panel
-    supplies the single task the executor runs and displays the **real** result
-    (outcome, exit code, session id, output excerpt) when it comes back.
+    Session 003 keeps the Session 002 dispatch surface and adds the audit/fix
+    loop readouts: the deterministic next action (AUDIT / FIX / RE-AUDIT /
+    COMPLETE / BLOCKED), the current audit round, the latest verdict, findings
+    summary and the real auditor / fix-Builder session ids.  A fix is always
+    labelled as running in a NEW Builder session.
     """
 
     #: title, prompt
     dispatch_requested = Signal(str, str)
+    #: run the Task Auditor (initial audit or re-audit via resume)
+    audit_requested = Signal()
+    #: run a fix in a brand-new Builder session
+    fix_requested = Signal()
 
-    DEFAULT_TITLE = "Session 002 controlled task"
+    DEFAULT_TITLE = "Session 003 controlled task"
 
     def __init__(
         self,
@@ -452,7 +458,7 @@ class TaskPanel(QGroupBox):
         profile_method: str = "",
         parent: QWidget | None = None,
     ) -> None:
-        super().__init__("TASK (Session 002 — one controlled task)", parent)
+        super().__init__("TASK (Session 003 — one controlled audit/fix loop)", parent)
         self._controller = controller
         self._profiles: tuple[str, ...] = tuple(profiles)
         self._profile_method = profile_method
@@ -475,6 +481,26 @@ class TaskPanel(QGroupBox):
         self.dispatch_button = QPushButton("Dispatch task")
         self.dispatch_button.clicked.connect(self._emit_dispatch)
 
+        # -- Session 003: audit/fix surface --------------------------------
+        self.audit_button = QPushButton("Run Task Auditor")
+        self.audit_button.setToolTip(
+            "Starts a REAL Task Auditor session (persistent per batch); "
+            "a re-audit resumes the same auditor session."
+        )
+        self.audit_button.clicked.connect(self.audit_requested.emit)
+        self.fix_button = QPushButton("Run fix (NEW Builder session)")
+        self.fix_button.setToolTip(
+            "Runs the fix in a BRAND-NEW Builder session — never the previous "
+            "Builder conversation."
+        )
+        self.fix_button.clicked.connect(self.fix_requested.emit)
+
+        self.next_action_label = QLabel("Idle — no task materialised.")
+        self.next_action_label.setWordWrap(True)
+        self.audit_info_label = QLabel()
+        self.audit_info_label.setWordWrap(True)
+        self.audit_info_label.setStyleSheet("color: palette(mid);")
+
         self.task_state_label = QLabel()
         self.status_label = QLabel("Idle — no task dispatched.")
         self.status_label.setWordWrap(True)
@@ -495,6 +521,10 @@ class TaskPanel(QGroupBox):
         form.addRow("Task title", self.title_edit)
         form.addRow("Task prompt", self.prompt_edit)
         form.addRow("", self.dispatch_button)
+        form.addRow("Next action", self.next_action_label)
+        form.addRow("", self.audit_button)
+        form.addRow("", self.fix_button)
+        form.addRow("Audit loop", self.audit_info_label)
         form.addRow("Task 1 state", self.task_state_label)
         form.addRow("Status", self.status_label)
         form.addRow("Failure", self.failure_label)
@@ -523,6 +553,8 @@ class TaskPanel(QGroupBox):
         self.dispatch_requested.emit(title, prompt)
 
     def refresh(self) -> None:
+        from ..core.executor import MAX_AUDIT_ROUNDS, TaskNextAction, next_task_action
+
         controller = self._controller
         engine = controller.state.resolved_engine_for(AgentRole.BUILDER)
 
@@ -555,12 +587,13 @@ class TaskPanel(QGroupBox):
 
         # -- task + phase ----------------------------------------------------
         batch = controller.state.batch
-        if batch is None or not batch.tasks:
+        task = batch.tasks[0] if batch is not None and batch.tasks else None
+        if task is None:
             self.task_state_label.setText("(no task materialised)")
         else:
-            task = batch.tasks[0]
             self.task_state_label.setText(
-                f"{task.state.value} — {task.task_id} — attempts {task.attempts}"
+                f"{task.state.value} — {task.task_id} — attempts {task.attempts} — "
+                f"audit rounds {task.audit_rounds}/{MAX_AUDIT_ROUNDS}"
             )
 
         phase = controller.machine.phase
@@ -571,10 +604,81 @@ class TaskPanel(QGroupBox):
             and (batch is None or not batch.tasks)
         )
         self.dispatch_button.setEnabled(can_dispatch)
+
+        # -- Session 003: next action + audit loop -------------------------
+        action = next_task_action(batch=batch, phase=phase)
+        self.next_action_label.setText(
+            f"{action.value}  ({phase.value}"
+            + (f", batch {batch.status.value}" if batch is not None else "")
+            + ")"
+        )
+        can_audit = (
+            controller.executor_attached
+            and not self._busy
+            and action in (TaskNextAction.AUDIT, TaskNextAction.RE_AUDIT)
+        )
+        can_fix = (
+            controller.executor_attached
+            and not self._busy
+            and action is TaskNextAction.FIX
+        )
+        self.audit_button.setEnabled(can_audit)
+        self.fix_button.setEnabled(can_fix)
         if self._busy:
             self.dispatch_button.setText("Running…")
+            self.audit_button.setText("Running…" if can_audit else "Run Task Auditor")
+            self.fix_button.setText("Running…" if can_fix else "Run fix (NEW Builder session)")
         else:
             self.dispatch_button.setText("Dispatch task")
+            self.audit_button.setText("Run Task Auditor")
+            self.fix_button.setText("Run fix (NEW Builder session)")
+
+        if task is None:
+            self.audit_info_label.setText(
+                "(no audit yet — dispatch the task first, or prepare one directly)"
+            )
+        else:
+            auditor_sid = (
+                task.auditor_session_id
+                or controller.sessions.current_session_id(AgentRole.TASK_AUDITOR)
+            )
+            fix_sid = task.fix_session_id or task.builder_session_id
+            summary = self._findings_summary(task)
+            self.audit_info_label.setText(
+                "verdict: "
+                f"{task.latest_verdict or '(none)'} | auditor session: "
+                f"{auditor_sid or 'NOT_EXPOSED'} | fix/builder session: "
+                f"{fix_sid or 'NOT_EXPOSED'}"
+                + (f" | findings: {summary}" if summary else "")
+            )
+            if task.state is TaskState.FIX_REQUIRED and task.fix_prompt:
+                self.fix_button.setToolTip(
+                    "Runs the fix in a BRAND-NEW Builder session — never the previous "
+                    "Builder conversation.\nFix prompt: "
+                    + task.fix_prompt[:120].replace("\n", " ")
+                    + ("…" if len(task.fix_prompt) > 120 else "")
+                )
+
+    @staticmethod
+    def _findings_summary(task: Any) -> str:
+        """One-line, bounded rendering of the latest verdict's findings."""
+        if not task.verdict_json:
+            return ""
+        try:
+            import json as _json
+
+            payload = _json.loads(task.verdict_json)
+        except (ValueError, TypeError):
+            return "(unparseable stored verdict)"
+        findings = payload.get("findings") or []
+        if not findings:
+            return ""
+        counts: dict[str, int] = {}
+        for finding in findings:
+            severity = str(finding.get("severity") or "unknown")
+            counts[severity] = counts.get(severity, 0) + 1
+        parts = [f"{sev}={count}" for sev, count in sorted(counts.items())]
+        return ", ".join(parts) if parts else ""
 
     # -- results --------------------------------------------------------------
     def show_report(self, report: ExecutionReport | None) -> None:
@@ -604,6 +708,16 @@ class TaskPanel(QGroupBox):
             lines.append(text[:OUTPUT_VIEW_CHARS] if text else "(no output)")
             if len(text) > OUTPUT_VIEW_CHARS:
                 lines.append(f"... [{len(text) - OUTPUT_VIEW_CHARS} more characters]")
+        verdict = report.audit_verdict
+        if verdict is not None:
+            lines.append("")
+            lines.append("--- strict audit verdict ---")
+            lines.append(f"verdict        : {verdict.verdict.value}")
+            lines.append(f"summary        : {verdict.summary}")
+            lines.append(f"findings       : {len(verdict.findings)}")
+            lines.append(f"fix_prompt     : {len(verdict.fix_prompt)} chars")
+            for finding in verdict.findings[:5]:
+                lines.append(f"  [{finding.severity.value}] {finding.message}")
         self.result_view.setPlainText("\n".join(lines))
         self.failure_label.setText(
             (result.error if result is not None and result.error else "")

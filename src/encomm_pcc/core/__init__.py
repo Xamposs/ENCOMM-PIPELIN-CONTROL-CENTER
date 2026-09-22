@@ -15,11 +15,15 @@ from .config import (
 from .controller import ControlOutcome, ControlResult, PipelineController
 from .events import EventLog, Listener, LogRecord, NullEventLog
 from .executor import (
+    AUDITOR_ROLE,
     DEFAULT_TASK_ROLE,
     ExecutionOutcome,
     ExecutionReport,
     Executor,
+    MAX_AUDIT_ROUNDS,
+    TaskNextAction,
     TaskSpec,
+    next_task_action,
 )
 from .hermes_profiles import (
     ProfileDiscoveryResult,
@@ -34,9 +38,18 @@ from .session_manager import (
     SessionManager,
     decide_session_action,
 )
+from .verdict_parser import (
+    AUDIT_ENVELOPE_END,
+    AUDIT_ENVELOPE_START,
+    VerdictParseError,
+    parse_audit_verdict,
+)
 
 __all__ = [
     "APP_NAME",
+    "AUDIT_ENVELOPE_END",
+    "AUDIT_ENVELOPE_START",
+    "AUDITOR_ROLE",
     "AppPaths",
     "ControlOutcome",
     "ControlResult",
@@ -48,6 +61,7 @@ __all__ = [
     "Executor",
     "Listener",
     "LogRecord",
+    "MAX_AUDIT_ROUNDS",
     "MAX_BATCH_SIZE",
     "MIN_BATCH_SIZE",
     "NullEventLog",
@@ -57,10 +71,14 @@ __all__ = [
     "SessionAction",
     "SessionDecision",
     "SessionManager",
+    "TaskNextAction",
     "TaskSpec",
+    "VerdictParseError",
     "decide_session_action",
     "default_paths",
     "discover_profiles",
+    "next_task_action",
+    "parse_audit_verdict",
     "parse_profile_list",
     "placeholder_role_config",
     "profile_roots",

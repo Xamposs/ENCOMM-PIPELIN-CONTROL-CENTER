@@ -433,3 +433,176 @@ adapter is undispatched rather than mis-dispatched.
 by evidence in a session report. A future driver that really can cancel mid-prompt
 advertises it only alongside a real kill path in the process layer — and
 `scripts/session_002_smoke.py` is the harness that re-proves the Hermes claims.
+
+---
+
+## D-019 — Strict structured audit verdicts from untrusted model output
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** The Task Auditor must gate task completion, so its answer flows
+into a state machine. If that answer were free text, the state machine would be
+controlled by prose — and a malformed or hallucinated answer could become a
+green light.
+
+**Decision.** The audit result is a strict, machine-checkable contract
+(`domain/audit.py`): `verdict` ∈ {`PASS`, `NEEDS_FIX`, `BLOCKED`}, `summary`,
+`findings` (severity ∈ {critical, high, medium, low} + message + evidence),
+`fix_prompt`. Model output is parsed by `core/verdict_parser.py` as **untrusted
+input**: bounded size (200 000 chars raw, 50 findings, per-string caps), strict
+`json.loads` only — **no eval/exec/YAML** — an exact verdict whitelist, and
+fails closed. Semantic rules encoded in the parser: `PASS` must have an empty
+`fix_prompt` and no critical/high findings; `NEEDS_FIX` **must** carry a
+non-empty `fix_prompt`. Any parse failure raises `VerdictParseError` and the
+executor marks the task `BLOCKED` — a malformed response can never become
+`PASS`. The auditor prompt packet (`core/audit_packet.py`) tells the model to
+emit the verdict inside exactly delimited markers.
+
+**Reason.** The loop is only safe if the supervisor, not the model, decides
+transitions, and only if a broken answer stops the loop loudly instead of
+corrupting it.
+
+**Consequence.** Verdicts are stored bounded (`tasks.verdict_json`, capped) and
+re-parsed on reload. The parser is unit-tested for every failure case.
+
+---
+
+## D-020 — Capped single-task audit/fix loop; `AUDITING_TASK → BATCH_COMPLETE`
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** Session 002 ended at `AUDITING_TASK` with no way out. The brief
+requires a real fix loop with a hard round cap existing from the first commit.
+
+**Decision.** `Executor.run_task_audit()` dispatches `TASK_AUDITOR` through the
+generic role→config→driver→`SessionManager` path; `run_task_fix()` dispatches a
+corrective `BUILDER` run. `MAX_AUDIT_ROUNDS = 3` with these exact semantics:
+Audit 1 is the initial audit, Fix 1 → Audit 2, Fix 2 → Audit 3; a `NEEDS_FIX`
+returned by round 3 escalates to `BLOCKED` and no fix is ever started beyond the
+cap (both `run_task_audit` and `run_task_fix` enforce it). A successful PASS on
+the single-task audit transitions `AUDITING_TASK → BATCH_COMPLETE` with the task
+`APPROVED` and the batch `COMPLETE` — a new legal edge added to the state
+machine (the batch is genuinely complete; the final-audit phase is a later
+session). `attempts` increments per Builder unit (initial build and every fix);
+`audit_rounds` increments per audit.
+
+**Reason.** The cap must be structural, not habitual: an audit loop without a
+cap is an unbounded money/energy loop (Session 002 risk R4). The transition to
+`BATCH_COMPLETE` for a one-task batch is the honest terminal state.
+
+**Consequence.** `next_task_action()` (task-state-driven) reports the
+deterministic next step (`AUDIT`/`FIX`/`RE_AUDIT`/`COMPLETE`/`BLOCKED`) used by
+the UI and by recovery. Cap exhaustion, malformed verdicts and auditor
+`BLOCKED` verdicts all end in `BLOCKED`, never green.
+
+---
+
+## D-021 — Auditor session lifecycle: `persistent_per_batch` with restart restore
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** The auditor must remember the batch across a fix (re-audit = same
+session) while a new batch must start fresh, and the loop must survive a
+restart without a live session.
+
+**Decision.** The auditor's session policy stays `persistent_per_batch`
+(`SessionManager.decide`), so the first audit of a batch is NEW and a re-audit
+after a fix is REUSE (`--resume`). The real external auditor session id is
+persisted on the task (`tasks.auditor_session_id`) and mirrored in the
+`sessions` table. After a restart, `SessionManager.restore_session()` rebinds
+the persisted id in memory (never contacting the engine) and the executor's
+`_restore_auditor_session()` + `_ensure_work_phase()` recover the per-batch
+decision and the phase. **Sessions remain bookkeeping, never the source of
+truth** — durable truth is SQLite + workspace files (Session 001 invariant).
+
+**Reason.** "Persist the real external auditor session id" is a Session 003
+requirement, and re-auditing in a fresh auditor session would lose the batch
+context the brief wants preserved.
+
+**Consequence.** The Session 003 smoke proves `AUDITOR_INITIAL_SESSION_ID ==
+AUDITOR_REAUDIT_SESSION_ID` while `FIX_BUILDER_SESSION_ID` is a distinct new
+session (always_new). A `begin_new_batch()` increments the generation and makes
+the old auditor session ineligible — per-batch, as specified.
+
+---
+
+## D-022 — Fixes always run in a brand-new Builder session
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** Session 002 established `BUILDER = always_new`; the fix loop makes
+that rule security-relevant: a fix built on the previous Builder conversation is
+a fork of an untrusted implementation narrative.
+
+**Decision.** `run_task_fix()` resolves the BUILDER role config and refuses to
+proceed if the session decision is ever REUSE (`always_new` guarantees NEW), and
+records the fix run's real external session id in `tasks.fix_session_id`. The
+fix prompt (`core/audit_packet.render_fix_prompt`) is self-contained: original
+task prompt + auditor findings + auditor `fix_prompt` + workspace boundary,
+explicitly telling the Builder it has no memory of prior sessions.
+
+**Reason.** The audit/fix loop is only meaningful if the correction is
+deterministic and reproducible; the auditor's `fix_prompt` is the tested
+interface between the two roles.
+
+**Consequence.** `FIX_BUILDER_SESSION_ID != AUDITOR_INITIAL_SESSION_ID` is both
+unit-tested and proven in the real smoke. The executor refuses a fix whose
+session decision is REUSE.
+
+---
+
+## D-023 — Restart recovery restores the phase and decides, never auto-resumes
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** A crash must not require model memory; the app must know whether
+the next action is AUDIT, FIX, RE-AUDIT or BLOCKED. Session 002 persisted task
+records but `load_pipeline_state` always returned the phase as `IDLE`.
+
+**Decision.** Schema v3 persists the pipeline phase on the batch row
+(`batches.phase`), written by `save_pipeline_state` and restored by
+`load_pipeline_state`; `next_task_action()` is task-state-driven so the decision
+survives even a phase-less legacy row, and `Executor._ensure_work_phase()`
+walks legal edges from `IDLE` to the required work phase when a restored batch
+is in flight. **Starting the application never starts an AI process**: recovery
+only identifies the safe next action; the operator triggers it from the UI.
+
+**Reason.** "The application knows whether it should audit, fix, re-audit, or
+remain blocked" is a Session 003 pass criterion, and auto-resuming on launch is
+explicitly forbidden.
+
+**Consequence.** The migration path is `v2 → v3` (one targeted upgrade adding
+six `tasks` columns and `batches.phase`). Recovery is covered by
+`test_recovery_resumes_the_auditor_session_after_restart` and the real smoke's
+STEP 8 reload.
+
+---
+
+## D-024 — The Session 003 smoke is scratch-only and costs at most three model runs
+
+**Date:** Session 003
+**Status:** Accepted
+
+**Context.** The loop must be proven with a real engine, but a real engine is
+expensive and dangerous if pointed at a production repository.
+
+**Decision.** `scripts/session_003_audit_fix_smoke.py` builds a throwaway git
+repo under the system temp dir with a deliberately defective `calculator.py`
+(`add` returns `a - b`) and a deterministic plain-python test. The Auditor and
+Builder prompts restrict all tool use to that scratch path. Maximum real model
+runs: initial audit, fix, re-audit = **3**. A failure stops the script with the
+child's own error text and is diagnosed, never brute-forced with retries. No
+production repository, no Control Center source, no Hermes/LeanCTX config is
+ever touched.
+
+**Reason.** The brief demands real-loop proof without modelling an AI that
+intentionally writes a bad implementation (the defect pre-exists the loop).
+
+**Consequence.** The smoke asserts the session identities and the PASS verdict
+from real engine output, re-reads the state from SQLite, and refuses to call
+itself green on anything less.

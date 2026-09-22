@@ -177,6 +177,20 @@ class TaskStateRecord:
     attempts: int = 0
     audit_rounds: int = 0
     last_error: str | None = None
+    #: Latest strict verdict value (``PASS``/``NEEDS_FIX``/``BLOCKED`` or None).
+    latest_verdict: str | None = None
+    #: Bounded JSON of the latest :class:`~encomm_pcc.domain.audit.AuditVerdictResult`
+    #: (summary + findings + fix prompt).  Never a full transcript.
+    verdict_json: str | None = None
+    #: The auditor-generated deterministic correction text (also inside
+    #: ``verdict_json``); kept as a column so a fix run can be resumed/audited
+    #: without re-parsing the payload.
+    fix_prompt: str | None = None
+    #: Real external session ids, mirrored from the engine and persisted so the
+    #: session-isolation contract survives a restart.
+    auditor_session_id: str | None = None
+    builder_session_id: str | None = None
+    fix_session_id: str | None = None
     updated_at: str = field(default_factory=utc_now)
 
     def __post_init__(self) -> None:
@@ -193,6 +207,12 @@ class TaskStateRecord:
             "attempts": self.attempts,
             "audit_rounds": self.audit_rounds,
             "last_error": self.last_error,
+            "latest_verdict": self.latest_verdict,
+            "verdict_json": self.verdict_json,
+            "fix_prompt": self.fix_prompt,
+            "auditor_session_id": self.auditor_session_id,
+            "builder_session_id": self.builder_session_id,
+            "fix_session_id": self.fix_session_id,
             "updated_at": self.updated_at,
         }
 
@@ -207,6 +227,26 @@ class TaskStateRecord:
             attempts=int(data.get("attempts", 0)),
             audit_rounds=int(data.get("audit_rounds", 0)),
             last_error=(str(data["last_error"]) if data.get("last_error") else None),
+            latest_verdict=(
+                str(data["latest_verdict"]) if data.get("latest_verdict") else None
+            ),
+            verdict_json=(
+                str(data["verdict_json"]) if data.get("verdict_json") else None
+            ),
+            fix_prompt=(str(data["fix_prompt"]) if data.get("fix_prompt") else None),
+            auditor_session_id=(
+                str(data["auditor_session_id"])
+                if data.get("auditor_session_id")
+                else None
+            ),
+            builder_session_id=(
+                str(data["builder_session_id"])
+                if data.get("builder_session_id")
+                else None
+            ),
+            fix_session_id=(
+                str(data["fix_session_id"]) if data.get("fix_session_id") else None
+            ),
             updated_at=str(data.get("updated_at") or utc_now()),
         )
 
@@ -224,6 +264,9 @@ class BatchState:
     workspace_id: str = ""
     size: int = 5
     status: BatchStatus = BatchStatus.CREATED
+    #: Pipeline phase this batch belongs to, persisted so a restart can restore
+    #: the correct work phase (IDLE until the batch starts running).
+    phase: str = PipelinePhase.IDLE.value
     tasks: list[TaskStateRecord] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -257,6 +300,7 @@ class BatchState:
             "workspace_id": self.workspace_id,
             "size": self.size,
             "status": self.status.value,
+            "phase": self.phase,
             "tasks": [t.to_dict() for t in self.tasks],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -269,6 +313,7 @@ class BatchState:
             workspace_id=str(data.get("workspace_id", "")),
             size=int(data.get("size", 5)),
             status=BatchStatus(str(data.get("status", BatchStatus.CREATED.value))),
+            phase=str(data.get("phase") or PipelinePhase.IDLE.value),
             tasks=[TaskStateRecord.from_dict(t) for t in (data.get("tasks") or [])],
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),

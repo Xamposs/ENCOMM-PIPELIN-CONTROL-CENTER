@@ -1,8 +1,12 @@
--- ENCOMM Pipeline Control Center — schema v2.
+-- ENCOMM Pipeline Control Center — schema v3.
 -- v1 → v2 adds `tasks.prompt` (the implementation prompt a task must keep so it
--- can be re-read, re-dispatched and audited after a restart).  The in-place
--- upgrade for an existing v1 database is a single targeted ALTER in
--- Database._upgrade() — still no migration framework; see docs/DECISIONS.md.
+-- can be re-read, re-dispatched and audited after a restart).
+-- v2 → v3 adds the audit/fix round-trip columns (Session 003): the latest
+-- structured verdict, its serialised payload + fix_prompt, and the real
+-- external session ids of the initial Builder, the Task Auditor and the fix
+-- Builder, so the session-isolation contract survives a restart.
+-- All in-place upgrades are single targeted ALTERs in Database._upgrade() —
+-- still no migration framework; see docs/DECISIONS.md.
 
 CREATE TABLE IF NOT EXISTS schema_meta (
     key   TEXT PRIMARY KEY,
@@ -56,6 +60,7 @@ CREATE TABLE IF NOT EXISTS batches (
     workspace_id TEXT NOT NULL,
     size         INTEGER NOT NULL DEFAULT 5,
     status       TEXT NOT NULL,
+    phase        TEXT NOT NULL DEFAULT 'IDLE',
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL,
     FOREIGN KEY (workspace_id) REFERENCES workspaces (workspace_id) ON DELETE CASCADE
@@ -65,16 +70,22 @@ CREATE INDEX IF NOT EXISTS idx_batches_workspace
     ON batches (workspace_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS tasks (
-    task_id      TEXT PRIMARY KEY,
-    batch_id     TEXT NOT NULL,
-    task_index   INTEGER NOT NULL DEFAULT 0,
-    title        TEXT NOT NULL DEFAULT '',
-    prompt       TEXT NOT NULL DEFAULT '',
-    state        TEXT NOT NULL,
-    attempts     INTEGER NOT NULL DEFAULT 0,
-    audit_rounds INTEGER NOT NULL DEFAULT 0,
-    last_error   TEXT,
-    updated_at   TEXT NOT NULL,
+    task_id            TEXT PRIMARY KEY,
+    batch_id           TEXT NOT NULL,
+    task_index         INTEGER NOT NULL DEFAULT 0,
+    title              TEXT NOT NULL DEFAULT '',
+    prompt             TEXT NOT NULL DEFAULT '',
+    state              TEXT NOT NULL,
+    attempts           INTEGER NOT NULL DEFAULT 0,
+    audit_rounds       INTEGER NOT NULL DEFAULT 0,
+    last_error         TEXT,
+    latest_verdict     TEXT,
+    verdict_json       TEXT,
+    fix_prompt         TEXT,
+    auditor_session_id TEXT,
+    builder_session_id TEXT,
+    fix_session_id     TEXT,
+    updated_at         TEXT NOT NULL,
     FOREIGN KEY (batch_id) REFERENCES batches (batch_id) ON DELETE CASCADE
 );
 

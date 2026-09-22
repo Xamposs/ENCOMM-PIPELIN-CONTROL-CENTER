@@ -235,6 +235,37 @@ class SessionManager:
         if session_id and self._database is not None:
             self._database.close_session(session_id)
 
+    def restore_session(
+        self,
+        role: AgentRole,
+        session_id: str,
+        *,
+        batch_generation: int | None = None,
+    ) -> None:
+        """Rebind a persisted external session id after a restart.
+
+        Sessions are bookkeeping, never the source of truth (durable truth is
+        SQLite + workspace files), so this only re-populates the in-memory map
+        from a row the database already holds.  It does **not** write to the
+        database and it does **not** contact the engine.
+
+        ``batch_generation``: the generation recorded in the session row's
+        metadata.  After a fresh process the in-memory generator starts at 0;
+        a restored session belongs to the batch that was already running, so
+        the generator is advanced to match (a later ``begin_new_batch()``
+        increments past it and makes the restored session ineligible — exactly
+        the per-batch policy).
+        """
+        if not session_id:
+            return
+        generation = self._batch_generation if batch_generation is None else batch_generation
+        if generation < 1:
+            generation = 1  # the restored work belongs to the current (only) batch
+        if self._batch_generation < generation:
+            self._batch_generation = generation
+        self._sessions[role] = str(session_id)
+        self._session_batch[role] = self._batch_generation
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "workspace_id": self._workspace_id,

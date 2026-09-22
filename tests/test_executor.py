@@ -440,17 +440,26 @@ def test_state_after_a_dispatch_reloads_from_sqlite_alone(
 
 
 # -- schema guard ---------------------------------------------------------------
-def test_schema_is_v2_with_the_prompt_column(database) -> None:  # noqa: ANN001
-    assert database.schema_version() == 2
+def test_schema_is_v3_with_the_audit_columns(database) -> None:  # noqa: ANN001
+    assert database.schema_version() == 3
     columns = {
         row["name"]
         for row in database.connection.execute("PRAGMA table_info(tasks)").fetchall()
     }
-    assert "prompt" in columns
+    for column in (
+        "prompt",
+        "latest_verdict",
+        "verdict_json",
+        "fix_prompt",
+        "auditor_session_id",
+        "builder_session_id",
+        "fix_session_id",
+    ):
+        assert column in columns
 
 
 def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
-    """The first in-place upgrade: v1 → v2 adds tasks.prompt."""
+    """The in-place upgrade chain: v1 → v2 → v3 (prompt + audit columns)."""
     from encomm_pcc.persistence import Database
 
     legacy = Database(tmp_path / "legacy.db")
@@ -479,12 +488,64 @@ def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
 
     reopened = Database(tmp_path / "legacy.db").open()
     try:
-        assert reopened.schema_version() == 2
+        assert reopened.schema_version() == 3
         columns = {
             row["name"]
             for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
         }
         assert "prompt" in columns
+        assert "latest_verdict" in columns
+        assert "fix_session_id" in columns
+    finally:
+        reopened.close()
+
+
+def test_a_v2_database_is_upgraded_in_place(tmp_path: Path) -> None:
+    """The v2 → v3 upgrade adds the audit columns without touching rows."""
+    from encomm_pcc.persistence import Database
+
+    legacy = Database(tmp_path / "legacy_v2.db")
+    legacy.open()
+    legacy.connection.execute(
+        "UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'"
+    )
+    legacy.connection.execute(
+        """CREATE TABLE tasks_v2 (
+            task_id      TEXT PRIMARY KEY,
+            batch_id     TEXT NOT NULL,
+            task_index   INTEGER NOT NULL DEFAULT 0,
+            title        TEXT NOT NULL DEFAULT '',
+            prompt       TEXT NOT NULL DEFAULT '',
+            state        TEXT NOT NULL,
+            attempts     INTEGER NOT NULL DEFAULT 0,
+            audit_rounds INTEGER NOT NULL DEFAULT 0,
+            last_error   TEXT,
+            updated_at   TEXT NOT NULL
+        )"""
+    )
+    legacy.connection.execute("DROP TABLE tasks")
+    legacy.connection.execute(
+        "ALTER TABLE tasks_v2 RENAME TO tasks"
+    )
+    legacy.connection.commit()
+    legacy.close()
+
+    reopened = Database(tmp_path / "legacy_v2.db").open()
+    try:
+        assert reopened.schema_version() == 3
+        columns = {
+            row["name"]
+            for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        for column in (
+            "latest_verdict",
+            "verdict_json",
+            "fix_prompt",
+            "auditor_session_id",
+            "builder_session_id",
+            "fix_session_id",
+        ):
+            assert column in columns
     finally:
         reopened.close()
 

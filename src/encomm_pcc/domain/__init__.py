@@ -4,6 +4,14 @@ This package has no Qt and no driver dependencies so it can be unit-tested and
 reused headlessly.
 """
 
+from .audit import (
+    UNRESOLVED_SEVERITIES,
+    VERDICTS,
+    AuditFinding,
+    AuditVerdict,
+    AuditVerdictResult,
+    FindingSeverity,
+)
 from .enums import (
     AgentRole,
     BatchStatus,
@@ -35,9 +43,13 @@ __all__ = [
     "ACTIVE_PIPELINE_PHASES",
     "AgentRole",
     "AgentRoleConfig",
+    "AuditFinding",
+    "AuditVerdict",
+    "AuditVerdictResult",
     "BatchState",
     "BatchStatus",
     "EventLevel",
+    "FindingSeverity",
     "InvalidTransitionError",
     "PAUSE_RESUME_TARGETS",
     "PipelinePhase",
@@ -48,6 +60,8 @@ __all__ = [
     "TRANSITIONS",
     "TaskState",
     "TaskStateRecord",
+    "UNRESOLVED_SEVERITIES",
+    "VERDICTS",
     "WorkspaceConfig",
     "default_session_policy",
     "new_id",

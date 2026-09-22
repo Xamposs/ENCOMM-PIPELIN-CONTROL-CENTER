@@ -127,6 +127,8 @@ class MainWindow(QMainWindow):
         self.batch_panel.resume_requested.connect(self._on_resume)
         self.batch_panel.stop_requested.connect(self._on_stop)
         self.task_panel.dispatch_requested.connect(self._on_dispatch_requested)
+        self.task_panel.audit_requested.connect(self._on_audit_requested)
+        self.task_panel.fix_requested.connect(self._on_fix_requested)
 
     def _subscribe_to_events(self) -> None:
         self.controller.events.subscribe(self._on_event)
@@ -285,6 +287,42 @@ class MainWindow(QMainWindow):
             return
         self.task_panel.show_report(None)
         self.statusBar().showMessage("Dispatch finished without a report.")
+
+    # -- audit / fix (off the UI thread) -------------------------------------
+    def _on_audit_requested(self) -> None:
+        self._run_loop_action("audit", "Task Auditor run")
+
+    def _on_fix_requested(self) -> None:
+        self._run_loop_action("fix", "fix run (NEW Builder session)")
+
+    def _run_loop_action(self, action: str, label: str) -> None:
+        executor = self.controller.executor
+        if executor is None:
+            self.controller.events.error(
+                "Audit/fix requested, but no executor is attached.", source="ui"
+            )
+            self.statusBar().showMessage("No executor attached — nothing was dispatched.")
+            return
+        if executor.is_running:
+            self.statusBar().showMessage("An executor action is already running.")
+            return
+        self.task_panel.set_busy(True)
+        self.controller.events.info(
+            f"{label} requested — running off the UI thread.",
+            source="ui",
+        )
+        self.statusBar().showMessage(f"{label} — running off the UI thread…")
+        thread, worker = start_executor_worker(
+            executor,
+            TaskSpec(title="", prompt=""),
+            timeout_s=self._dispatch_timeout_s,
+            action=action,
+            parent=self,
+        )
+        worker.finished.connect(self._on_dispatch_finished)
+        thread.finished.connect(self._on_dispatch_thread_finished)
+        self._thread, self._worker = thread, worker
+        thread.start()
 
     def _on_dispatch_thread_finished(self) -> None:
         self._thread = None

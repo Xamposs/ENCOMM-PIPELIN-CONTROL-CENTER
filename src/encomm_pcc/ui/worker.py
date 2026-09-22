@@ -22,7 +22,7 @@ __all__ = ["ExecutorWorker", "start_executor_worker"]
 
 
 class ExecutorWorker(QObject):
-    """Runs one dispatch; emits ``finished`` with the real report."""
+    """Runs one executor action; emits ``finished`` with the real report."""
 
     finished = Signal(object)
 
@@ -31,18 +31,26 @@ class ExecutorWorker(QObject):
         executor: Executor,
         spec: TaskSpec,
         timeout_s: float | None = None,
+        action: str = "dispatch",
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.executor = executor
         self.spec = spec
         self.timeout_s = timeout_s
+        #: ``dispatch`` (Builder run) | ``audit`` (Task Auditor) | ``fix``.
+        self.action = action
 
     def run(self) -> None:
         """Slot connected to ``QThread.started``."""
         report: ExecutionReport | None = None
         try:
-            report = self.executor.dispatch_single_task(self.spec, timeout_s=self.timeout_s)
+            if self.action == "audit":
+                report = self.executor.run_task_audit(timeout_s=self.timeout_s)
+            elif self.action == "fix":
+                report = self.executor.run_task_fix(timeout_s=self.timeout_s)
+            else:
+                report = self.executor.dispatch_single_task(self.spec, timeout_s=self.timeout_s)
         except Exception as exc:  # noqa: BLE001 - the UI must never lose the failure
             report = ExecutionReport(
                 outcome=ExecutionOutcome.FAILED,
@@ -58,15 +66,19 @@ def start_executor_worker(
     spec: TaskSpec,
     *,
     timeout_s: float | None = None,
+    action: str = "dispatch",
     parent: QObject | None = None,
 ) -> tuple[QThread, ExecutorWorker]:
     """Start ``executor`` on a fresh thread; returns ``(thread, worker)``.
 
     The caller keeps both references: dropping them would let Python garbage
     collect a running QThread.
+
+    ``action`` selects the executor method: ``dispatch`` (Builder run),
+    ``audit`` (Task Auditor) or ``fix`` (Builder fix in a NEW session).
     """
     thread = QThread(parent)
-    worker = ExecutorWorker(executor, spec, timeout_s)
+    worker = ExecutorWorker(executor, spec, timeout_s, action=action)
     worker.moveToThread(thread)
     thread.started.connect(worker.run)
     worker.finished.connect(thread.quit)

@@ -76,6 +76,7 @@ TRANSITIONS: Mapping[PipelinePhase, frozenset[PipelinePhase]] = {
             PipelinePhase.FIX_REQUIRED,
             PipelinePhase.RUNNING_TASK,
             PipelinePhase.READY_FOR_FINAL_AUDIT,
+            PipelinePhase.BATCH_COMPLETE,
             PipelinePhase.PAUSED,
             PipelinePhase.BLOCKED,
             PipelinePhase.FAILED,

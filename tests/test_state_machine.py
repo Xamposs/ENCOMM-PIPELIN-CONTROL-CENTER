@@ -26,6 +26,7 @@ def test_starts_idle() -> None:
         (PipelinePhase.FIX_REQUIRED, PipelinePhase.RUNNING_FIX),
         (PipelinePhase.RUNNING_FIX, PipelinePhase.AUDITING_TASK),
         (PipelinePhase.AUDITING_TASK, PipelinePhase.READY_FOR_FINAL_AUDIT),
+        (PipelinePhase.AUDITING_TASK, PipelinePhase.BATCH_COMPLETE),
         (PipelinePhase.READY_FOR_FINAL_AUDIT, PipelinePhase.FINAL_AUDIT_RUNNING),
         (PipelinePhase.FINAL_AUDIT_RUNNING, PipelinePhase.BATCH_COMPLETE),
         (PipelinePhase.BATCH_COMPLETE, PipelinePhase.IDLE),

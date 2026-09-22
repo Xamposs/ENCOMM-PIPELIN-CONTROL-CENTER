@@ -1,7 +1,7 @@
 # Architecture — ENCOMM Pipeline Control Center
 
-**Version:** 0.2 (real Hermes executor path)
-**Status:** accurate as of Session 002. This document describes what the code
+**Version:** 0.3 (task auditor + capped fix loop)
+**Status:** accurate as of Session 003. This document describes what the code
 actually does today, including what it deliberately does *not* do.
 
 ---
@@ -13,21 +13,26 @@ The eventual pipeline runs batches of tasks where an **orchestrator** plans,
 a **builder** implements, a **task auditor** checks each task, a fix loop runs
 when needed, and a **final auditor** audits the completed batch.
 
-**v0.1 delivered the architecture and the shell; v0.2 adds the first real
-execution path.** The application launches, persists real state, resolves driver
-capabilities, enforces session policy rules, and can now dispatch **one**
-controlled task through a deterministic executor to a **real Hermes session** —
-capturing the real exit code, the real session id and the real output, and
-persisting all of it.
+**v0.1 delivered the architecture and the shell; v0.2 added the first real
+execution path; v0.3 closes the single-task loop.** The application launches,
+persists real state, resolves driver capabilities, enforces session policy
+rules, dispatches a controlled task to a **real Hermes session**, then runs a
+**real Task Auditor** through the same generic role/driver path, parses its
+structured verdict with a strict parser, and drives a **capped fix loop** to
+either `BATCH_COMPLETE` (PASS) or `BLOCKED` — all with real exit codes, real
+session ids and everything durable in SQLite.
 
-### Explicit non-goals for v0.2
+### Explicit non-goals for v0.3
 
-- No task auditor, no fix loop, no final batch audit.
 - No multi-task batches, no orchestrator planning, no batch-size dispatch.
+- No Final Auditor, no `READY_FOR_FINAL_AUDIT`/`FINAL_AUDIT_RUNNING` reachable
+  states, no automatic next-batch generation.
 - No real Codex / Claude Code / OpenCode / Ollama / Kimi integration. Only Hermes
   is real; the other adapters remain refusing placeholders.
 - No web server, Electron, browser frontend, Docker or cloud backend.
 - No scheduled tasks, services, installer or system-wide installs.
+- No automatic resume of AI processes at application start (recovery only
+  identifies the next action).
 
 ---
 
@@ -266,16 +271,16 @@ are not registered and have no code.
 
 ## 7. Persistence
 
-SQLite via the Python stdlib (`sqlite3`), schema v1, seven tables:
+SQLite via the Python stdlib (`sqlite3`), schema v3, seven tables:
 
 | Table | Holds |
 |---|---|
-| `schema_meta` | `schema_version` (currently `1`) |
+| `schema_meta` | `schema_version` (currently `3`) |
 | `workspaces` | workspace id, name, repository path, timestamps |
 | `role_configs` | one row per (workspace, role): engine, profile, provider, model, session policy, session id, `same_as_orchestrator`, `extra_json` |
-| `sessions` | session id, workspace, role, driver, external session id, persistent/external flags, closed_at |
-| `batches` | batch id, workspace, requested size, status |
-| `tasks` | task id, batch, index, title, state, attempts, audit rounds, last error |
+| `sessions` | session id, workspace, role, driver, external session id, persistent/external flags, closed_at, metadata (incl. `batch_generation`) |
+| `batches` | batch id, workspace, requested size, status, **phase** (v3: the pipeline phase this batch belongs to — the restart recovery anchor) |
+| `tasks` | task id, batch, index, title, prompt, state, attempts, audit rounds, last error, **latest_verdict / verdict_json / fix_prompt / auditor_session_id / builder_session_id / fix_session_id** (v3) |
 | `app_events` | timestamped event log (level, source, message, payload) |
 
 Implementation notes:
@@ -287,7 +292,8 @@ Implementation notes:
   and intentional: a session cannot outlive its workspace record.
 - `PRAGMA journal_mode = WAL` for the on-disk database.
 - **No migration framework.** `SCHEMA_VERSION` is recorded and a database
-  written by a *newer* schema is refused rather than silently mis-read. See
+  written by a *newer* schema is refused rather than silently mis-read. v1→v2
+  and v2→v3 are targeted in-place ALTER steps in `Database._upgrade()`. See
   D-008 in `DECISIONS.md`.
 
 Application state lives at `%LOCALAPPDATA%\ENCOMM Pipeline Control Center\`
@@ -319,6 +325,47 @@ BATCH_COMPLETE ──▶ IDLE | PLANNING_BATCH
 
 Tests assert that every phase is reachable from `IDLE` and that every target in
 the graph is a real phase.
+
+### Session 003 — the single-task audit/fix loop
+
+The `AUDITING_TASK` stop is lifted for one task. `Executor` gains two more
+deterministic dispatches, both through the exact same generic
+role → config → driver registry → `SessionManager` path:
+
+1. **`run_task_audit()`** from `AUDITING_TASK`:
+   - resolves `TASK_AUDITOR` config/engine, preflights, applies the
+     `persistent_per_batch` session policy (NEW on first audit, REUSE — with
+     `--resume` — on re-audit),
+   - persists `audit_rounds + 1` **before** the prompt,
+   - sends the deterministic `AuditPacket` (task context, workspace boundary,
+     strict output contract), waits for the real process,
+   - on failure → task/pipeline `FAILED`; on success parses the answer with
+     `core/verdict_parser.py` **as untrusted input** — any parse error →
+     task/pipeline `BLOCKED` (never PASS),
+   - applies the strict verdict: PASS → `AUDITING_TASK → BATCH_COMPLETE`
+     (new legal edge), task `APPROVED`, batch `COMPLETE`;
+     NEEDS_FIX → `AUDITING_TASK → FIX_REQUIRED`, task `FIX_REQUIRED`,
+     `fix_prompt` persisted; BLOCKED → task/pipeline `BLOCKED`.
+2. **`run_task_fix()`** from `FIX_REQUIRED`:
+   - resolves the BUILDER config (always `always_new`; a REUSE decision is
+     refused), increments `attempts`, persists `RUNNING_FIX`,
+   - sends the self-contained fix prompt (original task + auditor findings +
+     auditor `fix_prompt` + workspace boundary) to a **brand-new** session,
+   - on failure → `FAILED`; on success → `RUNNING_FIX → AUDITING_TASK`, task
+     `AUDITING`, the fix session id persisted — ready for the re-audit, which
+     resumes the same auditor session.
+
+**Cap.** `MAX_AUDIT_ROUNDS = 3`. Audits may start while
+`audit_rounds < MAX_AUDIT_ROUNDS` (rounds 1–3); fixes may start while
+`audit_rounds < MAX_AUDIT_ROUNDS`. A NEEDS_FIX returned by round 3 escalates
+to `BLOCKED` — no fourth audit and no third fix exist. `next_task_action()`
+reports the deterministic next step from persisted task state.
+
+**Restart.** `batches.phase` records the work phase; `load_pipeline_state`
+restores it; `SessionManager.restore_session()` rebinds the persisted auditor
+session id; `Executor._ensure_work_phase()` walks legal edges from `IDLE` when
+a restored batch is in flight. Recovery **never starts** a process — the
+operator triggers the run from the UI.
 
 ### Session 002 dispatch sequence (one task, stops at `AUDITING_TASK`)
 
@@ -396,12 +443,18 @@ implemented and not advertised (D-018).
 3. **BATCH** — size spin box (1–50, default 5), current phase, current status,
    Start / Pause / Resume / Stop buttons enabled from the state machine, and a
    hint that reflects whether an executor is attached.
-4. **TASK** — the Session 002 dispatch control: Hermes driver availability and the
+4. **TASK** — the Session 003 dispatch and loop control: Hermes driver availability and the
    resolved CLI path, discovered profiles and the selected Builder profile, task
-   title and prompt, **Dispatch task**, current Task 1 state, status, failure text
-   and the real result (outcome, exit code, session id, duration, argv, output
-   excerpt). The button is disabled unless an executor is attached and the phase
-   allows a dispatch.
+   title and prompt, **Dispatch task**, the deterministic **Next action**
+   (AUDIT / FIX / RE-AUDIT / COMPLETE / BLOCKED), **Run Task Auditor** and
+   **Run fix (NEW Builder session)** buttons (enabled only when the next action
+   permits), an audit-loop readout (latest verdict, auditor session id, fix/
+   builder session id, findings severity counts), task state (state, id,
+   attempts, `audit rounds x/3`), status, failure text and the real result
+   (outcome, exit code, session id, duration, argv, output excerpt, and the
+   strict verdict when an audit produced one). The buttons are disabled unless
+   an executor is attached and the phase allows the action. A fix run is always
+   labelled as running in a NEW Builder session.
 5. **LOG PANEL** — timestamped event log (`QPlainTextEdit`, 5000-line cap,
    monospace, Clear button, event counter), fed by `EventLog.subscribe`.
 
@@ -444,23 +497,27 @@ The Qt event loop drives the UI, and **no AI process ever runs on it**.
 
 Stated plainly so no future session mistakes a placeholder for a feature:
 
-- **No task auditor, no fix loop, no final batch audit.** Execution stops at
-  `AUDITING_TASK`, which only means "ready for the future Task Auditor".
+- **No multi-task batches, no orchestrator, no planning.** One task per batch,
+  and `BatchState.tasks` only ever holds manually supplied tasks.
+- **No Final Auditor.** `READY_FOR_FINAL_AUDIT` and `FINAL_AUDIT_RUNNING` are
+  graph nodes only; a single-task PASS completes directly via
+  `AUDITING_TASK → BATCH_COMPLETE`.
+- **No automatic next-batch generation**, no batch-size dispatch.
 - **`CodexDriver` and `GenericCliDriver` do nothing.** Both raise
   `DriverNotImplementedError` for every real operation and report
   `implemented=False`. `PLANNED_DRIVERS` (`claude_code`, `opencode`, `ollama`,
   `kimi`) still has no code.
-- **No multi-task batches, no orchestrator, no planning.** One task per batch, and
-  `BatchState.tasks` only ever holds manually supplied tasks.
-- **No batch-size dispatch.** The size is stored and displayed, never acted on.
 - **No mid-prompt cancellation** (`supports_cancellation=False`) and no streaming
   surface (`supports_streaming=False`).
-- **No task parsing or plan generation.** No prompt text is generated anywhere.
+- **No task parsing or plan generation.** No prompt text is generated other
+  than the deterministic `AuditPacket`/fix-prompt builders.
 - **No full-access "New Session" behaviour.** The button logs a placeholder event
   and creates nothing.
 - **No output artefact store.** Engine output is kept as a bounded excerpt in the
   event payload and in memory on the `PromptResult`.
 - **No packaging**, installer or frozen `.exe`.
+- **No automatic resume on application start.** Recovery restores state and
+  reports the next action; the operator triggers every AI run.
 
 ---
 
@@ -472,25 +529,27 @@ Stated plainly so no future session mistakes a placeholder for a feature:
 | A new role field | Add the field to `AgentRoleConfig`, add its key to `PipelineController.set_role_config`'s whitelist, and add the widget name to `_ROLE_FIELDS[role]`. |
 | A new phase | Add it to `PipelinePhase`, then to `TRANSITIONS` and (if pausable) `ACTIVE_PIPELINE_PHASES`. `tests/test_state_machine.py` verifies reachability automatically. |
 | A new session policy | Add it to `SessionPolicy` and handle it in `decide_session_action()`. |
-| The auditor / fix loop | Extend `Executor` (a second dispatch for `TASK_AUDITOR`, then the `AUDITING_TASK → FIX_REQUIRED → RUNNING_FIX → AUDITING_TASK` loop) with a hard round cap from the first commit; move state only through `controller.transition()`. |
+| A batch of many tasks | Generalise `Executor` around `next_task_action()`/the audit-fix primitives; the graph already has the `AUDITING_TASK → RUNNING_TASK` (next task) edge. Planned with the orchestrator in Phase 3. |
 | A schema change | Bump `SCHEMA_VERSION` in `persistence/database.py`, add the DDL to `schema.sql`, **and add the exact `ALTER` step to `Database._upgrade()`** with a test (D-016). |
 | A new UI surface | Add a panel under `ui/panels.py` that reads the controller (and, for dispatch, the executor) — never a driver directly. Long work goes through `start_executor_worker`. |
 
 ---
 
-## 14. Verification status (v0.2)
+## 14. Verification status (v0.3)
 
 | Check | Result |
 |---|---|
-| `python -m pytest` | **221 passed, 0 failed** (13 files) |
-| Real end-to-end run (`scripts/session_002_smoke.py`) | **SMOKE PASSED** — real session `20260922_172437_722edb`, process exit code `0`, output exactly `ENCOMM_PCC_HERMES_SMOKE_OK`, 12.7 s |
-| Resume proof | **PROVEN** — `--resume` continued that same session, exit code 0 |
-| Model-override proof | **PROVEN** — a run with `-m deepseek/deepseek-v4.1-flash --provider openrouter` exited 0 and the CLI reported that model |
-| Persisted result read back from SQLite | Task `AUDITING` (attempts 1, prompt stored), session row `external=1`, result event payload with real token counts |
+| `python -m pytest` | **280 passed, 0 failed** (18 files) |
+| Real audit/fix smoke (`scripts/session_003_audit_fix_smoke.py`) | **See `docs/reports/SESSION_003_AUDITOR_FIX_LOOP.md`** — real auditor NEEDS_FIX → real fix in a NEW Builder session → deterministic test passes → same auditor session re-audits → PASS → `BATCH_COMPLETE` |
+| Real Session 002 smoke | Still **SMOKE PASSED** (real Builder path intact) |
+| Verdict parser fails closed | Asserted by 30 offline tests (malformed/oversized/invalid/PASS-with-defect/NEEDS_FIX-without-prompt …) |
+| Round cap enforced | `MAX_AUDIT_ROUNDS = 3`; cap tests prove BLOCKED and no third fix |
+| Session isolation | Auditor resumed (same id), fix in a NEW session — offline + real smoke |
+| Persisted result read back from SQLite | Task APPROVED, verdict PASS, session ids survive `load_pipeline_state` |
 | Domain/persistence/core import without Qt | Asserted by test |
 | Every source file compiles | Asserted by test |
 | Codex/GenericCli still refuse real work | Asserted by test |
-| A failed child can never be a green task | Asserted by test at both layers (exit codes 2 and 3) |
+| A failed child can never be a green task | Asserted at both layers (exit codes 2 and 3; auditor and fix failures) |
 | UI stays responsive during a dispatch | Asserted by offscreen test (event loop ticks while the worker sleeps) |
-| Repository contains no secrets | Pattern-scanned before commit — see `reports/SESSION_002_HERMES_EXECUTOR.md` §SECURITY_CHECK |
+| Repository contains no secrets | Pattern-scanned before commit — see `SESSION_003_AUDITOR_FIX_LOOP.md` §SECURITY_CHECK |
 | Hermes profiles/config modified | **None** — read-only discovery plus `-p <existing profile>` only |

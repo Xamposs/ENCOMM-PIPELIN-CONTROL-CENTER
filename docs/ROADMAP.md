@@ -69,24 +69,46 @@ Exit criteria met:
 
 ---
 
-## Phase 2 — Task auditor + fix loop
+## Phase 2 — Task auditor + fix loop ✅ DONE (Session 003)
 
 **Goal:** the audit/fix loop closes for a single task.
 
-Scope:
+Delivered:
 
-- `TASK_AUDITOR` driven by its own engine config and `persistent_per_batch`
-  session policy, resolved through `SessionManager.decide()`.
-- Structured audit verdicts (pass / fail / needs-fix) rather than free text.
-- `FIX_REQUIRED → RUNNING_FIX → AUDITING_TASK` loop with a **hard round cap**
-  and escalation to `BLOCKED` when the cap is hit.
-- `TaskStateRecord.attempts` and `audit_rounds` incremented for real.
+- **Real Task Auditor.** `TASK_AUDITOR` driven by its own engine config and
+  `persistent_per_batch` session policy, resolved through
+  `SessionManager.decide()` and the same generic role/driver path as the
+  Builder — no auditor-specific engine path.
+- **Strict structured verdicts** (`domain/audit.py` +
+  `core/verdict_parser.py`): PASS / NEEDS_FIX / BLOCKED with findings and a
+  deterministic `fix_prompt`; parser treats model output as untrusted, is
+  bounded and fails closed — malformed output can never become PASS.
+- **`FIX_REQUIRED → RUNNING_FIX → AUDITING_TASK` loop with a hard round cap**
+  (`MAX_AUDIT_ROUNDS = 3`) and escalation to `BLOCKED` when the cap is hit,
+  with `attempts` and `audit_rounds` incremented for real. No infinite loop is
+  reachable by construction.
+- **Session isolation:** fixes run in brand-new Builder sessions; re-audits
+  resume the same auditor session (proven offline and in the real smoke).
+- **Restart recovery:** `batches.phase` persisted; state/verdict/session ids
+  reload from SQLite; `next_task_action()` decides the safe next step without
+  auto-running anything.
+- **UI:** the TASK panel shows the next action (AUDIT/FIX/RE-AUDIT/COMPLETE/
+  BLOCKED), verdict, audit round, session readouts, and Run-Auditor / Run-fix
+  buttons.
+- **280 passing tests** (was 221), including the full failure-case matrix for
+  the parser and the loop.
+- **Real end-to-end smoke** `scripts/session_003_audit_fix_smoke.py`: a
+  deliberately defective scratch git repo → real auditor NEEDS_FIX → real
+  fix in a NEW Builder session → deterministic test passes → same auditor
+  session re-audits → PASS → task APPROVED, pipeline BATCH_COMPLETE.
 
-Exit criteria:
+Exit criteria met:
 
-- A deliberately failing task is fixed and re-audited to a pass.
-- The round cap is enforced and observable in the event log.
-- No infinite loop is reachable by construction.
+- A deliberately failing task is fixed and re-audited to a pass (real smoke).
+- The round cap is enforced and observable in the event log (unit-tested).
+- No infinite loop is reachable by construction (cap tests).
+- Session IDs prove isolation/reuse semantics (real smoke STEP 7).
+- State and verdict survive SQLite reload (STEP 8).
 
 ---
 

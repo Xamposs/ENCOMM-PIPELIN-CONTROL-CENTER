@@ -38,7 +38,7 @@ from ..domain.models import new_id
 
 __all__ = ["SCHEMA_PATH", "SCHEMA_VERSION", "Database", "PersistenceError"]
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -149,6 +149,27 @@ class Database:
             columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(tasks)")}
             if "prompt" not in columns:
                 conn.execute("ALTER TABLE tasks ADD COLUMN prompt TEXT NOT NULL DEFAULT ''")
+        if from_version <= 2:
+            # v2 → v3: audit/fix round-trip columns + the batch's pipeline phase
+            # (so restart recovery can restore AUDITING_TASK / FIX_REQUIRED).
+            # All NULL/default by default so existing rows keep working; every
+            # column is a targeted single ALTER, still no migration framework (D-008).
+            columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(tasks)")}
+            for column in (
+                "latest_verdict",
+                "verdict_json",
+                "fix_prompt",
+                "auditor_session_id",
+                "builder_session_id",
+                "fix_session_id",
+            ):
+                if column not in columns:
+                    conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
+            batch_columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(batches)")}
+            if "phase" not in batch_columns:
+                conn.execute(
+                    "ALTER TABLE batches ADD COLUMN phase TEXT NOT NULL DEFAULT 'IDLE'"
+                )
 
     def schema_version(self) -> int:
         row = self.connection.execute(
@@ -322,11 +343,12 @@ class Database:
         with self.transaction() as conn:
             conn.execute(
                 """
-                INSERT INTO batches (batch_id, workspace_id, size, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO batches (batch_id, workspace_id, size, status, phase, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (batch_id) DO UPDATE SET
                     size = excluded.size,
                     status = excluded.status,
+                    phase = excluded.phase,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -334,6 +356,7 @@ class Database:
                     batch.workspace_id,
                     batch.size,
                     batch.status.value,
+                    batch.phase,
                     batch.created_at,
                     batch.updated_at,
                 ),
@@ -344,8 +367,10 @@ class Database:
                     """
                     INSERT INTO tasks (
                         task_id, batch_id, task_index, title, prompt, state, attempts,
-                        audit_rounds, last_error, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        audit_rounds, last_error, latest_verdict, verdict_json,
+                        fix_prompt, auditor_session_id, builder_session_id,
+                        fix_session_id, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
@@ -357,6 +382,12 @@ class Database:
                         task.attempts,
                         task.audit_rounds,
                         task.last_error,
+                        task.latest_verdict,
+                        task.verdict_json,
+                        task.fix_prompt,
+                        task.auditor_session_id,
+                        task.builder_session_id,
+                        task.fix_session_id,
                         task.updated_at,
                     ),
                 )
@@ -452,19 +483,33 @@ class Database:
             self.save_role_config(state.workspace.workspace_id, config)
         if state.batch is not None:
             state.batch.workspace_id = state.workspace.workspace_id
+            state.batch.phase = state.phase.value
             self.save_batch(state.batch)
         return state
 
     def load_pipeline_state(self, workspace_id: str) -> PipelineState | None:
-        """Rebuild a pipeline aggregate for ``workspace_id``."""
+        """Rebuild a pipeline aggregate for ``workspace_id``.
+
+        The active batch row carries the last persisted ``phase``, so a restart
+        restores the correct work phase (e.g. ``AUDITING_TASK`` after a Builder
+        run, ``FIX_REQUIRED`` after a NEEDS_FIX audit) rather than defaulting to
+        ``IDLE``.
+        """
         workspace = self.get_workspace(workspace_id)
         if workspace is None:
             return None
+        batch = self.load_active_batch(workspace_id)
+        phase = PipelinePhase.IDLE
+        if batch is not None and batch.phase:
+            try:
+                phase = PipelinePhase(str(batch.phase))
+            except ValueError:  # pragma: no cover - stored data is ours
+                phase = PipelinePhase.IDLE
         return PipelineState(
-            phase=PipelinePhase.IDLE,
+            phase=phase,
             workspace=workspace,
             role_configs=self.load_role_configs(workspace_id),
-            batch=self.load_active_batch(workspace_id),
+            batch=batch,
         )
 
     # -- introspection -----------------------------------------------------
