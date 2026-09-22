@@ -309,16 +309,52 @@ class RolePanel(QGroupBox):
 
 
 class BatchPanel(QGroupBox):
-    """BATCH section: size, status, Start / Pause / Stop."""
+    """BATCH section: Project Brief, size, status, Start/Pause/Resume/Stop.
+
+    Session 004: the primary control is PLAN + START BATCH — the
+    Orchestrator plans exactly ``size`` tasks and the autonomous batch runner
+    executes the whole chain with no manual clicks between tasks.  The panel
+    also shows the deterministic next action, per-task progress, and the real
+    session ids once the engine exposes them.
+    """
 
     start_requested = Signal(int)
     pause_requested = Signal()
     resume_requested = Signal()
     stop_requested = Signal()
+    #: Session 004: (project brief, batch size) — one autonomous batch run.
+    plan_and_start_requested = Signal(str, int)
+    resume_batch_requested = Signal()
+
+    #: How task states render in the progress readout.
+    _TASK_STATE_LABEL = {
+        TaskState.PENDING: "WAITING",
+        TaskState.RUNNING: "BUILDING",
+        TaskState.AUDITING: "AUDITING",
+        TaskState.FIX_REQUIRED: "FIX",
+        TaskState.RUNNING_FIX: "FIXING",
+        TaskState.APPROVED: "PASS",
+        TaskState.BLOCKED: "BLOCKED",
+        TaskState.FAILED: "FAILED",
+    }
 
     def __init__(self, controller: PipelineController, parent: QWidget | None = None) -> None:
         super().__init__("BATCH", parent)
         self._controller = controller
+
+        self.brief_edit = QPlainTextEdit()
+        self.brief_edit.setPlaceholderText(
+            "PROJECT BRIEF — e.g. \"Implement the next phase of the ERP "
+            "customer-management module while preserving current behaviour. "
+            "Plan exactly five implementation tasks.\""
+        )
+        self.brief_edit.setMaximumHeight(80)
+        brief = (
+            controller.state.batch.project_brief
+            if controller.state.batch is not None
+            else ""
+        )
+        self.brief_edit.setPlainText(brief)
 
         self.size_spin = QSpinBox()
         self.size_spin.setRange(MIN_BATCH_SIZE, MAX_BATCH_SIZE)
@@ -328,26 +364,58 @@ class BatchPanel(QGroupBox):
 
         self.status_label = QLabel()
         self.phase_label = QLabel()
+        self.next_action_label = QLabel()
+        self.next_action_label.setWordWrap(True)
+        self.progress_label = QLabel("(no tasks yet)")
+        self.progress_label.setWordWrap(True)
+        self.sessions_label = QLabel("")
+        self.sessions_label.setWordWrap(True)
+        self.sessions_label.setStyleSheet("color: palette(mid);")
 
         self.start_button = QPushButton("Start")
         self.pause_button = QPushButton("Pause")
         self.resume_button = QPushButton("Resume")
         self.stop_button = QPushButton("Stop")
+        self.plan_start_button = QPushButton("PLAN + START BATCH")
+        self.plan_start_button.setToolTip(
+            "Runs ONE Orchestrator planning call (exactly the requested number "
+            "of tasks), then automatically runs every task: fresh Builder "
+            "session → Task Auditor → fix loop → next task. No clicks between "
+            "tasks."
+        )
+        self.resume_batch_button = QPushButton("RESUME BATCH")
+        self.resume_batch_button.setToolTip(
+            "Continue a paused/interrupted batch from its durable state. "
+            "Approved tasks are never re-run."
+        )
 
         self.start_button.clicked.connect(lambda: self.start_requested.emit(self.size_spin.value()))
         self.pause_button.clicked.connect(self.pause_requested.emit)
         self.resume_button.clicked.connect(self.resume_requested.emit)
         self.stop_button.clicked.connect(self.stop_requested.emit)
+        self.plan_start_button.clicked.connect(self._emit_plan_and_start)
+        self.resume_batch_button.clicked.connect(self.resume_batch_requested.emit)
 
         form = QFormLayout(self)
+        form.addRow("Project Brief", self.brief_edit)
         form.addRow("Batch size", self.size_spin)
         form.addRow("Current phase", self.phase_label)
         form.addRow("Current status", self.status_label)
+        form.addRow("Next action", self.next_action_label)
+        form.addRow("Batch progress", self.progress_label)
+        form.addRow("Sessions", self.sessions_label)
 
         buttons = QWidget()
         button_row = QHBoxLayout(buttons)
         button_row.setContentsMargins(0, 0, 0, 0)
-        for button in (self.start_button, self.pause_button, self.resume_button, self.stop_button):
+        for button in (
+            self.plan_start_button,
+            self.resume_batch_button,
+            self.start_button,
+            self.pause_button,
+            self.resume_button,
+            self.stop_button,
+        ):
             button_row.addWidget(button)
         form.addRow("Controls", buttons)
 
@@ -358,7 +426,16 @@ class BatchPanel(QGroupBox):
 
         self.refresh()
 
+    def _emit_plan_and_start(self) -> None:
+        brief = self.brief_edit.toPlainText().strip()
+        if not brief:
+            self.hint.setText("Refused locally: the PROJECT BRIEF is empty.")
+            return
+        self.plan_and_start_requested.emit(brief, self.size_spin.value())
+
     def refresh(self) -> None:
+        from ..core.executor import next_task_action
+
         controller = self._controller
         phase = controller.machine.phase
         self.phase_label.setText(phase.value)
@@ -366,15 +443,27 @@ class BatchPanel(QGroupBox):
         batch = controller.state.batch
         if batch is None:
             self.status_label.setText("No batch yet.")
+            self.next_action_label.setText("—")
+            self.progress_label.setText("(no tasks yet)")
+            self.sessions_label.setText("")
         else:
             self.status_label.setText(
                 f"{batch.status.value} — {batch.batch_id} — {batch.progress_label()}"
             )
+            action = next_task_action(batch=batch, phase=phase)
+            self.next_action_label.setText(
+                f"{action.value}  ({phase.value}"
+                + (f", batch {batch.status.value}" if batch is not None else "")
+                + ")"
+            )
+            self.progress_label.setText(self._progress_lines(batch))
+            self.sessions_label.setText(self._sessions_lines(batch))
 
         if controller.executor_attached:
             self.hint.setText(
-                "Executor attached — Start creates the batch; task dispatch runs "
-                "through the executor (see the TASK section)."
+                "PLAN + START BATCH plans the batch (exactly the requested "
+                "number of tasks) and runs it autonomously; RESUME BATCH "
+                "continues from durable state."
             )
         else:
             self.hint.setText(
@@ -382,9 +471,48 @@ class BatchPanel(QGroupBox):
             )
 
         self.start_button.setEnabled(controller.machine.can_go_to(PipelinePhase.PLANNING_BATCH))
+        self.plan_start_button.setEnabled(
+            controller.executor_attached
+            and controller.machine.can_go_to(PipelinePhase.PLANNING_BATCH)
+        )
         self.pause_button.setEnabled(controller.machine.can_go_to(PipelinePhase.PAUSED))
         self.resume_button.setEnabled(phase is PipelinePhase.PAUSED)
-        self.stop_button.setEnabled(phase is not PipelinePhase.IDLE)
+        self.resume_batch_button.setEnabled(
+            controller.executor_attached
+            and (controller.machine.can_go_to(PipelinePhase.PLANNING_BATCH) or phase is PipelinePhase.PAUSED)
+        )
+        self.stop_button.setEnabled(phase is not PipelinePhase.IDLE and batch is not None)
+
+    @classmethod
+    def _progress_lines(cls, batch: Any) -> str:
+        if not batch.tasks:
+            return "(planned task list is empty)"
+        lines: list[str] = []
+        for task in batch.tasks:
+            label = cls._TASK_STATE_LABEL.get(task.state, task.state.value)
+            lines.append(f"Task {task.index}  {label}")
+        return "    ".join(lines)
+
+    @staticmethod
+    def _sessions_lines(batch: Any) -> str:
+        orchestrator_sid = (
+            batch.plan.orchestrator_session_id
+            if batch.plan is not None and batch.plan.orchestrator_session_id
+            else None
+        )
+        current = batch.first_undone_task()
+        builder_sid = current.builder_session_id if current is not None else None
+        auditor_sid = (
+            current.auditor_session_id
+            if current is not None and current.auditor_session_id
+            else None
+        )
+        parts = [
+            f"Orchestrator: {orchestrator_sid or 'NOT_EXPOSED'}",
+            f"Task Auditor: {auditor_sid or 'NOT_EXPOSED'}",
+            f"Builder: {builder_sid or 'NOT_EXPOSED'}",
+        ]
+        return " | ".join(parts)
 
 
 class LogPanel(QGroupBox):

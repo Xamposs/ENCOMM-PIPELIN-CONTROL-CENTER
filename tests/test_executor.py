@@ -440,8 +440,8 @@ def test_state_after_a_dispatch_reloads_from_sqlite_alone(
 
 
 # -- schema guard ---------------------------------------------------------------
-def test_schema_is_v3_with_the_audit_columns(database) -> None:  # noqa: ANN001
-    assert database.schema_version() == 3
+def test_schema_is_v4_with_the_planning_columns(database) -> None:  # noqa: ANN001
+    assert database.schema_version() == 4
     columns = {
         row["name"]
         for row in database.connection.execute("PRAGMA table_info(tasks)").fetchall()
@@ -454,8 +454,17 @@ def test_schema_is_v3_with_the_audit_columns(database) -> None:  # noqa: ANN001
         "auditor_session_id",
         "builder_session_id",
         "fix_session_id",
+        "acceptance_criteria",
+        "audit_focus",
     ):
         assert column in columns
+    tables = {
+        row["name"]
+        for row in database.connection.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        ).fetchall()
+    }
+    assert "batch_plans" in tables
 
 
 def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
@@ -488,7 +497,7 @@ def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
 
     reopened = Database(tmp_path / "legacy.db").open()
     try:
-        assert reopened.schema_version() == 3
+        assert reopened.schema_version() == 4
         columns = {
             row["name"]
             for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
@@ -496,6 +505,7 @@ def test_a_v1_database_is_upgraded_in_place(tmp_path: Path) -> None:
         assert "prompt" in columns
         assert "latest_verdict" in columns
         assert "fix_session_id" in columns
+        assert "acceptance_criteria" in columns
     finally:
         reopened.close()
 
@@ -532,7 +542,7 @@ def test_a_v2_database_is_upgraded_in_place(tmp_path: Path) -> None:
 
     reopened = Database(tmp_path / "legacy_v2.db").open()
     try:
-        assert reopened.schema_version() == 3
+        assert reopened.schema_version() == 4
         columns = {
             row["name"]
             for row in reopened.connection.execute("PRAGMA table_info(tasks)").fetchall()
@@ -544,6 +554,8 @@ def test_a_v2_database_is_upgraded_in_place(tmp_path: Path) -> None:
             "auditor_session_id",
             "builder_session_id",
             "fix_session_id",
+            "acceptance_criteria",
+            "audit_focus",
         ):
             assert column in columns
     finally:

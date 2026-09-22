@@ -80,6 +80,14 @@ class AuditPacket:
     auditor_session_id: str | None = None
     #: Previous audit context (round > 1): lets the re-audit focus on the fix.
     previous: AuditVerdictResult | None = None
+    #: Session 004: the Orchestrator's acceptance criteria / audit focus for
+    #: THIS task, the task index, and the batch-level objective — so a fresh
+    #: auditor session verifies the plan's contract, not a prior narrative.
+    acceptance_criteria: tuple[str, ...] = ()
+    audit_focus: tuple[str, ...] = ()
+    task_index: int = 0
+    batch_title: str = ""
+    batch_objective: str = ""
     extra_instructions: str = ""
 
     def render(self) -> str:
@@ -94,9 +102,16 @@ def render_audit_prompt(packet: AuditPacket) -> str:
         "",
         f"TASK ID: {packet.task_id}",
         f"TASK TITLE: {packet.title}",
+        f"TASK INDEX: {packet.task_index or packet.task_id}",
         f"ATTEMPT: {packet.attempt or 1}",
         f"AUDIT ROUND: {packet.audit_round or 1}",
         f"BATCH: {packet.batch_id or '(none)'}",
+    ]
+    if packet.batch_title:
+        lines.append(f"BATCH TITLE: {packet.batch_title}")
+    if packet.batch_objective:
+        lines.append(f"BATCH OBJECTIVE: {packet.batch_objective}")
+    lines += [
         "",
         f"WORKSPACE (the ONLY path you may touch): {packet.workspace_path}",
         "",
@@ -104,6 +119,21 @@ def render_audit_prompt(packet: AuditPacket) -> str:
         packet.implementation_prompt.rstrip(),
         "",
     ]
+    if packet.acceptance_criteria:
+        lines += [
+            "ACCEPTANCE CRITERIA (the Orchestrator's deterministic contract for "
+            "this task — verify each one against the real repository):",
+        ]
+        for criterion in packet.acceptance_criteria:
+            lines.append(f"- {criterion}")
+        lines.append("")
+    if packet.audit_focus:
+        lines += [
+            "AUDIT FOCUS (what this audit must independently check):",
+        ]
+        for focus in packet.audit_focus:
+            lines.append(f"- {focus}")
+        lines.append("")
     if packet.auditor_session_id:
         lines += [
             f"AUDITOR SESSION ID (this session): {packet.auditor_session_id}",
@@ -170,6 +200,7 @@ def render_fix_prompt(
     implementation_prompt: str,
     workspace_path: str,
     verdict: AuditVerdictResult,
+    acceptance_criteria: Sequence[str] = (),
     extra_instructions: str = "",
 ) -> str:
     """Assemble the prompt for a BRAND-NEW Builder session performing the fix.
@@ -190,6 +221,13 @@ def render_fix_prompt(
         "ORIGINAL IMPLEMENTATION PROMPT:",
         implementation_prompt.rstrip(),
         "",
+    ]
+    if acceptance_criteria:
+        lines += ["ACCEPTANCE CRITERIA (the fix must satisfy all of these):"]
+        for criterion in acceptance_criteria:
+            lines.append(f"- {criterion}")
+        lines.append("")
+    lines += [
         "AUDITOR FINDINGS (why the task needs a fix):",
         f"  summary: {verdict.summary}",
     ]

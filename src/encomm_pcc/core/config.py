@@ -25,7 +25,9 @@ APP_NAME = "ENCOMM Pipeline Control Center"
 APP_SLUG = "encomm-pipeline-control-center"
 
 MIN_BATCH_SIZE = 1
-MAX_BATCH_SIZE = 50
+#: Session 004: the brief bounds a batch to 1..5 tasks (the Orchestrator must
+#: produce exactly the requested count; see ``domain.batch_plan.PLAN_MAX_TASKS``).
+MAX_BATCH_SIZE = 5
 DEFAULT_BATCH_SIZE = 5
 
 #: Environment variable that redirects all application state (used by tests).

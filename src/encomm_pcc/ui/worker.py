@@ -16,6 +16,7 @@ from typing import Any
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from ..core import BatchRunReport, BatchRunner
 from ..core.executor import ExecutionOutcome, ExecutionReport, Executor, TaskSpec
 
 __all__ = ["ExecutorWorker", "start_executor_worker"]
@@ -32,20 +33,34 @@ class ExecutorWorker(QObject):
         spec: TaskSpec,
         timeout_s: float | None = None,
         action: str = "dispatch",
+        resume: bool = False,
+        project_brief: str = "",
+        batch_size: int | None = None,
         parent: QObject | None = None,
     ) -> None:
         super().__init__(parent)
         self.executor = executor
         self.spec = spec
         self.timeout_s = timeout_s
-        #: ``dispatch`` (Builder run) | ``audit`` (Task Auditor) | ``fix``.
+        #: ``dispatch`` (Builder run) | ``audit`` (Task Auditor) | ``fix`` |
+        #: ``batch`` (autonomous multi-task batch run, Session 004).
         self.action = action
+        self.resume = bool(resume)
+        self.project_brief = project_brief
+        self.batch_size = batch_size
 
     def run(self) -> None:
         """Slot connected to ``QThread.started``."""
-        report: ExecutionReport | None = None
+        report: ExecutionReport | BatchRunReport | None = None
         try:
-            if self.action == "audit":
+            if self.action == "batch":
+                report = BatchRunner(self.executor).run_batch(
+                    project_brief=self.project_brief,
+                    batch_size=self.batch_size,
+                    resume=self.resume,
+                    timeout_s=self.timeout_s,
+                )
+            elif self.action == "audit":
                 report = self.executor.run_task_audit(timeout_s=self.timeout_s)
             elif self.action == "fix":
                 report = self.executor.run_task_fix(timeout_s=self.timeout_s)

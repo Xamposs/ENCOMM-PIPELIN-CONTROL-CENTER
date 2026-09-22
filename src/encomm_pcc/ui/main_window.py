@@ -126,6 +126,8 @@ class MainWindow(QMainWindow):
         self.batch_panel.pause_requested.connect(self._on_pause)
         self.batch_panel.resume_requested.connect(self._on_resume)
         self.batch_panel.stop_requested.connect(self._on_stop)
+        self.batch_panel.plan_and_start_requested.connect(self._on_plan_and_start)
+        self.batch_panel.resume_batch_requested.connect(self._on_resume_batch)
         self.task_panel.dispatch_requested.connect(self._on_dispatch_requested)
         self.task_panel.audit_requested.connect(self._on_audit_requested)
         self.task_panel.fix_requested.connect(self._on_fix_requested)
@@ -234,6 +236,95 @@ class MainWindow(QMainWindow):
             return
         result = self.controller.request_stop()
         self._after_control(result.message, result.phase)
+
+    def _on_plan_and_start(self, brief: str, size: int) -> None:
+        """Session 004: ONE autonomous batch run, off the UI thread."""
+        executor = self.controller.executor
+        if executor is None:
+            self.controller.events.error(
+                "Plan + Start requested, but no executor is attached.", source="ui"
+            )
+            self.statusBar().showMessage("No executor attached — nothing was started.")
+            return
+        if executor.is_running or (self._thread is not None and self._thread.isRunning()):
+            self.statusBar().showMessage("A batch is already running.")
+            return
+        self._start_batch_worker(brief=brief, size=size, resume=False)
+
+    def _on_resume_batch(self) -> None:
+        """RESUME BATCH: continue from durable state (no duplicate work)."""
+        executor = self.controller.executor
+        if executor is None:
+            self.controller.events.error(
+                "Resume requested, but no executor is attached.", source="ui"
+            )
+            self.statusBar().showMessage("No executor attached — nothing was resumed.")
+            return
+        if executor.is_running or (self._thread is not None and self._thread.isRunning()):
+            self.statusBar().showMessage("A batch is already running.")
+            return
+        brief = (
+            self.controller.state.batch.project_brief
+            if self.controller.state.batch is not None
+            else ""
+        )
+        size = (
+            self.controller.state.batch.size
+            if self.controller.state.batch is not None
+            else 5
+        )
+        self._start_batch_worker(brief=brief, size=size, resume=True)
+
+    def _start_batch_worker(self, *, brief: str, size: int, resume: bool) -> None:
+        self.controller.events.info(
+            f"Batch {'resumed' if resume else 'started'} off the UI thread "
+            f"(brief {len(brief)} chars, size {size}).",
+            source="ui",
+        )
+        self.batch_panel.plan_start_button.setEnabled(False)
+        self.batch_panel.resume_batch_button.setEnabled(False)
+        self.statusBar().showMessage(
+            "Batch running… (PLAN → tasks → audit → fix loop → READY_FOR_FINAL_AUDIT)"
+        )
+        thread, worker = start_executor_worker(
+            self.controller.executor,
+            TaskSpec(title="", prompt=""),
+            timeout_s=self._dispatch_timeout_s,
+            action="batch",
+            resume=resume,
+            project_brief=brief,
+            batch_size=size,
+            parent=self,
+        )
+        worker.finished.connect(self._on_batch_finished)
+        thread.finished.connect(self._on_dispatch_thread_finished)
+        self._thread, self._worker = thread, worker
+        thread.start()
+
+    def _on_batch_finished(self, report: object) -> None:
+        """Terminal batch report: refresh everything, show the honest state."""
+        from ..core import BatchRunReport
+
+        self._after_control("", self.controller.machine.phase)
+        if isinstance(report, BatchRunReport):
+            self.controller.events.info(
+                f"Batch run finished — {report.summary()}", source="ui"
+            )
+            self.statusBar().showMessage(
+                f"Batch: {report.outcome.value} — {report.message}"
+            )
+            if report.outcome.value == "READY_FOR_FINAL_AUDIT":
+                self.statusBar().showMessage(
+                    "READY FOR FINAL AUDIT — the batch stops here. "
+                    "The Final Auditor arrives in a later session."
+                )
+            return
+        if isinstance(report, ExecutionReport):
+            self.controller.events.info(
+                f"Batch step finished — {report.summary()}", source="ui"
+            )
+            self.task_panel.show_report(report)
+        self.statusBar().showMessage("Batch run finished without a terminal report.")
 
     def _after_control(self, message: str, phase: PipelinePhase) -> None:
         if message:

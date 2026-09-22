@@ -26,7 +26,7 @@ def test_starts_idle() -> None:
         (PipelinePhase.FIX_REQUIRED, PipelinePhase.RUNNING_FIX),
         (PipelinePhase.RUNNING_FIX, PipelinePhase.AUDITING_TASK),
         (PipelinePhase.AUDITING_TASK, PipelinePhase.READY_FOR_FINAL_AUDIT),
-        (PipelinePhase.AUDITING_TASK, PipelinePhase.BATCH_COMPLETE),
+        (PipelinePhase.AUDITING_TASK, PipelinePhase.RUNNING_TASK),
         (PipelinePhase.READY_FOR_FINAL_AUDIT, PipelinePhase.FINAL_AUDIT_RUNNING),
         (PipelinePhase.FINAL_AUDIT_RUNNING, PipelinePhase.BATCH_COMPLETE),
         (PipelinePhase.BATCH_COMPLETE, PipelinePhase.IDLE),
@@ -34,6 +34,16 @@ def test_starts_idle() -> None:
 )
 def test_nominal_path_edges_are_legal(source: PipelinePhase, target: PipelinePhase) -> None:
     assert StateMachine.can_transition(source, target)
+
+
+def test_batch_complete_is_reachable_only_via_the_final_auditor() -> None:
+    """Session 004: no successful path may reach BATCH_COMPLETE without the
+    Final Auditor; the only incoming edge is FINAL_AUDIT_RUNNING."""
+    sources = [s for s, targets in TRANSITIONS.items() if PipelinePhase.BATCH_COMPLETE in targets]
+    assert sources == [PipelinePhase.FINAL_AUDIT_RUNNING]
+    assert not StateMachine.can_transition(
+        PipelinePhase.AUDITING_TASK, PipelinePhase.BATCH_COMPLETE
+    )
 
 
 @pytest.mark.parametrize(

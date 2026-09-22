@@ -66,7 +66,7 @@ def test_start_defaults_to_five(controller: PipelineController) -> None:
 
 @pytest.mark.parametrize(
     ("requested", "expected"),
-    [(-4, 1), (0, 1), (1, 1), (7, 7), (50, 50), (999, MAX_BATCH_SIZE)],
+    [(-4, 1), (0, 1), (1, 1), (5, 5), (7, 5), (50, 5), (999, MAX_BATCH_SIZE)],
 )
 def test_batch_size_is_clamped(controller: PipelineController, requested: int, expected: int) -> None:
     controller.request_start(requested)
@@ -187,14 +187,14 @@ def test_final_auditor_can_inherit_the_orchestrator_engine(controller: PipelineC
 def test_state_is_persisted_and_reloadable(database: Database, controller: PipelineController) -> None:
     controller.set_workspace("Persisted", r"C:\persisted")
     controller.set_role_config(AgentRole.ORCHESTRATOR, engine="codex")
-    controller.request_start(6)
+    controller.request_start(4)
 
     workspace_id = controller.state.workspace.workspace_id
     reloaded = database.load_pipeline_state(workspace_id)
     assert reloaded is not None
     assert reloaded.workspace.name == "Persisted"
     assert reloaded.role_configs[AgentRole.ORCHESTRATOR].engine == "codex"
-    assert reloaded.batch is not None and reloaded.batch.size == 6
+    assert reloaded.batch is not None and reloaded.batch.size == 4
 
 
 def test_events_are_written_to_the_database(database: Database, controller: PipelineController) -> None:

@@ -31,7 +31,7 @@ explicitly.
 
 ## 1. Version
 
-`0.3.0` — single-task Task Auditor + capped fix loop. Session 003.
+`0.4.0` — orchestrated multi-task batches + real Orchestrator. Session 004.
 
 ---
 
@@ -57,9 +57,15 @@ explicitly.
 | **UI shows the loop** | **Works** | Next action (AUDIT/FIX/RE-AUDIT/COMPLETE/BLOCKED), verdict, audit round, session readouts, Run-Auditor / Run-fix buttons |
 | Failure propagation | **Works** | Non-zero exit → task `FAILED`, pipeline `FAILED`, error persisted |
 | UI dispatch off the UI thread | **Works** | `ExecutorWorker` on a `QThread`; audit/fix run through the same worker |
-| Automated tests | **Works** | 280 passed, 0 failed (221 at Session 002, 18 files) |
+| Automated tests | **Works** | 334 passed, 0 failed (280 at Session 003, 18 files) |
+| **Real ORCHESTRATOR planning** | **Works — Session 004** | `plan_batch()` through role config → driver registry → `SessionManager`; one planning call per batch; strict plan parser fails closed; exact task count honoured |
+| **Orchestrator read-only guard** | **Works** | `core/repo_fingerprint.py`: HEAD + porcelain-status fingerprint before/after planning; a planning call that modified the worktree BLOCKS the plan (violation surfaced, never discarded) |
+| **Multi-task autonomous runner** | **Works** | `core/batch_runner.py`: PLAN → per-task BUILD → AUDIT → fix loop → next task → READY_FOR_FINAL_AUDIT; boundary-safe pause/resume/stop; idempotent resume from SQLite |
+| **Shared auditor, fresh builders** | **Works — proven** | ONE Task Auditor session reused for the whole batch; every build and fix in a BRAND-NEW Builder session (offline matrix + smoke) |
+| **READY_FOR_FINAL_AUDIT terminal** | **Works** | `BATCH_COMPLETE` reachable ONLY from `FINAL_AUDIT_RUNNING` (structural graph guarantee; Session-003 terminal superseded — ADR D-025) |
+| **Batch Summary** | **Works** | Durable structured summary written at READY_FOR_FINAL_AUDIT (plan row) for the Session 005 Final Auditor |
 | `CodexDriver`, `GenericCliDriver` | **Placeholder** | Still raise `DriverNotImplementedError`; `implemented=False` |
-| Orchestrator / final auditor / multi-task batches | **Not implemented** | Deliberate — see §5 |
+| Final auditor / `BATCH_COMPLETE` path | **Not implemented** | Deliberate — Session 005 |
 
 ### Verified at the end of Session 003
 
@@ -68,9 +74,24 @@ explicitly.
   encomm-pipeline-control-center` proves: initial audit **NEEDS_FIX** → fix in
   a brand-new Builder session → deterministic scratch test passes → **SAME**
   auditor session re-audits → **PASS** → task `APPROVED`, pipeline
-  `BATCH_COMPLETE`, state re-read from SQLite. Session ids, verdicts and
+  `READY_FOR_FINAL_AUDIT` (since Session 004, `BATCH_COMPLETE` is reserved for
+  the Final Auditor), state re-read from SQLite. Session ids, verdicts and
   wall-clock details are in `docs/reports/SESSION_003_AUDITOR_FIX_LOOP.md`.
 - Session 002's `session_002_smoke.py` still passes (real Builder path intact).
+
+### Verified at the end of Session 004
+
+- `python -m pytest` → **334 passed, 0 failed**.
+- `python scripts/session_004_multitask_smoke.py --fake` → **SMOKE PASSED**
+  (2.5 s): every post-processing path proven offline before any real call.
+- Real smoke (see `docs/reports/SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md`):
+  one real Orchestrator call → exactly 4 planned tasks → 4 fresh Builder
+  sessions → 4 Task Auditor calls in the SAME session → batch
+  `READY_FOR_FINAL_AUDIT`, no path to `BATCH_COMPLETE`, reloaded from SQLite
+  with the durable Batch Summary.
+- The Session 003 fix loop still passes inside a batch (offline:
+  `test_needs_fix_on_middle_task_uses_the_existing_fix_loop`; live: Session 003
+  smoke, updated terminal).
 
 ---
 
@@ -86,19 +107,23 @@ ENCOMM PIPELINE CONTROL CENTER/
 ├── README.md
 ├── scripts/
 │   ├── session_002_smoke.py    Real Hermes executor smoke (Session 002)
-│   └── session_003_audit_fix_smoke.py  Real audit/fix loop smoke (Session 003)
+│   ├── session_003_audit_fix_smoke.py  Real audit/fix loop smoke (Session 003)
+│   └── session_004_multitask_smoke.py  Real orchestrated batch smoke (Session 004; --fake offline mode)
 ├── src/encomm_pcc/
-│   ├── __init__.py             __version__ = "0.3.0"
+│   ├── __init__.py             __version__ = "0.4.0"
 │   ├── app.py                  run(), build_controller(), attach_default_executor(),
 │   │                           restore_state(), discover_hermes_profiles()
 │   ├── domain/
 │   │   ├── enums.py            AgentRole, SessionPolicy, PipelinePhase,
 │   │   │                       TaskState, BatchStatus, EventLevel
-│   │   ├── audit.py            (new) AuditVerdict, FindingSeverity,
+│   │   ├── audit.py            AuditVerdict, FindingSeverity,
 │   │   │                       AuditFinding, AuditVerdictResult
+│   │   ├── batch_plan.py       (new) PlannedTask, BatchPlan, BatchPlanRecord,
+│   │   │                       bounds, build_batch_summary
 │   │   ├── models.py           WorkspaceConfig, AgentRoleConfig,
-│   │   │                       TaskStateRecord (+verdict/session fields),
-│   │   │                       BatchState (+phase), PipelineState
+│   │   │                       TaskStateRecord (+criteria/focus/verdict/session),
+│   │   │                       BatchState (+project_brief/current_head/plan),
+│   │   │                       PipelineState
 │   │   └── state_machine.py    TRANSITIONS, StateMachine, InvalidTransitionError
 │   ├── drivers/
 │   │   ├── base.py             BaseDriver ABC, DriverCapabilities,
@@ -113,21 +138,25 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │   └── registry.py         DriverRegistry, IMPLEMENTED_DRIVERS,
 │   │                           PLANNED_DRIVERS
 │   ├── core/
-│   │   ├── config.py           AppPaths, batch-size bounds, placeholders
+│   │   ├── config.py           AppPaths, batch-size bounds (1..5), placeholders
 │   │   ├── events.py           EventLog, LogRecord, NullEventLog
 │   │   ├── session_manager.py  decide_session_action, SessionManager,
 │   │   │                       restore_session (restart recovery)
 │   │   ├── hermes_profiles.py  Read-only Hermes profile discovery
-│   │   ├── verdict_parser.py   (new) strict, fails-closed verdict parser
-│   │   ├── audit_packet.py     (new) AuditPacket + fix-prompt builders
-│   │   ├── executor.py         TaskSpec, ExecutionOutcome, ExecutionReport,
-│   │   │                       Executor (dispatch + run_task_audit/run_task_fix,
-│   │   │                       prepare_task_for_audit, next_task_action),
-│   │   │                       MAX_AUDIT_ROUNDS, TaskNextAction
+│   │   ├── verdict_parser.py   strict, fails-closed verdict parser
+│   │   ├── plan_parser.py      (new) strict, fails-closed BatchPlan parser
+│   │   ├── plan_packet.py      (new) deterministic Orchestrator planning prompt
+│   │   ├── repo_fingerprint.py (new) read-only git guard for planning
+│   │   ├── audit_packet.py     AuditPacket + fix-prompt builders (+criteria)
+│   │   ├── executor.py         TaskSpec, ExecutionOutcome/Report, PlanReport,
+│   │   │                       Executor (plan_batch / run_task_build /
+│   │   │                       run_task_audit / run_task_fix, next_task_action,
+│   │   │                       MAX_AUDIT_ROUNDS)
+│   │   ├── batch_runner.py     (new) BatchRunner, BatchRunReport, StepRecord
 │   │   └── controller.py       PipelineController, ControlResult
 │   ├── persistence/
-│   │   ├── schema.sql          Schema v3 — tasks audit columns + batches.phase
-│   │   └── database.py         Database (v1→v2→v3 targeted upgrades)
+│   │   ├── schema.sql          Schema v4 — batch_plans + criteria/audit focus
+│   │   └── database.py         Database (v1→v2→v3→v4 targeted upgrades)
 │   └── ui/
 │       ├── main_window.py      MainWindow (+ audit/fix worker wiring)
 │       ├── panels.py           WorkspacePanel, RolePanel, BatchPanel, LogPanel,
@@ -178,6 +207,11 @@ without a new ADR:
 | D-022 | Fixes always run in a brand-new Builder session |
 | D-023 | Restart recovery restores the phase and decides, never auto-resumes |
 | D-024 | The Session 003 smoke is scratch-only and costs at most three model runs |
+| D-025 | `READY_FOR_FINAL_AUDIT` supersedes the Session-003 single-task terminal (`BATCH_COMPLETE` only via the Final Auditor) |
+| D-026 | Strict BatchPlan parser fails closed on Orchestrator output; exact task count |
+| D-027 | Orchestrator is planning-only; read-only fingerprint guard blocks a worktree-modifying plan |
+| D-028 | The batch runner owns sequencing; AI outputs are data; boundary-safe pause/stop; idempotent resume |
+| D-029 | Schema v4: `batch_plans` durable planning truth + per-task criteria/audit focus + Project Brief |
 
 ---
 
@@ -185,35 +219,28 @@ without a new ADR:
 
 Stated bluntly so nothing is over-claimed:
 
-1. **One task per batch.** A second dispatch into the same batch is rejected.
-   There is no planner, no orchestrator and no batch editor.
-2. **The audit/fix loop is single-task and capped at `MAX_AUDIT_ROUNDS = 3`.**
-   A NEEDS_FIX on round 3 blocks the task; the operator must intervene.
-3. **No multi-task sequencing, no Orchestrator, no Final Auditor.** `BATCH_COMPLETE`
-   is reached directly from a single-task PASS; `READY_FOR_FINAL_AUDIT` and
-   `FINAL_AUDIT_RUNNING` are graph nodes only, unreachable in this session.
-4. **No mid-prompt cancellation.** `supports_cancellation=False`; `cancel()`
-   returns `False`. A stop requested during a prompt lets the run finish.
-5. **Pause is boundary-only.** With one task there is no mid-run boundary.
-6. **`BatchState.tasks` holds only manually supplied tasks.**
-7. **`CodexDriver` and `GenericCliDriver` remain placeholders.**
-8. **No streaming surface.** The CLI's deltas are consumed internally.
-9. **Output retention is bounded** — 4000-char excerpts in event payloads.
-10. **`Executor` pause/stop flags are in memory.** Persisted state survives a
-    crash; the stop *request* does not.
-11. **`BLOCKED` leaves the batch status `RUNNING`** (there is no
-    `BatchStatus.BLOCKED`); the authoritative signal is the pipeline phase and
-    the task state, both persisted.
-12. **Provider/model are real per invocation**, but stored role values are
-    operator-typed strings — no validation against a provider catalogue.
-13. **`verdict_json` stores the bounded structured verdict** (summary, findings,
-    fix prompt) — never a full transcript.
-14. **Schema v3 has exactly two upgrade steps** (v1→v2, v2→v3). No framework.
-15. **UI tests are offscreen only.**
-16. **The real smoke costs exactly three model runs** (initial audit, fix,
-    re-audit); provider failures mid-loop and multi-round cap behaviour are
-    unit-tested offline, not exercised live.
-17. **No packaging.** No installer, no frozen `.exe`.
+1. **No Final Auditor yet.** `BATCH_COMPLETE` / `FINAL_AUDIT_RUNNING` are graph
+   nodes; a successful batch stops at `READY_FOR_FINAL_AUDIT` for Session 005's
+   real Final Auditor. `BATCH_COMPLETE` is unreachable by construction until
+   then (only `FINAL_AUDIT_RUNNING → BATCH_COMPLETE` exists).
+2. **`CodexDriver`/`GenericCliDriver` remain placeholders.** The Orchestrator
+   works through the generic path today with Hermes; swapping engines is
+   configuration-only.
+3. **Pause/stop are boundary-only** (a running prompt finishes and persists its
+   result first). No mid-prompt cancellation (`supports_cancellation=False`).
+4. **The real smoke targets 4 tasks** (brief §26); a 5-task batch is proven
+   offline. Token-cost of the real smoke is bounded by the offline-proofed
+   `--fake` mode first.
+5. **Planning guard is vacuous on non-git workspaces** (documented, not
+   guessed): the read-only fingerprint needs a git repository to compare.
+6. **`run_batch` runs synchronously in a worker thread**; further concurrency
+   (e.g. parallel batches) is deliberately out of scope.
+7. **A `--resume` failure fails the task** (provider-side session loss is
+   surfaced, never papered over).
+8. **UI tests are offscreen only.**
+9. **No packaging.**
+10. **The Final Auditor, real CodexDriver, automatic next-batch generation and
+    the Claude/OpenCode/Ollama/Kimi adapters do not exist yet** — Session 005+.
 
 ---
 
@@ -235,15 +262,18 @@ touch them:
 
 ## 7. Exact next recommended phase
 
-**Session 004 — Multi-task batches + Orchestrator.**
+**Session 005 — Final Auditor + batch completion (Phase 4).**
 
-1. `ORCHESTRATOR` plans a batch of N tasks from a workspace/project brief;
-   tasks are materialised and sequenced, and batch size from the UI is honoured.
-2. `RUNNING_TASK → AUDITING_TASK → (PASS) → RUNNING_TASK (next task)` per task,
-   with the Session 003 audit/fix loop reused per task inside the batch.
-3. Per-task progress and batch status surface live in the UI.
-4. Batch completion leads to `READY_FOR_FINAL_AUDIT` (Phase 4 adds the real
-   Final Auditor).
+1. The real `FINAL_AUDITOR` resolves through the generic role/driver path with
+   its `configurable` session policy and the "same as orchestrator" option
+   honoured end to end; it consumes the durable Batch Summary written by
+   Session 004 (`batch_plans.batch_summary_json`).
+2. The graph edge `READY_FOR_FINAL_AUDIT → FINAL_AUDIT_RUNNING → BATCH_COMPLETE`
+   becomes reachable for real; a failing final audit re-enters
+   `FIX_REQUIRED`.
+3. A written batch audit report artefact under `docs/reports/`.
 
-**Do not start** planning/orchestration until the single-task audit/fix loop
-(the Session 003 deliverable) is fully reviewed. See `ROADMAP.md`.
+**Do not start** the Final Auditor until the orchestrated batch runner has been
+independently reviewed. `CodexDriver`, automatic next-batch generation and the
+Claude/OpenCode/Ollama/Kimi adapters remain strictly out of scope. See
+`ROADMAP.md`.

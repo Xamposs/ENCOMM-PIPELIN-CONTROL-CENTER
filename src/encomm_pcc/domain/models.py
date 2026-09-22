@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from .batch_plan import BatchPlanRecord
 from .enums import (
     AgentRole,
     BatchStatus,
@@ -173,6 +174,12 @@ class TaskStateRecord:
     #: task that cannot be re-read cannot be re-dispatched or audited after a
     #: restart (durable truth lives in SQLite, never in a live session).
     prompt: str = ""
+    #: Orchestrator-supplied acceptance criteria (Session 004).  Every
+    #: materialised task keeps them; the Task Auditor receives them in its
+    #: packet so a fresh audit session can verify them without model memory.
+    acceptance_criteria: list[str] = field(default_factory=list)
+    #: Orchestrator-supplied audit focus — what the Task Auditor must check.
+    audit_focus: list[str] = field(default_factory=list)
     state: TaskState = TaskState.PENDING
     attempts: int = 0
     audit_rounds: int = 0
@@ -203,6 +210,8 @@ class TaskStateRecord:
             "index": self.index,
             "title": self.title,
             "prompt": self.prompt,
+            "acceptance_criteria": list(self.acceptance_criteria),
+            "audit_focus": list(self.audit_focus),
             "state": self.state.value,
             "attempts": self.attempts,
             "audit_rounds": self.audit_rounds,
@@ -223,6 +232,10 @@ class TaskStateRecord:
             index=int(data.get("index", 0)),
             title=str(data.get("title", "")),
             prompt=str(data.get("prompt") or ""),
+            acceptance_criteria=[
+                str(x) for x in (data.get("acceptance_criteria") or [])
+            ],
+            audit_focus=[str(x) for x in (data.get("audit_focus") or [])],
             state=TaskState(str(data.get("state", TaskState.PENDING.value))),
             attempts=int(data.get("attempts", 0)),
             audit_rounds=int(data.get("audit_rounds", 0)),
@@ -267,6 +280,14 @@ class BatchState:
     #: Pipeline phase this batch belongs to, persisted so a restart can restore
     #: the correct work phase (IDLE until the batch starts running).
     phase: str = PipelinePhase.IDLE.value
+    #: The durable Project Brief input (persisted before planning; a restart
+    #: must preserve it — it is NOT model memory).
+    project_brief: str = ""
+    #: Repository HEAD at the moment the batch finished (evidence for the
+    #: Final Auditor / Batch Summary).
+    current_head: str = ""
+    #: The durable planning truth for this batch (``batch_plans`` row).
+    plan: BatchPlanRecord | None = None
     tasks: list[TaskStateRecord] = field(default_factory=list)
     created_at: str = field(default_factory=utc_now)
     updated_at: str = field(default_factory=utc_now)
@@ -291,6 +312,38 @@ class BatchState:
                 return task.index
         return None
 
+    @property
+    def batch_title(self) -> str:
+        """Display title: the plan's title, else a short default."""
+        if self.plan is not None and self.plan.plan.batch_title:
+            return self.plan.plan.batch_title
+        return self.project_brief.strip()[:60] or "Untitled batch"
+
+    @property
+    def batch_objective(self) -> str:
+        if self.plan is not None and self.plan.plan.batch_objective:
+            return self.plan.plan.batch_objective
+        return ""
+
+    def first_undone_task(self) -> TaskStateRecord | None:
+        """The first task (in index order) that still needs work.
+
+        ``APPROVED`` / ``BLOCKED`` / ``FAILED`` tasks are never re-run, so the
+        deterministic batch loop and restart recovery both pick the same task.
+        """
+        for task in self.tasks:
+            if task.state not in (
+                TaskState.APPROVED,
+                TaskState.BLOCKED,
+                TaskState.FAILED,
+            ):
+                return task
+        return None
+
+    def first_undone_index(self) -> int | None:
+        task = self.first_undone_task()
+        return task.index if task is not None else None
+
     def progress_label(self) -> str:
         return f"{self.completed_count}/{len(self.tasks) or self.size} approved"
 
@@ -301,6 +354,8 @@ class BatchState:
             "size": self.size,
             "status": self.status.value,
             "phase": self.phase,
+            "project_brief": self.project_brief,
+            "current_head": self.current_head,
             "tasks": [t.to_dict() for t in self.tasks],
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -314,6 +369,8 @@ class BatchState:
             size=int(data.get("size", 5)),
             status=BatchStatus(str(data.get("status", BatchStatus.CREATED.value))),
             phase=str(data.get("phase") or PipelinePhase.IDLE.value),
+            project_brief=str(data.get("project_brief", "")),
+            current_head=str(data.get("current_head", "")),
             tasks=[TaskStateRecord.from_dict(t) for t in (data.get("tasks") or [])],
             created_at=str(data.get("created_at") or utc_now()),
             updated_at=str(data.get("updated_at") or utc_now()),

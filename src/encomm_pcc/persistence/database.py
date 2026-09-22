@@ -26,6 +26,7 @@ from typing import Any, Iterator, Mapping, Sequence
 from ..domain import (
     AgentRole,
     AgentRoleConfig,
+    BatchPlanRecord,
     BatchState,
     EventLevel,
     PipelinePhase,
@@ -38,7 +39,7 @@ from ..domain.models import new_id
 
 __all__ = ["SCHEMA_PATH", "SCHEMA_VERSION", "Database", "PersistenceError"]
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA_PATH = Path(__file__).with_name("schema.sql")
 
 
@@ -169,6 +170,49 @@ class Database:
             if "phase" not in batch_columns:
                 conn.execute(
                     "ALTER TABLE batches ADD COLUMN phase TEXT NOT NULL DEFAULT 'IDLE'"
+                )
+        if from_version <= 3:
+            # v3 → v4: Session 004 batch planning — durable Project Brief +
+            # finished HEAD on batches, Orchestrator acceptance criteria/audit
+            # focus on tasks, and the batch_plans table (strict plan, real
+            # Orchestrator session id, read-only baseline, Batch Summary).
+            task_columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(tasks)")}
+            if "acceptance_criteria" not in task_columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT")
+            if "audit_focus" not in task_columns:
+                conn.execute("ALTER TABLE tasks ADD COLUMN audit_focus TEXT")
+            batch_columns = {str(r["name"]) for r in conn.execute("PRAGMA table_info(batches)")}
+            if "project_brief" not in batch_columns:
+                conn.execute(
+                    "ALTER TABLE batches ADD COLUMN project_brief TEXT NOT NULL DEFAULT ''"
+                )
+            if "current_head" not in batch_columns:
+                conn.execute(
+                    "ALTER TABLE batches ADD COLUMN current_head TEXT NOT NULL DEFAULT ''"
+                )
+            tables = {str(r["name"]) for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            )}
+            if "batch_plans" not in tables:
+                conn.execute(
+                    """
+                    CREATE TABLE batch_plans (
+                        batch_id TEXT PRIMARY KEY,
+                        batch_title TEXT NOT NULL DEFAULT '',
+                        batch_objective TEXT NOT NULL DEFAULT '',
+                        plan_json TEXT,
+                        orchestrator_session_id TEXT,
+                        plan_status TEXT NOT NULL DEFAULT '',
+                        planned_at TEXT,
+                        baseline_head TEXT NOT NULL DEFAULT '',
+                        baseline_fingerprint_json TEXT,
+                        current_head TEXT NOT NULL DEFAULT '',
+                        final_phase TEXT NOT NULL DEFAULT '',
+                        finalized_at TEXT,
+                        batch_summary_json TEXT,
+                        FOREIGN KEY (batch_id) REFERENCES batches (batch_id) ON DELETE CASCADE
+                    )
+                    """
                 )
 
     def schema_version(self) -> int:
@@ -343,12 +387,15 @@ class Database:
         with self.transaction() as conn:
             conn.execute(
                 """
-                INSERT INTO batches (batch_id, workspace_id, size, status, phase, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO batches (batch_id, workspace_id, size, status, phase,
+                                     project_brief, current_head, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (batch_id) DO UPDATE SET
                     size = excluded.size,
                     status = excluded.status,
                     phase = excluded.phase,
+                    project_brief = excluded.project_brief,
+                    current_head = excluded.current_head,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -357,6 +404,8 @@ class Database:
                     batch.size,
                     batch.status.value,
                     batch.phase,
+                    batch.project_brief,
+                    batch.current_head,
                     batch.created_at,
                     batch.updated_at,
                 ),
@@ -366,11 +415,12 @@ class Database:
                 conn.execute(
                     """
                     INSERT INTO tasks (
-                        task_id, batch_id, task_index, title, prompt, state, attempts,
+                        task_id, batch_id, task_index, title, prompt,
+                        acceptance_criteria, audit_focus, state, attempts,
                         audit_rounds, last_error, latest_verdict, verdict_json,
                         fix_prompt, auditor_session_id, builder_session_id,
                         fix_session_id, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         task.task_id,
@@ -378,6 +428,12 @@ class Database:
                         task.index,
                         task.title,
                         task.prompt,
+                        json.dumps(task.acceptance_criteria, ensure_ascii=False)
+                        if task.acceptance_criteria
+                        else None,
+                        json.dumps(task.audit_focus, ensure_ascii=False)
+                        if task.audit_focus
+                        else None,
                         task.state.value,
                         task.attempts,
                         task.audit_rounds,
@@ -391,6 +447,8 @@ class Database:
                         task.updated_at,
                     ),
                 )
+            if batch.plan is not None:
+                self._upsert_batch_plan(conn, batch.batch_id, batch.plan)
         return batch
 
     def load_batch(self, batch_id: str) -> BatchState | None:
@@ -404,8 +462,93 @@ class Database:
             "SELECT * FROM tasks WHERE batch_id = ? ORDER BY task_index ASC",
             (batch_id,),
         ).fetchall()
-        data["tasks"] = [dict(t) for t in task_rows]
-        return BatchState.from_dict(data)
+        tasks: list[dict[str, Any]] = []
+        for task in task_rows:
+            task_data = dict(task)
+            # SQLite column is task_index; the domain record expects `index`.
+            task_data["index"] = task_data.get("task_index", 0)
+            task_data["acceptance_criteria"] = (
+                json.loads(task_data["acceptance_criteria"])
+                if task_data.get("acceptance_criteria")
+                else []
+            )
+            task_data["audit_focus"] = (
+                json.loads(task_data["audit_focus"])
+                if task_data.get("audit_focus")
+                else []
+            )
+            tasks.append(task_data)
+        data["tasks"] = tasks
+        batch = BatchState.from_dict(data)
+        batch.plan = self.load_batch_plan(batch_id)
+        return batch
+
+    def save_batch_plan(self, batch_id: str, record: BatchPlanRecord) -> BatchPlanRecord:
+        """Persist (upsert) the durable planning truth for a batch."""
+        with self.transaction() as conn:
+            self._upsert_batch_plan(conn, batch_id, record)
+        return record
+
+    @staticmethod
+    def _upsert_batch_plan(conn: sqlite3.Connection, batch_id: str, record: BatchPlanRecord) -> None:
+        conn.execute(
+            """
+            INSERT INTO batch_plans (
+                batch_id, batch_title, batch_objective, plan_json,
+                orchestrator_session_id, plan_status, planned_at,
+                baseline_head, baseline_fingerprint_json, current_head,
+                final_phase, finalized_at, batch_summary_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (batch_id) DO UPDATE SET
+                batch_title = excluded.batch_title,
+                batch_objective = excluded.batch_objective,
+                plan_json = excluded.plan_json,
+                orchestrator_session_id = excluded.orchestrator_session_id,
+                plan_status = excluded.plan_status,
+                planned_at = excluded.planned_at,
+                baseline_head = excluded.baseline_head,
+                baseline_fingerprint_json = excluded.baseline_fingerprint_json,
+                current_head = excluded.current_head,
+                final_phase = excluded.final_phase,
+                finalized_at = excluded.finalized_at,
+                batch_summary_json = excluded.batch_summary_json
+            """,
+            (
+                batch_id,
+                record.plan.batch_title,
+                record.plan.batch_objective,
+                json.dumps(record.to_dict(), ensure_ascii=False, sort_keys=True),
+                record.orchestrator_session_id,
+                record.plan_status,
+                record.planned_at,
+                record.baseline_head,
+                record.baseline_fingerprint_json,
+                record.current_head,
+                record.final_phase,
+                record.finalized_at,
+                record.batch_summary_json,
+            ),
+        )
+
+    def load_batch_plan(self, batch_id: str) -> BatchPlanRecord | None:
+        """Reconstruct the durable plan record for a batch, or None."""
+        row = self.connection.execute(
+            "SELECT * FROM batch_plans WHERE batch_id = ?", (batch_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+        try:
+            plan = BatchPlanRecord.from_dict(json.loads(data.get("plan_json") or "{}"))
+        except (ValueError, TypeError):  # pragma: no cover - stored data is ours
+            return None
+        # The mirrored columns are authoritative display text; keep them
+        # consistent with the column row even if the payload evolved.
+        plan.plan.batch_title = str(data.get("batch_title") or plan.plan.batch_title)
+        plan.plan.batch_objective = str(
+            data.get("batch_objective") or plan.plan.batch_objective
+        )
+        return plan
 
     def load_active_batch(self, workspace_id: str) -> BatchState | None:
         """Most recent non-terminal batch for a workspace, if any."""

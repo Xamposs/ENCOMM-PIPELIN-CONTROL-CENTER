@@ -226,12 +226,13 @@ def test_pass_verdict_approves_task_and_completes_the_batch(executor) -> None:  
 
     assert report.outcome is ExecutionOutcome.COMPLETED
     assert report.ok is True
-    assert executor.controller.machine.phase is PipelinePhase.BATCH_COMPLETE
+    # Session 004: a PASS lands on READY_FOR_FINAL_AUDIT, never BATCH_COMPLETE.
+    assert executor.controller.machine.phase is PipelinePhase.READY_FOR_FINAL_AUDIT
 
     task = executor.controller.state.batch.tasks[0]
     assert task.state is TaskState.APPROVED
     assert task.latest_verdict == "PASS"
-    assert executor.controller.state.batch.status is BatchStatus.COMPLETE
+    assert executor.controller.state.batch.status is BatchStatus.READY_FOR_FINAL_AUDIT
     assert executor.next_action() is TaskNextAction.COMPLETE
 
 
@@ -262,7 +263,7 @@ def test_full_loop_isolates_builder_and_resumes_auditor(executor) -> None:  # no
 
     assert ScriptedLoopDriver.resumed == ["auditor_001"]
     assert task.state is TaskState.APPROVED
-    assert executor.controller.machine.phase is PipelinePhase.BATCH_COMPLETE
+    assert executor.controller.machine.phase is PipelinePhase.READY_FOR_FINAL_AUDIT
     # session isolation: the auditor session id never changes across the loop
     assert task.auditor_session_id == "auditor_001"
 
@@ -414,7 +415,7 @@ def test_phase_gates_are_enforced(executor) -> None:  # noqa: ANN001
 def test_fix_from_a_non_fix_phase_is_rejected(executor) -> None:  # noqa: ANN001
     seed(executor)
     ScriptedLoopDriver.shared = [ok_result("auditor_1", verdict_text("PASS"))]
-    executor.run_task_audit()  # now BATCH_COMPLETE
+    executor.run_task_audit()  # now READY_FOR_FINAL_AUDIT
     report = executor.run_task_fix()
     assert report.outcome is ExecutionOutcome.REJECTED
 

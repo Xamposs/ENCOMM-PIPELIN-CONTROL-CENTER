@@ -17,7 +17,8 @@ What it proves, in one controlled scenario:
         ↓
     SAME auditor session resumed      → PASS
         ↓
-    supervisor marks task COMPLETE  (phase BATCH_COMPLETE, persisted)
+    supervisor marks task COMPLETE  (phase READY_FOR_FINAL_AUDIT, persisted;
+    BATCH_COMPLETE is only reachable through the Final Auditor, Session 005)
 
 Safety properties (why this is safe to run):
 
@@ -308,8 +309,9 @@ def main(argv: list[str] | None = None) -> int:
     if task.state is not TaskState.APPROVED:
         print("FAIL: the task must be APPROVED after a PASS re-audit.")
         return 1
-    if executor.controller.machine.phase is not PipelinePhase.BATCH_COMPLETE:
-        print("FAIL: the pipeline must be BATCH_COMPLETE after a PASS re-audit.")
+    if executor.controller.machine.phase is not PipelinePhase.READY_FOR_FINAL_AUDIT:
+        print("FAIL: the pipeline must be READY_FOR_FINAL_AUDIT after a PASS "
+              "(Session 004: BATCH_COMPLETE is only reachable via the Final Auditor).")
         return 1
 
     # -- 7. session identity proof ---------------------------------------------
@@ -347,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
             and t.latest_verdict == "PASS"
             and t.auditor_session_id == task.auditor_session_id
             and t.fix_session_id == task.fix_session_id
-            and stored.status is BatchStatus.COMPLETE
+            and stored.status is BatchStatus.READY_FOR_FINAL_AUDIT
         )
     else:
         ok_persisted = False

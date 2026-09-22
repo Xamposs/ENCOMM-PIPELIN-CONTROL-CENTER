@@ -45,7 +45,7 @@ def test_one_panel_per_role(window) -> None:  # noqa: ANN001
 def test_batch_panel_defaults_to_five(window) -> None:  # noqa: ANN001
     assert window.batch_panel.size_spin.value() == 5
     assert window.batch_panel.size_spin.minimum() == 1
-    assert window.batch_panel.size_spin.maximum() == 50
+    assert window.batch_panel.size_spin.maximum() == 5
 
 
 def test_role_panels_show_the_mandated_session_policies(window) -> None:  # noqa: ANN001
@@ -83,13 +83,13 @@ def test_engine_dropdowns_list_the_registered_drivers(window) -> None:  # noqa: 
 
 
 def test_start_button_drives_the_controller(qapp, window, controller) -> None:  # noqa: ANN001
-    window.batch_panel.size_spin.setValue(8)
+    window.batch_panel.size_spin.setValue(3)
     window.batch_panel.start_button.click()
     qapp.processEvents()
 
     assert controller.machine.phase is PipelinePhase.PLANNING_BATCH
     assert controller.state.batch is not None
-    assert controller.state.batch.size == 8
+    assert controller.state.batch.size == 3
     assert "PLANNING_BATCH" in window.batch_panel.phase_label.text()
 
 

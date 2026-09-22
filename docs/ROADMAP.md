@@ -112,22 +112,55 @@ Exit criteria met:
 
 ---
 
-## Phase 3 — Multi-task batches + orchestrator
+## Phase 3 — Multi-task batches + orchestrator ✅ DONE (Session 004)
 
 **Goal:** a full batch of N tasks planned and run.
 
-Scope:
+Delivered:
 
-- `ORCHESTRATOR` plans a batch from a workspace/project brief.
-- Batch size from the UI is honoured; tasks are sequenced and persisted.
-- Per-task progress and batch status surface live in the UI.
-- `PLANNING_BATCH → RUNNING_TASK … → READY_FOR_FINAL_AUDIT` for a whole batch.
+- **Real ORCHESTRATOR planning** through the generic role/driver
+  architecture (`AgentRole.ORCHESTRATOR` → role config → `DriverRegistry` →
+  `SessionManager`) — one planning call per batch, nothing orchestrator-
+  specific in the batch logic.
+- **Strict BatchPlan parser** (`core/plan_parser.py`): fails closed on
+  malformed output; exact requested task count; contiguous indices; bounded
+  strings/lists; no eval/exec/YAML.
+- **Orchestrator read-only guard** (`core/repo_fingerprint.py`): HEAD +
+  porcelain-status fingerprint before/after planning; a planning call that
+  modified the workspace BLOCKS the plan (violation surfaced, never
+  discarded). Verified offline with a real tmp git repo.
+- **Durable Project Brief** on the batch row (survives restart — never model
+  memory); **batch size 1..5** honoured exactly.
+- **Deterministic autonomous runner** (`core/batch_runner.py`): PLAN → per-task
+  BUILD → AUDIT → (fix loop) → next task → … → `READY_FOR_FINAL_AUDIT`; pause/
+  stop at safe boundaries; crash recovery resumes from SQLite without rework.
+- **Batch lifecycle**: `BatchStatus` gains `PLANNING` / `READY_FOR_FINAL_AUDIT` /
+  `BLOCKED`; `BATCH_COMPLETE` is reachable ONLY from `FINAL_AUDIT_RUNNING`
+  (structural guarantee — Session 003's direct `AUDITING_TASK → BATCH_COMPLETE`
+  terminal is superseded by ADR D-025).
+- **Session lifecycles proven**: every build/fix runs in a fresh Builder
+  session; the Task Auditor reuses ONE session for the whole batch.
+- **Schema v4**: `batch_plans` table (strict plan, Orchestrator session id,
+  baseline, final phase, durable Batch Summary), task criteria/audit-focus
+  columns, Project Brief on batches.
+- **UI**: PROJECT BRIEF field, PLAN + START BATCH / RESUME BATCH, per-task
+  progress + current action + real session readouts — off the UI thread.
+- **334 passing tests** (was 280), including the full offline batch-runner and
+  plan-parser matrices.
+- **Real smoke** `scripts/session_004_multitask_smoke.py`: scratch git repo,
+  BATCH SIZE = 4 — one real Orchestrator call → 4 fresh Builder calls → 4 Task
+  Auditor calls sharing one session → `READY_FOR_FINAL_AUDIT`, re-read from
+  SQLite. `--fake` mode proves every post-processing path before any real call.
 
-Exit criteria:
+Exit criteria met (all four):
 
-- A 5-task batch runs to `READY_FOR_FINAL_AUDIT` unattended.
-- Interrupting mid-batch and restarting resumes from database state.
-- Session policy behaviour matches the brief for every role.
+- A 5-task batch runs to `READY_FOR_FINAL_AUDIT` unattended — **proven
+  offline** (`test_five_task_batch_is_supported_offline`); the real smoke uses
+  4 tasks per the brief's cost target.
+- Interrupting mid-batch and restarting resumes from database state — proven
+  offline (`test_restart_recovery_after_task_two_resumes_without_rework`).
+- Session policy behaviour matches the brief for every role — fresh Builders,
+  one auditor session per batch, Orchestrator `persistent_optional`.
 
 ---
 

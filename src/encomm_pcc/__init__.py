@@ -1,4 +1,4 @@
-"""ENCOMM Pipeline Control Center — v0.3 (task auditor + capped fix loop)."""
+"""ENCOMM Pipeline Control Center — v0.4 (orchestrated multi-task batches)."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 __all__ = ["__version__"]

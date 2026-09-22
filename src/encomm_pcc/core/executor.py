@@ -52,10 +52,13 @@ from ..domain import (
     AgentRoleConfig,
     AuditVerdict,
     AuditVerdictResult,
+    BatchPlan,
+    BatchPlanRecord,
     BatchStatus,
     PipelinePhase,
     TaskState,
     TaskStateRecord,
+    build_batch_summary,
     utc_now,
 )
 from ..drivers import (
@@ -71,8 +74,16 @@ from ..drivers import (
 )
 from ..persistence import Database
 from .audit_packet import AuditPacket, render_audit_prompt, render_fix_prompt
+from .config import MAX_BATCH_SIZE
 from .events import EventLog, NullEventLog
 from .hermes_profiles import ProfileDiscoveryResult, discover_profiles
+from .plan_packet import render_planning_prompt
+from .plan_parser import PLAN_ENVELOPE_END, PLAN_ENVELOPE_START, PlanParseError, parse_batch_plan
+from .repo_fingerprint import (
+    RepoFingerprint,
+    capture_repo_fingerprint,
+    fingerprints_equal,
+)
 from .session_manager import SessionAction
 from .verdict_parser import VerdictParseError, parse_audit_verdict
 
@@ -82,6 +93,9 @@ __all__ = [
     "ExecutionReport",
     "Executor",
     "MAX_AUDIT_ROUNDS",
+    "ORCHESTRATOR_ROLE",
+    "PlanOutcome",
+    "PlanReport",
     "TaskNextAction",
     "TaskSpec",
     "next_task_action",
@@ -94,6 +108,10 @@ DEFAULT_TASK_ROLE = AgentRole.BUILDER
 #: The role that audits each task (Session 003).  Resolved through the same
 #: role config → driver registry → SessionManager path as the Builder.
 AUDITOR_ROLE = AgentRole.TASK_AUDITOR
+
+#: The role that plans each batch (Session 004).  Resolved through the SAME
+#: generic path — no orchestrator-specific engine code exists anywhere.
+ORCHESTRATOR_ROLE = AgentRole.ORCHESTRATOR
 
 #: Hard cap on audit/fix rounds for ONE task (brief semantics): Audit 1 is the
 #: initial audit; Fix 1 → Audit 2; Fix 2 → Audit 3.  A NEEDS_FIX returned by
@@ -110,6 +128,19 @@ OUTPUT_EXCERPT_CHARS = 4000
 #: Cap on the serialised structured verdict stored on ``tasks.verdict_json``.
 #: The parser already bounds the input; this is a second defence for storage.
 VERDICT_STORE_CHARS = 80_000
+
+
+def _fingerprint_violation(before: RepoFingerprint, after: RepoFingerprint) -> str:
+    """Human-readable description of what changed between two fingerprints."""
+    parts: list[str] = []
+    if before.head != after.head:
+        parts.append(f"HEAD changed: {before.head} -> {after.head}")
+    if before.status_hash != after.status_hash:
+        parts.append(
+            f"worktree status changed ({before.status_lines} -> "
+            f"{after.status_lines} porcelain line(s))"
+        )
+    return "; ".join(parts) or "unexpected repository change"
 
 
 class ExecutionOutcome(str, Enum):
@@ -138,13 +169,17 @@ class TaskNextAction(str, Enum):
 
     #: No task materialised / nothing to do.
     IDLE = "IDLE"
+    #: The batch needs its Orchestrator plan (no plan materialised yet).
+    PLAN = "PLAN"
+    #: Run the Builder for the next planned task (a brand-new session).
+    BUILD = "BUILD"
     #: Run the initial audit (audit_rounds == 0).
     AUDIT = "AUDIT"
     #: Run a fix (FIX_REQUIRED) — always in a brand-new Builder session.
     FIX = "FIX"
     #: Re-audit after a fix (resume the same auditor session).
     RE_AUDIT = "RE_AUDIT"
-    #: The task passed its audit; the batch is complete.
+    #: Every task passed its audit; the batch is READY_FOR_FINAL_AUDIT.
     COMPLETE = "COMPLETE"
     #: Cap exhausted, malformed verdict, or auditor BLOCKED.  Requires a human.
     BLOCKED = "BLOCKED"
@@ -162,23 +197,47 @@ def next_task_action(
 ) -> TaskNextAction:
     """Decide the single deterministic next step from persisted state.
 
-    The task row is the primary signal — after a restart only SQLite survives,
-    and the persisted task state (plus the recovered batch ``phase``) must be
-    enough to decide AUDIT / FIX / RE-AUDIT / COMPLETE / BLOCKED.  The pipeline
-    phase is a secondary signal for the edge cases where no task exists yet.
+    The task rows are the primary signal — after a restart only SQLite
+    survives, and the persisted task states (plus the recovered batch phase)
+    must be enough to decide PLAN / BUILD / AUDIT / FIX / RE-AUDIT / COMPLETE /
+    BLOCKED.  The pipeline phase is a secondary signal for the edges where no
+    task exists yet.
+
+    Multi-task aware since Session 004: the *first* task (in index order) that
+    still needs work is the current task; approved/blocked/failed tasks are
+    never revisited, so restart recovery and the batch runner agree without
+    any in-memory state.
 
     Pure and offline: recovery and the UI both call this, and it never starts
     anything — it only reports what the next legal action is.
     """
-    if batch is None or not batch.tasks:
+    if batch is None:
         return TaskNextAction.IDLE
-    task = batch.tasks[0]
-    if task.state is TaskState.BLOCKED:
-        return TaskNextAction.BLOCKED
-    if task.state is TaskState.FAILED:
-        return TaskNextAction.FAILED
-    if task.state is TaskState.APPROVED:
+    if not batch.tasks:
+        # A created batch with no plan needs the Orchestrator.
+        if phase is PipelinePhase.PLANNING_BATCH or batch.status.value == "CREATED":
+            return TaskNextAction.PLAN
+        return TaskNextAction.IDLE
+
+    # A blocked or failed task stops the batch deterministically.
+    for task in batch.tasks:
+        if task.state is TaskState.BLOCKED:
+            return TaskNextAction.BLOCKED
+        if task.state is TaskState.FAILED:
+            return TaskNextAction.FAILED
+
+    if all(task.state is TaskState.APPROVED for task in batch.tasks):
         return TaskNextAction.COMPLETE
+
+    task = batch.first_undone_task()
+    if task is None:
+        return TaskNextAction.IDLE
+    if task.state is TaskState.PENDING:
+        return TaskNextAction.BUILD
+    if task.state is TaskState.RUNNING:
+        # A previous build did not finish (restart); the Builder re-runs in a
+        # fresh session — the half-finished attempt is never trusted.
+        return TaskNextAction.BUILD
     if task.state is TaskState.FIX_REQUIRED:
         return TaskNextAction.FIX
     if task.state is TaskState.RUNNING_FIX:
@@ -197,6 +256,8 @@ def next_task_action(
         return TaskNextAction.BLOCKED
     if phase is PipelinePhase.FAILED:
         return TaskNextAction.FAILED
+    if phase is PipelinePhase.READY_FOR_FINAL_AUDIT:
+        return TaskNextAction.COMPLETE
     if phase is PipelinePhase.BATCH_COMPLETE:
         return TaskNextAction.COMPLETE
     return TaskNextAction.IDLE
@@ -250,6 +311,63 @@ class ExecutionReport:
         parts = [f"{self.outcome.value}: {self.message}"]
         if self.task_id:
             parts.append(f"task={self.task_id}")
+        if self.session_id:
+            parts.append(f"session={self.session_id}")
+        if self.prompt_result is not None and self.prompt_result.exit_code is not None:
+            parts.append(f"exit_code={self.prompt_result.exit_code}")
+        return " | ".join(parts)
+
+
+class PlanOutcome(str, Enum):
+    """How one Orchestrator planning call ended (Session 004)."""
+
+    #: The plan parsed strictly, matched the requested task count, and the
+    #: read-only guard passed; tasks are materialised and persisted.
+    PLANNED = "PLANNED"
+    #: The child process failed; the batch is FAILED.
+    FAILED = "FAILED"
+    #: A malformed plan, an exact-count violation, or a worktree-modification
+    #: guard violation — the batch is BLOCKED and nothing was materialised.
+    BLOCKED = "BLOCKED"
+    #: The request was illegal for the current phase / state (no change).
+    REJECTED = "REJECTED"
+    #: A stop/pause request was honoured before the planning call started.
+    STOPPED = "STOPPED"
+
+
+@dataclass(slots=True)
+class PlanReport:
+    """Result of one planning attempt — the machine-checkable record of it."""
+
+    outcome: PlanOutcome
+    phase: PipelinePhase
+    message: str
+    #: The parsed plan (never None on PLANNED).
+    plan: BatchPlan | None = None
+    #: The durable planning record, when one was persisted.
+    plan_record: BatchPlanRecord | None = None
+    #: Real external Orchestrator session id when the engine exposed one.
+    session_id: str | None = None
+    #: True when the planning call modified the repository (guard violation).
+    guard_violation: bool = False
+    #: True only when a real process was launched for the planning call.
+    executor_started: bool = False
+    prompt_result: PromptResult | None = None
+    #: Repository HEAD before the planning call (read-only capture).
+    baseline_head: str | None = None
+    stop_requested: bool = False
+    started_at: str = field(default_factory=utc_now)
+    finished_at: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome is PlanOutcome.PLANNED
+
+    def summary(self) -> str:
+        """One-line, non-secret rendering for the UI and the event log."""
+        parts = [f"{self.outcome.value}: {self.message}"]
+        if self.plan is not None:
+            parts.append(f"tasks={self.plan.task_count}")
         if self.session_id:
             parts.append(f"session={self.session_id}")
         if self.prompt_result is not None and self.prompt_result.exit_code is not None:
@@ -476,20 +594,312 @@ class Executor:
         )
         return task
 
-    def run_task_audit(self, *, timeout_s: float | None = None) -> ExecutionReport:
-        """Dispatch the Task Auditor for the current task and apply its verdict.
+    # -- Orchestrator planning (Session 004) -------------------------------
+    def plan_batch(
+        self,
+        *,
+        project_brief: str,
+        batch_size: int,
+        timeout_s: float | None = None,
+    ) -> PlanReport:
+        """Run exactly one Orchestrator planning call and materialise the plan.
 
-        The auditor is resolved through the same generic path as the Builder:
-        ``AgentRole.TASK_AUDITOR`` → role config → driver registry →
-        ``SessionManager``.  Its session policy is ``persistent_per_batch``:
-        the first audit of a batch opens a NEW auditor session; a re-audit
-        after a fix resumes the SAME session.
+        Generic role path only: ``AgentRole.ORCHESTRATOR`` → role config →
+        driver registry → ``SessionManager`` — no orchestrator-specific engine
+        code exists anywhere, so a future Codex/Claude Code/etc. driver fills
+        the role by configuration alone.
+
+        The repository is fingerprinted read-only BEFORE the call and verified
+        AFTER it: a planning call that modified the workspace BLOCKS the plan
+        (the modifications are surfaced to the operator and never discarded,
+        and no task is materialised from the violating answer).
         """
-        guard = self._claim_unit("an audit")
+        guard = self._claim_unit("planning")
+        if guard is not None:
+            return PlanReport(
+                outcome=PlanOutcome.STOPPED,
+                phase=self.controller.machine.phase,
+                message=guard.message,
+            )
+        try:
+            return self._plan(
+                project_brief=project_brief,
+                batch_size=batch_size,
+                timeout_s=timeout_s,
+            )
+        except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
+            self._fail_hard(exc)
+            return PlanReport(
+                outcome=PlanOutcome.FAILED,
+                phase=self.controller.machine.phase,
+                message=f"Executor error: {type(exc).__name__}: {exc}",
+                started_at=utc_now(),
+                finished_at=utc_now(),
+            )
+        finally:
+            with self._runner_lock:
+                self._active = False
+
+    def _plan(
+        self, *, project_brief: str, batch_size: int, timeout_s: float | None
+    ) -> PlanReport:
+        machine = self.controller.machine
+        if machine.phase not in (PipelinePhase.IDLE, PipelinePhase.PLANNING_BATCH):
+            return PlanReport(
+                outcome=PlanOutcome.REJECTED,
+                phase=machine.phase,
+                message=f"Cannot plan from phase {machine.phase.value}.",
+            )
+
+        if batch_size < 1 or batch_size > MAX_BATCH_SIZE:
+            return PlanReport(
+                outcome=PlanOutcome.BLOCKED,
+                phase=machine.phase,
+                message=(
+                    f"Batch size must be 1..{MAX_BATCH_SIZE} (the Orchestrator "
+                    f"must return exactly that many tasks); got {batch_size}."
+                ),
+            )
+
+        batch = self.controller.state.batch
+        if batch is None:
+            start = self.controller.request_start(batch_size)
+            if start.outcome.name == "REJECTED":  # pragma: no cover - guarded above
+                return PlanReport(
+                    outcome=PlanOutcome.REJECTED, phase=machine.phase, message=start.message
+                )
+            batch = self.controller.state.batch
+        if batch is None:  # pragma: no cover - request_start always creates one
+            return PlanReport(
+                outcome=PlanOutcome.BLOCKED, phase=machine.phase, message="No batch to plan."
+            )
+        if batch.plan is not None:
+            return PlanReport(
+                outcome=PlanOutcome.REJECTED,
+                phase=machine.phase,
+                message=f"Batch {batch.batch_id} is already planned.",
+            )
+        batch.project_brief = (project_brief or "").strip()
+        batch.status = BatchStatus.PLANNING
+        self._persist()
+        self.events.info(
+            f"Planning batch {batch.batch_id} (size {batch_size}) from "
+            f"project brief ({len(batch.project_brief)} chars).",
+            source="executor",
+        )
+
+        role, config, engine = self._resolve_role(ORCHESTRATOR_ROLE)
+        blocked = self._preflight(config, engine, role=role)
+        if blocked is not None:
+            self.events.error(blocked, source="executor")
+            return PlanReport(outcome=PlanOutcome.BLOCKED, phase=machine.phase, message=blocked)
+
+        # Read-only repository baseline BEFORE the planning call.
+        baseline = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+        self.events.info(
+            f"Planning baseline: head={baseline.head or '(no git)'}, "
+            f"branch={baseline.branch or '(none)'}, dirty_lines={baseline.status_lines} "
+            "(read-only capture).",
+            source="executor",
+        )
+
+        capabilities = self.registry.capabilities(engine)
+        driver: BaseDriver | None = None
+        try:
+            driver = self.registry.create(engine, runner=self._driver_runner)
+            request = self._session_request(config, role=role)
+            session = driver.start_session(request)
+        except (DriverError, DriverNotImplementedError) as exc:
+            message = f"Driver '{engine}' refused to start an orchestrator session: {exc}"
+            self.events.error(message, source="executor")
+            return PlanReport(outcome=PlanOutcome.BLOCKED, phase=machine.phase, message=message)
+
+        decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if decision.action is SessionAction.REUSE and decision.session_id:
+            try:
+                session = driver.resume_session(decision.session_id, request)
+            except (DriverError, DriverNotImplementedError) as exc:
+                message = (
+                    f"Session policy wanted to resume orchestrator session "
+                    f"{decision.session_id}, but: {exc}"
+                )
+                self.events.error(message, source="executor")
+                return PlanReport(
+                    outcome=PlanOutcome.FAILED, phase=machine.phase, message=message
+                )
+        self.events.info(
+            f"Session policy for {role.value}: {decision.action.value} — {decision.reason}",
+            source="executor",
+        )
+
+        prompt = render_planning_prompt(
+            project_brief=batch.project_brief,
+            batch_size=batch_size,
+            workspace_path=self.controller.state.workspace.repo_path,
+        )
+        handle = driver.send_prompt(session, prompt)
+        self.events.info(
+            f"Planning prompt dispatched via driver '{engine}' "
+            f"(profile '{config.project_profile or '(none)'}'"
+            + (f", model '{config.model}'" if config.model else "")
+            + f") — requesting exactly {batch_size} tasks.",
+            source="executor",
+        )
+        result = driver.wait_for_completion(handle, timeout_s=timeout_s)
+
+        started = bool(self._recorder and self._recorder.launched)
+        session_id = result.session_id
+        if not result.ok:
+            batch.status = BatchStatus.FAILED
+            if machine.can_go_to(PipelinePhase.FAILED):  # pragma: no cover - guarded
+                self._transition(
+                    PipelinePhase.FAILED,
+                    f"Orchestrator planning failed: {result.error}",
+                )
+            self._persist()
+            self.events.error(
+                f"Orchestrator planning FAILED: {result.error}",
+                source="executor",
+                payload={"ok": False, "error": result.error},
+            )
+            return PlanReport(
+                outcome=PlanOutcome.FAILED,
+                phase=machine.phase,
+                message=result.error or "The Orchestrator process reported failure.",
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                baseline_head=baseline.head,
+                finished_at=utc_now(),
+            )
+
+        self._record_session(config, session, result, engine, role=role)
+
+        # The plan is untrusted model output: parse strictly, fail closed.
+        try:
+            plan = parse_batch_plan(result.text, expected_count=batch_size)
+        except PlanParseError as exc:
+            detail = f"{exc.reason}: {str(exc)}"[:400]
+            message = f"Malformed Orchestrator plan: {detail}"
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(PipelinePhase.BLOCKED, f"Planning blocked: {message}")
+            self._persist()
+            self.events.error(
+                message,
+                source="executor",
+                payload={"ok": False, "error": message, "malformed": True},
+            )
+            return PlanReport(
+                outcome=PlanOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                baseline_head=baseline.head,
+                finished_at=utc_now(),
+            )
+
+        # Read-only guard: planning must NOT modify the supervised repository.
+        after = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+        if not fingerprints_equal(baseline, after):
+            detail = _fingerprint_violation(baseline, after)
+            message = (
+                "ORCHESTRATOR READ-ONLY GUARD VIOLATION: the planning call "
+                f"modified the supervised repository ({detail}). The plan is "
+                "BLOCKED; the modifications are left untouched for the operator "
+                "— they are not discarded, and no task was materialised."
+            )
+            batch.status = BatchStatus.BLOCKED
+            if machine.can_go_to(PipelinePhase.BLOCKED):
+                self._transition(PipelinePhase.BLOCKED, f"Planning blocked: {message}")
+            self._persist()
+            self.events.error(
+                message,
+                source="executor",
+                payload={"ok": False, "guard_violation": True, "error": message},
+            )
+            return PlanReport(
+                outcome=PlanOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+                session_id=session_id,
+                executor_started=started,
+                prompt_result=result,
+                baseline_head=baseline.head,
+                guard_violation=True,
+                finished_at=utc_now(),
+            )
+
+        # Plan accepted: materialise exactly the planned tasks, all PENDING.
+        record = BatchPlanRecord(
+            plan=plan,
+            project_brief=batch.project_brief,
+            requested_size=batch_size,
+            plan_status="PLANNED",
+            orchestrator_session_id=session_id,
+            planned_at=utc_now(),
+            baseline_head=baseline.head or "",
+            baseline_fingerprint_json=baseline.to_json(),
+        )
+        for planned in plan.tasks:
+            batch.tasks.append(
+                TaskStateRecord(
+                    index=planned.index,
+                    title=planned.title,
+                    prompt=planned.implementation_prompt,
+                    acceptance_criteria=list(planned.acceptance_criteria),
+                    audit_focus=list(planned.audit_focus),
+                    state=TaskState.PENDING,
+                )
+            )
+        batch.plan = record
+        # Tasks are persisted before any implementation starts; the runner
+        # flips the batch to RUNNING when the first build begins.
+        self._persist()
+        self.events.info(
+            f"Batch {batch.batch_id} planned: exactly {plan.task_count} tasks "
+            f"(title '{plan.batch_title}'); orchestrator session "
+            f"{session_id or 'NOT_EXPOSED'}; plan persisted before any build.",
+            source="executor",
+            payload={
+                "batch_id": batch.batch_id,
+                "plan_status": "PLANNED",
+                "task_count": plan.task_count,
+                "requested_size": batch_size,
+                "orchestrator_session_id": session_id,
+            },
+        )
+        return PlanReport(
+            outcome=PlanOutcome.PLANNED,
+            phase=self.controller.machine.phase,
+            message=f"Batch planned with exactly {plan.task_count} tasks.",
+            plan=plan,
+            plan_record=record,
+            session_id=session_id,
+            executor_started=started,
+            prompt_result=result,
+            baseline_head=baseline.head,
+            finished_at=utc_now(),
+        )
+
+    # -- planned-task build (Session 004) ----------------------------------
+    def run_task_build(
+        self, *, index: int | None = None, timeout_s: float | None = None
+    ) -> ExecutionReport:
+        """Run the Builder for one planned task in a BRAND-NEW session.
+
+        Session 004's batch runner calls this for every planned task.  The
+        Builder's ``always_new`` policy guarantees a fresh session per
+        implementation (and per fix), so no conversation history is ever
+        assumed — every prompt must be self-contained.
+        """
+        guard = self._claim_unit("a build")
         if guard is not None:
             return guard
         try:
-            return self._audit(timeout_s=timeout_s)
+            return self._build(index=index, timeout_s=timeout_s)
         except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
             self._fail_hard(exc)
             return ExecutionReport(
@@ -503,7 +913,217 @@ class Executor:
             with self._runner_lock:
                 self._active = False
 
-    def run_task_fix(self, *, timeout_s: float | None = None) -> ExecutionReport:
+    def _build(
+        self, *, index: int | None = None, timeout_s: float | None
+    ) -> ExecutionReport:
+        machine = self.controller.machine
+        if machine.phase not in (
+            PipelinePhase.IDLE,
+            PipelinePhase.PLANNING_BATCH,
+            PipelinePhase.RUNNING_TASK,
+        ):
+            if not self._ensure_work_phase(PipelinePhase.RUNNING_TASK):
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.REJECTED,
+                    phase=machine.phase,
+                    message=(
+                        "A build only runs from PLANNING_BATCH / RUNNING_TASK "
+                        f"(or IDLE for recovery); current phase is {machine.phase.value}."
+                    ),
+                )
+        task = self._task_at(index)
+        if task is None:
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message="No task in this batch to build.",
+            )
+        if task.state not in (TaskState.PENDING, TaskState.RUNNING):
+            return ExecutionReport(
+                outcome=ExecutionOutcome.REJECTED,
+                phase=machine.phase,
+                message=(
+                    f"Task {task.task_id} is in state {task.state.value}, not "
+                    "PENDING/RUNNING; nothing to build."
+                ),
+            )
+
+        role, config, engine = self._resolve_role(self.role)
+        blocked = self._preflight(config, engine, role=role)
+        if blocked is not None:
+            self.events.error(blocked, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=blocked,
+            )
+
+        capabilities = self.registry.capabilities(engine)
+        driver: BaseDriver | None = None
+        try:
+            driver = self.registry.create(engine, runner=self._driver_runner)
+            request = self._session_request(config, role=role)
+            session = driver.start_session(request)
+        except (DriverError, DriverNotImplementedError) as exc:
+            message = f"Driver '{engine}' refused to start a Builder session: {exc}"
+            self.events.error(message, source="executor")
+            return ExecutionReport(
+                outcome=ExecutionOutcome.BLOCKED,
+                phase=machine.phase,
+                message=message,
+            )
+
+        # BUILDER's `always_new` policy: the decision must be NEW — a build
+        # never reuses a Builder session (session isolation is a hard contract).
+        decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if decision.action is SessionAction.REUSE:
+            self.events.error(
+                f"Build run for task {task.task_id}: session policy returned REUSE "
+                f"({decision.session_id}); the policy must be 'always_new' — refusing.",
+                source="executor",
+            )
+            return self._block_task(
+                task,
+                "Cannot start a build: the Builder session policy must be "
+                "'always_new' so every implementation runs in a NEW session.",
+                phase=PipelinePhase.BLOCKED,
+            )
+        self.events.info(
+            f"Session policy for {role.value}: {decision.action.value} — {decision.reason}",
+            source="executor",
+        )
+
+        # Move the pipeline into RUNNING_TASK over legal edges only.
+        if machine.phase is PipelinePhase.PLANNING_BATCH:
+            self._transition(
+                PipelinePhase.RUNNING_TASK,
+                f"Batch is running: task {task.task_id} dispatched to {engine}.",
+            )
+        elif machine.phase is PipelinePhase.IDLE:
+            self._ensure_work_phase(PipelinePhase.RUNNING_TASK)
+
+        # Persist the boundary BEFORE the prompt: a crash mid-build must not
+        # be indistinguishable from a never-started attempt.
+        task.state = TaskState.RUNNING
+        task.attempts += 1
+        task.updated_at = utc_now()
+        batch = self.controller.state.batch
+        if batch is not None:
+            batch.status = BatchStatus.RUNNING
+        self._persist()
+        self.events.info(
+            f"Task {task.task_id} (attempt {task.attempts}) build dispatched via "
+            f"driver '{engine}' (profile '{config.project_profile or '(none)'}'"
+            + (f", model '{config.model}'" if config.model else "")
+            + ").",
+            source="executor",
+        )
+
+        handle = driver.send_prompt(session, task.prompt)
+        result = driver.wait_for_completion(handle, timeout_s=timeout_s)
+
+        started = bool(self._recorder and self._recorder.launched)
+        session_id = result.session_id
+        if not result.ok:
+            return self._fail_task(
+                task,
+                result.error or "The Builder process reported failure.",
+                session_id=session_id,
+                prompt_result=result,
+                executor_started=started,
+            )
+
+        self._record_session(config, session, result, engine, role=role)
+        if session_id:
+            task.builder_session_id = session_id
+        task.state = TaskState.AUDITING
+        task.last_error = None
+        task.updated_at = utc_now()
+        self._transition(
+            PipelinePhase.AUDITING_TASK,
+            f"Task {task.task_id} completed by the Builder and awaits the Task Auditor.",
+        )
+        self._persist()
+        self.events.info(
+            f"Task {task.task_id} build completed (attempt {task.attempts}); "
+            f"session {session_id or 'NOT_EXPOSED'}; awaiting audit.",
+            source="executor",
+            payload=self._result_payload(task, result, session_id),
+        )
+        return ExecutionReport(
+            outcome=ExecutionOutcome.COMPLETED,
+            phase=self.controller.machine.phase,
+            message=(
+                f"Task {task.task_id} build completed in a NEW Builder session; "
+                "the task awaits the Task Auditor."
+            ),
+            task_id=task.task_id,
+            task_state=task.state,
+            executor_started=started,
+            session_id=session_id,
+            prompt_result=result,
+            stop_requested=self.stop_requested,
+            finished_at=utc_now(),
+        )
+
+    def _finalize_batch(self, batch: Any) -> None:
+        """Write the durable Batch Summary and final phase when every task passes.
+
+        This is **not** the Final Audit: it only records that the batch
+        reached ``READY_FOR_FINAL_AUDIT`` with all tasks APPROVED, plus the
+        evidence Session 005's Final Auditor will consume.
+        """
+        batch.status = BatchStatus.READY_FOR_FINAL_AUDIT
+        fingerprint = capture_repo_fingerprint(self.controller.state.workspace.repo_path)
+        batch.current_head = fingerprint.head or batch.current_head
+        if batch.plan is not None:
+            batch.plan.final_phase = PipelinePhase.READY_FOR_FINAL_AUDIT.value
+            batch.plan.current_head = batch.current_head
+            batch.plan.finalized_at = utc_now()
+            batch.plan.batch_summary_json = json.dumps(
+                build_batch_summary(batch=batch, plan=batch.plan),
+                ensure_ascii=False,
+                sort_keys=True,
+            )[:80_000]
+        self.events.info(
+            f"Batch {batch.batch_id} finalized: all {len(batch.tasks)} tasks APPROVED; "
+            f"READY_FOR_FINAL_AUDIT (current HEAD {batch.current_head or 'NOT_EXPOSED'}).",
+            source="executor",
+        )
+
+    def run_task_audit(
+        self, *, index: int | None = None, timeout_s: float | None = None
+    ) -> ExecutionReport:
+        """Dispatch the Task Auditor for the current task and apply its verdict.
+
+        The auditor is resolved through the same generic path as the Builder:
+        ``AgentRole.TASK_AUDITOR`` → role config → driver registry →
+        ``SessionManager``.  Its session policy is ``persistent_per_batch``:
+        the first audit of a batch opens a NEW auditor session; a re-audit
+        after a fix resumes the SAME session (across the whole batch, so
+        Task 1 … Task N audits all share one auditor session).
+        """
+        guard = self._claim_unit("an audit")
+        if guard is not None:
+            return guard
+        try:
+            return self._audit(index=index, timeout_s=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
+            self._fail_hard(exc)
+            return ExecutionReport(
+                outcome=ExecutionOutcome.FAILED,
+                phase=self.controller.machine.phase,
+                message=f"Executor error: {type(exc).__name__}: {exc}",
+                started_at=utc_now(),
+                finished_at=utc_now(),
+            )
+        finally:
+            with self._runner_lock:
+                self._active = False
+
+    def run_task_fix(
+        self, *, index: int | None = None, timeout_s: float | None = None
+    ) -> ExecutionReport:
         """Run a corrective Builder pass for the current task.
 
         The fix **must** use a brand-new Builder session (the role's
@@ -516,7 +1136,7 @@ class Executor:
         if guard is not None:
             return guard
         try:
-            return self._fix(timeout_s=timeout_s)
+            return self._fix(index=index, timeout_s=timeout_s)
         except Exception as exc:  # noqa: BLE001 - an unexpected failure is a FAILED run
             self._fail_hard(exc)
             return ExecutionReport(
@@ -571,11 +1191,26 @@ class Executor:
             self._active = True
         return None
 
-    def _current_task(self) -> TaskStateRecord | None:
+    def _task_at(self, index: int | None = None) -> TaskStateRecord | None:
+        """Return the task at ``index`` (1-based), or the first undone task.
+
+        With no index the first task that still needs work is used — that is
+        how the single-task flow and restart recovery both agree on "the"
+        task, and how the multi-task batch progresses in index order.
+        """
         batch = self.controller.state.batch
         if batch is None or not batch.tasks:
             return None
-        return batch.tasks[0]
+        if index is None:
+            return batch.first_undone_task()
+        for task in batch.tasks:
+            if task.index == int(index):
+                return task
+        return None
+
+    def _current_task(self, index: int | None = None) -> TaskStateRecord | None:
+        """Compatibility alias: the task under work (see :meth:`_task_at`)."""
+        return self._task_at(index)
 
     def _ensure_work_phase(self, target: PipelinePhase) -> bool:
         """Advance a freshly-restored machine (IDLE) to an in-flight work phase.
@@ -624,7 +1259,9 @@ class Executor:
         if task.auditor_session_id and sessions.current_session_id(AUDITOR_ROLE) is None:
             sessions.restore_session(AUDITOR_ROLE, task.auditor_session_id)
 
-    def _audit(self, *, timeout_s: float | None) -> ExecutionReport:
+    def _audit(
+        self, *, index: int | None = None, timeout_s: float | None
+    ) -> ExecutionReport:
         machine = self.controller.machine
         if not self._ensure_work_phase(PipelinePhase.AUDITING_TASK):
             return ExecutionReport(
@@ -635,7 +1272,7 @@ class Executor:
                     f"{machine.phase.value}."
                 ),
             )
-        task = self._current_task()
+        task = self._task_at(index)
         if task is None:
             return ExecutionReport(
                 outcome=ExecutionOutcome.BLOCKED,
@@ -715,6 +1352,7 @@ class Executor:
         )
 
         previous = self._stored_verdict(task) if task.audit_rounds > 1 else None
+        batch = self.controller.state.batch
         packet = AuditPacket(
             task_id=task.task_id,
             title=task.title,
@@ -722,9 +1360,16 @@ class Executor:
             workspace_path=self.controller.state.workspace.repo_path,
             attempt=task.attempts,
             audit_round=task.audit_rounds,
-            batch_id=getattr(self.controller.state.batch, "batch_id", ""),
+            batch_id=getattr(batch, "batch_id", ""),
             auditor_session_id=decision.session_id or session.session_id,
             previous=previous,
+            # Session 004: the plan's contract travels with the packet so a
+            # fresh auditor session verifies the real criteria and focus.
+            acceptance_criteria=tuple(task.acceptance_criteria or ()),
+            audit_focus=tuple(task.audit_focus or ()),
+            task_index=task.index,
+            batch_title=getattr(batch, "batch_title", ""),
+            batch_objective=getattr(batch, "batch_objective", ""),
         )
         handle = driver.send_prompt(session, packet.render())
         result = driver.wait_for_completion(handle, timeout_s=timeout_s)
@@ -770,13 +1415,6 @@ class Executor:
             task.state = TaskState.APPROVED
             task.last_error = None
             batch = self.controller.state.batch
-            if batch is not None:
-                batch.status = BatchStatus.COMPLETE
-            self._transition(
-                PipelinePhase.BATCH_COMPLETE,
-                f"Task {task.task_id} PASSED audit round {task.audit_rounds}; "
-                "the single-task batch is complete.",
-            )
             self._persist()
             self.events.info(
                 f"Task {task.task_id} PASSED audit (round {task.audit_rounds}); "
@@ -785,10 +1423,53 @@ class Executor:
                 payload={"task_id": task.task_id, "verdict": "PASS",
                          "audit_round": task.audit_rounds},
             )
+            next_task = batch.first_undone_task() if batch is not None else None
+            if next_task is not None:
+                # More tasks remain: the deterministic loop advances to the
+                # next task's build phase (AUDITING_TASK → RUNNING_TASK).
+                self._transition(
+                    PipelinePhase.RUNNING_TASK,
+                    f"Task {task.task_id} PASSED audit round "
+                    f"{task.audit_rounds}; task {next_task.index} "
+                    f"({next_task.title}) is next.",
+                )
+                self._persist()
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.COMPLETED,
+                    phase=self.controller.machine.phase,
+                    message=(
+                        f"Task {task.task_id} PASSED audit; next task "
+                        f"(index {next_task.index}) is ready."
+                    ),
+                    task_id=task.task_id,
+                    task_state=task.state,
+                    executor_started=started,
+                    session_id=session_id,
+                    prompt_result=result,
+                    audit_verdict=verdict,
+                    stop_requested=self.stop_requested,
+                    finished_at=utc_now(),
+                )
+
+            # No tasks remain: the batch is complete up to the Final Auditor.
+            if batch is not None:
+                self._finalize_batch(batch)
+            self._transition(
+                PipelinePhase.READY_FOR_FINAL_AUDIT,
+                f"All tasks approved: batch {batch.batch_id if batch else ''} "
+                "is READY FOR FINAL AUDIT.",
+            )
+            self._persist()
+            self.events.info(
+                f"All tasks approved; batch "
+                f"{batch.batch_id if batch else ''} is READY_FOR_FINAL_AUDIT.",
+                source="executor",
+                payload={"verdict": "PASS", "final_phase": "READY_FOR_FINAL_AUDIT"},
+            )
             return ExecutionReport(
                 outcome=ExecutionOutcome.COMPLETED,
                 phase=self.controller.machine.phase,
-                message=f"Task {task.task_id} PASSED audit; batch complete.",
+                message="All tasks approved; the batch is READY_FOR_FINAL_AUDIT.",
                 task_id=task.task_id,
                 task_state=task.state,
                 executor_started=started,
@@ -869,7 +1550,7 @@ class Executor:
             verdict=verdict,
         )
 
-    def _fix(self, *, timeout_s: float | None) -> ExecutionReport:
+    def _fix(self, *, index: int | None = None, timeout_s: float | None) -> ExecutionReport:
         machine = self.controller.machine
         if not self._ensure_work_phase(PipelinePhase.FIX_REQUIRED):
             return ExecutionReport(
@@ -880,7 +1561,7 @@ class Executor:
                     f"{machine.phase.value}."
                 ),
             )
-        task = self._current_task()
+        task = self._task_at(index)
         if task is None:
             return ExecutionReport(
                 outcome=ExecutionOutcome.BLOCKED,
@@ -976,6 +1657,7 @@ class Executor:
             implementation_prompt=task.prompt,
             workspace_path=self.controller.state.workspace.repo_path,
             verdict=verdict,
+            acceptance_criteria=tuple(task.acceptance_criteria or ()),
         )
         handle = driver.send_prompt(session, prompt)
         self.events.info(
@@ -1045,10 +1727,13 @@ class Executor:
         executor_started: bool = False,
         verdict: AuditVerdictResult | None = None,
     ) -> ExecutionReport:
-        """Mark the task (and pipeline) BLOCKED.  Never a green outcome."""
+        """Mark the task (and pipeline + batch) BLOCKED.  Never a green outcome."""
         task.state = TaskState.BLOCKED
         task.last_error = message
         task.updated_at = utc_now()
+        batch = self.controller.state.batch
+        if batch is not None:
+            batch.status = BatchStatus.BLOCKED
         if self.controller.machine.can_go_to(phase):
             self._transition(phase, f"Task {task.task_id} BLOCKED: {message}")
         self._persist()

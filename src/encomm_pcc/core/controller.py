@@ -251,12 +251,20 @@ class PipelineController:
 
         self.state.phase = self.machine.phase
         self.sessions.begin_new_batch()
+        # Preserve the Project Brief if the operator typed one before start
+        # (set_project_brief creates a CREATED batch row; request_start builds
+        # the real batch record).
+        pending_brief = (
+            self.state.batch.project_brief if self.state.batch is not None else ""
+        )
         self.state.batch = BatchState(
             workspace_id=self.state.workspace.workspace_id,
             size=size,
             status=BatchStatus.CREATED,
             tasks=[],
         )
+        if pending_brief:
+            self.state.batch.project_brief = pending_brief
         self.events.info(
             f"Batch {self.state.batch.batch_id} requested with size {size} "
             f"(workspace '{self.state.workspace.name}')",
@@ -309,7 +317,13 @@ class PipelineController:
         )
 
     def request_resume(self) -> ControlResult:
-        """Resume a paused pipeline into the phase recorded before the pause."""
+        """Resume a paused pipeline into the phase recorded before the pause.
+
+        After a restart the in-memory machine has no recorded resume target
+        (only SQLite survives), so the deterministic next action derived from
+        the batch's task states is used instead — the same logic the batch
+        runner and the UI rely on.
+        """
         if self.machine.phase is not PipelinePhase.PAUSED:
             return ControlResult(
                 ControlOutcome.REJECTED,
@@ -317,6 +331,15 @@ class PipelineController:
                 "Pipeline is not paused.",
             )
         target = self.machine.resume_target()
+        if target is PipelinePhase.IDLE:
+            target = self._derive_resume_target()
+        if not self.machine.can_go_to(target):
+            return ControlResult(
+                ControlOutcome.REJECTED,
+                self.machine.phase,
+                f"Paused pipeline cannot resume into {target.value}; "
+                "start a new batch.",
+            )
         self.machine.transition_to(target)
         self.state.phase = self.machine.phase
         if self.state.batch is not None:
@@ -329,6 +352,31 @@ class PipelineController:
             f"Resumed into {target.value}.",
             executor_started=False,
         )
+
+    def _derive_resume_target(self) -> PipelinePhase:
+        """Deterministic resume phase from the batch's task states (restart).
+
+        Sessions and the in-memory machine are bookkeeping; the persisted
+        task states decide where the batch continues.
+        """
+        if self.state.batch is None:
+            return PipelinePhase.IDLE
+        # Deferred import: executor does not import controller, so this is a
+        # safe same-layer dependency used only where the loop decides.
+        from .executor import next_task_action  # noqa: PLC0415
+
+        action = next_task_action(batch=self.state.batch, phase=self.machine.phase)
+        mapping = {
+            "PLAN": PipelinePhase.PLANNING_BATCH,
+            "BUILD": PipelinePhase.RUNNING_TASK,
+            "AUDIT": PipelinePhase.AUDITING_TASK,
+            "RE_AUDIT": PipelinePhase.AUDITING_TASK,
+            "FIX": PipelinePhase.FIX_REQUIRED,
+            "COMPLETE": PipelinePhase.READY_FOR_FINAL_AUDIT,
+            "BLOCKED": PipelinePhase.BLOCKED,
+            "FAILED": PipelinePhase.FAILED,
+        }
+        return mapping.get(action.value, PipelinePhase.IDLE)
 
     def request_stop(self) -> ControlResult:
         """Stop the current batch and return to ``IDLE``."""
@@ -350,8 +398,32 @@ class PipelineController:
             ControlOutcome.OK, self.machine.phase, message, executor_started=False
         )
 
+    def set_project_brief(self, brief: str) -> str:
+        """Store the durable Project Brief for the current batch.
+
+        The brief outlives restarts (it lives on the batch row) and is fed to
+        the Orchestrator at planning time.  It is application state, never
+        model memory.
+        """
+        cleaned = (brief or "").strip()
+        if self.state.batch is None:
+            self.state.batch = BatchState(
+                workspace_id=self.state.workspace.workspace_id,
+                size=DEFAULT_BATCH_SIZE,
+                status=BatchStatus.CREATED,
+                tasks=[],
+            )
+        self.state.batch.project_brief = cleaned
+        self.events.info(
+            f"Project brief set ({len(cleaned)} chars) for batch "
+            f"{self.state.batch.batch_id}.",
+            source="controller",
+        )
+        self._persist()
+        return cleaned
+
     def set_batch_size(self, size: int) -> int:
-        """Store the requested batch size (clamped to the supported range)."""
+        """Store the requested batch size (clamped to the supported 1..5 range)."""
         clamped = self._clamp_size(size)
         if self.state.batch is None:
             self.state.batch = BatchState(

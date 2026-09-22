@@ -125,3 +125,39 @@ def test_fix_prompt_is_self_contained_for_a_fresh_session() -> None:
     assert "everything you need is in this packet" in prompt
     assert "Re-read the CURRENT state of the repository first" in prompt
     assert "Run the relevant tests/checks" in prompt
+
+
+# -- Session 004: the plan's contract travels with the packets -----------------
+def test_audit_packet_carries_index_criteria_focus_and_batch_objective() -> None:
+    packet = AuditPacket(
+        task_id="task_0009",
+        title="Feature 2",
+        implementation_prompt="Make feature 2 work.",
+        workspace_path=r"C:\scratch\s",
+        attempt=1,
+        audit_round=1,
+        task_index=2,
+        acceptance_criteria=("test_feature_2.py exits 0",),
+        audit_focus=("verify feature 2 in the repo",),
+        batch_title="Scratch batch",
+        batch_objective="Implement four features.",
+    )
+    prompt = render_audit_prompt(packet)
+    assert "TASK INDEX: 2" in prompt
+    assert "BATCH TITLE: Scratch batch" in prompt
+    assert "BATCH OBJECTIVE: Implement four features." in prompt
+    assert "ACCEPTANCE CRITERIA" in prompt and "test_feature_2.py exits 0" in prompt
+    assert "AUDIT FOCUS" in prompt and "verify feature 2 in the repo" in prompt
+
+
+def test_fix_prompt_carries_acceptance_criteria() -> None:
+    prompt = render_fix_prompt(
+        task_id="t1",
+        title="T",
+        implementation_prompt="p",
+        workspace_path=r"C:\scratch\s",
+        verdict=sample_verdict(),
+        acceptance_criteria=("test_feature_2.py exits 0",),
+    )
+    assert "ACCEPTANCE CRITERIA (the fix must satisfy all of these)" in prompt
+    assert "test_feature_2.py exits 0" in prompt

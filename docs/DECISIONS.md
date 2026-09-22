@@ -606,3 +606,158 @@ intentionally writes a bad implementation (the defect pre-exists the loop).
 **Consequence.** The smoke asserts the session identities and the PASS verdict
 from real engine output, re-reads the state from SQLite, and refuses to call
 itself green on anything less.
+
+---
+
+## D-025 — `READY_FOR_FINAL_AUDIT` supersedes the Session-003 single-task terminal
+
+**Date:** Session 004
+**Status:** Accepted — **supersedes the terminal part of D-020**
+
+**Context.** Session 003 closed a one-task batch with
+`AUDITING_TASK → BATCH_COMPLETE` because the batch really was complete up to
+the final-audit phase. Session 004 introduces the real batch lifecycle, and a
+successful batch must stop at a point where the real Final Auditor (Session
+005) takes over — not at a state that claims the pipeline is finished.
+
+**Decision.** From now on the universal successful batch terminal before the
+Final Auditor is **`READY_FOR_FINAL_AUDIT`** — never `BATCH_COMPLETE`.
+
+- A passed task with more tasks remaining advances
+  `AUDITING_TASK → RUNNING_TASK` (next task).
+- A passed task with no tasks remaining advances
+  `AUDITING_TASK → READY_FOR_FINAL_AUDIT`; the batch status becomes
+  `READY_FOR_FINAL_AUDIT` and a durable Batch Summary is written.
+- The state machine removes **both** `AUDITING_TASK → BATCH_COMPLETE` and
+  `PLANNING_BATCH → BATCH_COMPLETE`. `BATCH_COMPLETE` is reachable ONLY from
+  `FINAL_AUDIT_RUNNING` (a test asserts exactly one incoming edge).
+  Structurally, no successful path can reach `BATCH_COMPLETE` without the
+  Final Auditor.
+- `BatchStatus` gains `PLANNING`, `READY_FOR_FINAL_AUDIT` and `BLOCKED` so the
+  durable batch status matches the lifecycle.
+
+**Reason.** The old optimistic terminal would let a batch claim completion
+with no final audit; the new graph makes the Final Auditor structurally
+required (brief §10, §32).
+
+**Consequence.** The Session 003 smoke was updated to expect
+`READY_FOR_FINAL_AUDIT`; the fix loop itself is unchanged and remains a
+reusable component of the batch loop.
+
+---
+
+## D-026 — The strict BatchPlan parser fails closed on Orchestrator output
+
+**Date:** Session 004
+**Status:** Accepted
+
+**Context.** The Orchestrator's plan flows into execution. If that answer were
+free text, the supervisor would be controlled by prose — the same class of
+risk D-019 closed for audit verdicts.
+
+**Decision.** `core/plan_parser.py` treats Orchestrator output as **untrusted
+input**: bounded raw size (200 000 chars), strict `json.loads` only (no
+eval/exec/YAML), a delimited envelope
+`<<<BATCH_PLAN_START>>> … <<<BATCH_PLAN_END>>>` with a balanced-braces
+fallback, and these hard rules — **exactly** the requested task count (never
+truncate, never fill), contiguous indices `1..N`, unique non-empty titles,
+non-empty `implementation_prompt` / `acceptance_criteria` / `audit_focus`,
+bounded strings and lists. Any violation raises `PlanParseError` and the
+batch is BLOCKED with **no task materialised**. Nothing in the structure is
+ever executed or shell-evaluated.
+
+**Reason.** "A malformed plan must NEVER lead to execution" (brief §8); the
+exact-count rule makes the UI's requested batch size authoritative.
+
+**Consequence.** `_plan` maps every `PlanParseError` to a BLOCKED batch; the
+offline matrix (valid 1/4/5-task plans, every mismatch/structure/bounds case)
+pins the parser.
+
+---
+
+## D-027 — The Orchestrator is planning-only and guarded by a read-only fingerprint
+
+**Date:** Session 004
+**Status:** Accepted
+
+**Context.** An Orchestrator that edits the repository while planning destroys
+the audit trail and makes plans untrustworthy.
+
+**Decision.** `Executor._plan` captures a **read-only repository fingerprint**
+(HEAD + `status --porcelain` hash via `core/repo_fingerprint.py`) BEFORE the
+planning call and verifies it AFTER. A difference (any file change, any new
+HEAD) BLOCKS the plan: the parsed answer is discarded, **no task is
+materialised**, the batch is BLOCKED and the violation is surfaced to the
+operator. The modifications are never silently accepted and never
+auto-reverted — the operator decides. Non-git workspaces make the guard
+vacuous (documented, not guessed).
+
+**Reason.** Planning-only behaviour is a Session 004 requirement, and honest
+capabilities/gates are the project's stated discipline (D-018).
+
+**Consequence.** The offline suite proves a worktree-modifying plan is BLOCKED
+with the modified file left in place; the plan prompt itself instructs the
+Orchestrator that it must not edit files.
+
+---
+
+## D-028 — The batch runner owns sequencing; AI outputs are data
+
+**Date:** Session 004
+**Status:** Accepted
+
+**Context.** Session 002/003 proved the state machine must not be driven by
+model output. Session 004 generalises that to the *whole batch*: with 4–5
+tasks plus fix loops, a batch that waits for operator clicks between every
+step is not a batch.
+
+**Decision.** `core/batch_runner.py` (`BatchRunner.run_batch`) is a
+deterministic loop: read `next_task_action()` from persisted task states, call
+the matching executor method (plan/build/audit/fix), persist everything, and
+repeat until one terminal batch outcome — `READY_FOR_FINAL_AUDIT`, `BLOCKED`,
+`FAILED`, `STOPPED` or `PAUSED`. Pause and stop are boundary-safe: an in-flight
+prompt always finishes and persists its result; the flag is then honoured and
+cleared. `run_batch(resume=True)` is idempotent — it re-reads durable state and
+continues at the first task that still needs work, so APPROVED tasks are never
+re-run and a restart never contacts an AI provider. Run off the UI thread via
+the executor worker.
+
+**Reason.** "The state machine, not the AI model, owns sequencing. AI outputs
+DATA. Supervisor decides transitions" (brief §12); no conjured "plan needed /
+builder needed …" decision may live in chat memory (§17).
+
+**Consequence.** The UI needs only **PLAN + START BATCH** and **RESUME BATCH**;
+the manual TASK-panel buttons remain for debugging. `next_task_action` gained
+`PLAN` and `BUILD` and is multi-task aware (first undone task in index order).
+
+---
+
+## D-029 — Schema v4: durable planning truth in `batch_plans`
+
+**Date:** Session 004
+**Status:** Accepted
+
+**Context.** After a restart the app must know whether the next step is plan,
+build, audit, fix, next task or READY_FOR_FINAL_AUDIT — from SQLite alone.
+Session 003's schema v3 had no place for the plan, the Orchestrator session
+id, the baseline, or per-task acceptance criteria.
+
+**Decision.** Targeted in-place **v3 → v4** upgrade (one explicit `ALTER` set,
+still no migration framework — D-008):
+
+- `batches` += `project_brief` (the durable brief — never model memory) and
+  `current_head`
+- `tasks` += `acceptance_criteria` / `audit_focus` (JSON lists; the plan's
+  contract travels with each task into the auditor packet)
+- new `batch_plans` table (1:1 with a batch): strict plan JSON, Orchestrator
+  session id, planning status/timestamp, the read-only baseline fingerprint,
+  and — at the end — `final_phase`, `finalized_at` and the durable structured
+  **Batch Summary** (`batch_summary_json`) that Session 005's Final Auditor
+  consumes.
+
+**Reason.** Durable truth lives in SQLite (D-002/D-004); the batch's planning
+truth must survive the process that created it.
+
+**Consequence.** `load_batch` attaches the plan row; `next_task_action` derives
+the safe next step from task states; the offline suite proves a
+partially-finished batch reloads and resumes with the same session identities.

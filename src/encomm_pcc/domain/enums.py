@@ -97,12 +97,23 @@ class TaskState(str, Enum):
 
 
 class BatchStatus(str, Enum):
-    """Lifecycle of a batch of tasks."""
+    """Lifecycle of a batch of tasks.
+
+    Session 004: the batch is a durable entity with its own lifecycle — a
+    created batch waits for the Orchestrator's plan (``PLANNING`` while the
+    planning call runs), runs its tasks, and before the Final Auditor exists
+    lands on ``READY_FOR_FINAL_AUDIT`` (never ``COMPLETE``, which only the
+    real Final Auditor may produce).  ``BLOCKED`` is now a first-class
+    batch status too.
+    """
 
     CREATED = "CREATED"
+    PLANNING = "PLANNING"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
+    READY_FOR_FINAL_AUDIT = "READY_FOR_FINAL_AUDIT"
     COMPLETE = "COMPLETE"
+    BLOCKED = "BLOCKED"
     FAILED = "FAILED"
     STOPPED = "STOPPED"
 
