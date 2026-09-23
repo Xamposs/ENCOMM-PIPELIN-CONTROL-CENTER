@@ -42,7 +42,8 @@ reset, stashed, cleaned or discarded.
 
 ## FINAL_COMMIT
 
-See GIT_STATUS below.
+**`d33cbe85942481d355950e4a1390acd5d0777421`** — pushed to `origin/main`
+(verified: HEAD == origin/main immediately after the push; tree clean).
 
 ## VERSION
 
@@ -272,9 +273,15 @@ defects found during acceptance — D-047 auditor continuity and the
 
 ## GIT_STATUS
 
-See the final commit SHA appended below at commit time (conventional commit
-`feat: Windows release candidate … (Session 008, v0.8.0)`; pushed to
-`origin/main`; verified `git rev-parse HEAD == origin/main`).
+- Baseline: `697917f92df3469e4ec22a50a725786b0b69bdbb` (verified before any edit)
+- Final commit: **`d33cbe85942481d355950e4a1390acd5d0777421`** —
+  `feat: Windows release candidate - packaging, diagnostics, restart fixes, real mixed-engine acceptance (Session 008, v0.8.0)`
+- Pushed to `origin/main`; verified `git rev-parse HEAD` ==
+  `git rev-parse origin/main` (== `d33cbe8…`) immediately after the push.
+- 29 files changed, 2867 insertions(+), 157 deletions(-); 14 new files
+  (1 report, 1 user guide, 1 spec, 1 build script, 4 acceptance scripts,
+  2 source modules, 5 test files). `git diff --check` clean; secret scan
+  over the added lines: NO_SECRETS_FOUND; no `.db`/logs/scratch/dist staged.
 
 ## SESSION_009_RECOMMENDATION
 
