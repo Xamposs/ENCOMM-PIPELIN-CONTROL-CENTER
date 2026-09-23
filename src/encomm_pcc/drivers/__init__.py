@@ -27,6 +27,13 @@ from .codex_cli import (
 )
 from .codex_discovery import CodexSessionDiscovery
 from .generic_cli import GenericCliDriver
+from .generic_cli_config import (
+    CONFIG_EXTRA_KEY as GENERIC_CLI_CONFIG_EXTRA_KEY,
+    PROMPT_TRANSPORTS,
+    RESULT_MODES,
+    GenericCliConfig,
+    GenericCliConfigError,
+)
 from .hermes import HermesDriver
 from .hermes_cli import (
     EXIT_AGENT_FAILURE,
@@ -82,7 +89,12 @@ __all__ = [
     "EXIT_USAGE",
     "ExternalSessionDescriptor",
     "FORBIDDEN_FLAGS",
+    "GenericCliConfig",
+    "GenericCliConfigError",
     "GenericCliDriver",
+    "GENERIC_CLI_CONFIG_EXTRA_KEY",
+    "PROMPT_TRANSPORTS",
+    "RESULT_MODES",
     "HermesCliError",
     "HermesDriver",
     "HermesRunOutput",

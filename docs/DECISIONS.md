@@ -1009,3 +1009,138 @@ therefore the whole session surface — from the Orchestrator).
 **Consequence.** Switching an expensive role between Hermes and Codex stays
 configuration-only; the selector appears or disables itself from
 capabilities alone, with no Codex names in role/executor code.
+
+---
+
+## D-039 — The Generic CLI driver is real: structured argv, never a shell command
+
+**Date:** Session 007
+**Status:** Accepted
+
+**Context.** `GenericCliDriver` was the last refusing placeholder (Phase 5,
+item 6). Making it real for "any other command-line agent" is exactly where a
+naive implementation would accept a free-form shell command string — the one
+input shape that turns configuration into arbitrary code execution.
+
+**Decision.** The driver accepts ONLY a validated structured configuration
+(`drivers/generic_cli_config.py`): an executable (bare PATH name or absolute
+path), literal argv tokens (whitespace edited, shlex-quoted in the UI, never
+shell-interpreted), `prompt_transport` ∈ {stdin, temporary_file}, bounded
+`result_mode` ∈ {stdout_text, json, jsonl} with one configured result field,
+bounded `timeout_s` (1..7200), and ≤16 key-validated env overrides on top of
+the D-015 filtered child environment. Placeholders are exact-token
+(`{prompt_file}` / `{workspace}` / `{model}`); an unknown whole-token
+placeholder fails closed, and braces inside larger tokens stay literal (CLI
+tools legitimately receive JSON/Python-ish arguments). Unknown config keys
+are rejected. One process per prompt through the injected `ProcessRunner`;
+`exit 0 + non-empty extracted answer` is the success contract; timeouts kill
+the tree and fail loudly. The driver is honestly STATELESS
+(`supports_sessions=False`, `implemented=True`): no session id is ever
+invented, `SessionManager` decides NONE, resume is refused loudly.
+
+**Reason.** Same class of discipline as D-019/D-026: configuration flows into
+process execution, so the structure must be machine-checked, bounded, and
+fail-closed — not a string some shell will interpret.
+
+**Consequence.** No role, executor or pipeline logic changed (the one generic
+surface from Session 006, `requires_profile`, already covered the profile
+preflight). A role with no stored configuration blocks before any process
+with an operator-actionable message. Tests: 55-case driver matrix through the
+REAL `SubprocessRunner` with deterministic `python -c` children (zero AI
+calls), plus 17 UI cases.
+
+---
+
+## D-040 — Generic CLI configuration is durable role state, validated before persistence
+
+**Date:** Session 007
+**Status:** Accepted
+
+**Context.** The operator must be able to configure the Generic CLI per role
+from the UI, and the configuration must survive restarts — but nothing
+invalid may reach durable state.
+
+**Decision.** The config dict lives under `AgentRoleConfig.extra['generic_cli']`
+(the Session 006 `extra_json` pattern — **no schema change**). Both write
+paths validate through `GenericCliConfig.from_mapping` BEFORE anything is
+persisted (`controller.set_generic_cli_config`); the UI dialog
+(`ui/generic_cli_dialog.py`) is a structured editor with no free-form command
+box and refuses to accept invalid input. Switching a role's engine away from
+Generic CLI never destroys the stored configuration.
+
+**Consequence.** Restart-safe, engine-switch-safe, and the executor's existing
+`extra` → `SessionRequest.extra` plumbing delivers it to the driver with zero
+new code.
+
+---
+
+## D-041 — Configuration export/import is versioned, strict, and secret-free
+
+**Date:** Session 007
+**Status:** Accepted
+
+**Context.** Moving or recovering configuration must not become a channel for
+secrets or a vector for silently corrupting role state.
+
+**Decision.** `core/config_exchange.py`: a versioned JSON document
+(`encomm-pcc-config`, version 1, ≤4 MiB). Export includes role configs and
+the workspace display values; Generic CLI `env_overrides` VALUES are
+REDACTED (keys preserved); external-session bindings are EXCLUDED (engine
+state, not portable configuration). Import validates the WHOLE document
+before applying anything: exact format id, explicit version gate (newer ⇒
+"update the application", older ⇒ refused), unknown keys/roles rejected,
+session policies re-validated, stored Generic CLI configs re-validated
+through `GenericCliConfig`. Redacted env values are DROPPED on import, never
+fabricated. A non-existent exported workspace path is not applied. Zero
+model calls by construction (pinned by a structural test).
+
+**Consequence.** Round-trip and restart-after-import are proven; an invalid
+document provably changes nothing.
+
+---
+
+## D-042 — Bounded `app_events` retention: count-based, hysteresis, events-only
+
+**Date:** Session 007
+**Status:** Accepted
+
+**Context.** `app_events` grew without bound (Phase 6 item). Retention that
+deletes evidence per append, or that touches anything but events, would be
+worse than the leak.
+
+**Decision.** Deterministic count-based retention: `MAX_APP_EVENTS = 10_000`
+newest rows preserved. Cleanup is opportunistic — checked per append,
+executed at most once per `EVENT_PRUNE_INTERVAL = 500` appends AND only when
+over the bound (hysteresis: the table stays ≤ bound + interval). Retention
+touches ONLY `app_events` — batches, tasks, plans, audits and pending plans
+are never pruned. Failures are logged, never raised (pruning must not break
+logging). `EventLog(retention_enabled=False)` restores the old unbounded
+behaviour for tests.
+
+**Consequence.** The on-disk database stays small without losing recent
+operational evidence; pinned by the 9-case matrix including reopen and
+"tasks survive a prune".
+
+---
+
+## D-043 — History is a read model over durable batch records, never transcripts
+
+**Date:** Session 007
+**Status:** Accepted
+
+**Context.** The operator needs "what ran, what happened, which sessions,
+what did the final auditor say" after the fact. The durable truth already
+lives in SQLite (batches, tasks, batch_plans, pending_next_plans); a
+transcript store would duplicate it and leak prompt material.
+
+**Decision.** `core/history.py` is a pure read model
+(`batch_history_rows`, `batch_history_detail`): bounded dictionaries
+composed from the existing tables — no new tables, no writes, no engine
+contact. The `HistoryPanel` renders rows (newest first) and the selected
+batch's detail (tasks with states/attempts/verdicts/real session ids, final
+verdict + summary, next-plan status). Text fields are capped in the read
+model and again in the UI.
+
+**Consequence.** Terminal batches (COMPLETE/FAILED/STOPPED) are deliberately
+not restored as active work (`load_active_batch` already excluded them) —
+history is where they live. Pinned by the 12-case matrix.

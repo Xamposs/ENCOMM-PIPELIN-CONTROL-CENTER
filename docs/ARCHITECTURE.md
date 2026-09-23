@@ -1,7 +1,7 @@
 # Architecture — ENCOMM Pipeline Control Center
 
-**Version:** 0.5 (one-call Final Auditor + next-batch handoff)
-**Status:** accurate as of Session 005. This document describes what the code
+**Version:** 0.7 (real Generic CLI driver + operational hardening)
+**Status:** accurate as of Session 007. This document describes what the code
 actually does today, including what it deliberately does *not* do.
 
 ---
@@ -26,9 +26,11 @@ SQLite (schema v5).
 
 ### Explicit non-goals for v0.5
 
-- No real Codex / Claude Code / OpenCode / Ollama / Kimi driver — only
-  Hermes is real; the other adapters remain refusing placeholders
-  (the Codex adapter is Session 006).
+- Real engines today: **Hermes**, **Codex** (Session 006) and the
+  **Generic CLI** (Session 007 — any compatible command-line agent via a
+  validated structured argv configuration, honestly stateless). Dedicated
+  Claude Code / OpenCode / Ollama / Kimi adapters do not exist yet; simple
+  CLIs are already configurable through the Generic CLI driver.
 - No automatic next-batch generation or auto-start: START NEXT BATCH is an
   operator action and makes no AI call.
 - No web server, Electron, browser frontend, Docker or cloud backend.
@@ -90,7 +92,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 ├── requirements.txt              Runtime deps: PySide6 only
 ├── requirements-dev.txt          + pytest
 ├── src/encomm_pcc/
-│   ├── __init__.py               __version__ = "0.1.0"
+│   ├── __init__.py               __version__ = "0.7.0"
 │   ├── app.py                    Bootstrap: Database + EventLog + Controller + window
 │   ├── domain/
 │   │   ├── enums.py              AgentRole, SessionPolicy, PipelinePhase,
@@ -120,7 +122,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   └── ui/
 │       ├── main_window.py        MainWindow
 │       └── panels.py             WorkspacePanel, RolePanel, BatchPanel, LogPanel
-├── tests/                        144 tests, 8 files
+├── tests/                        542 tests, 26 files
 └── docs/                         This file + CURRENT_STATE, ROADMAP, DECISIONS
     └── reports/                  Per-session reports
 ```
@@ -203,10 +205,14 @@ Design points:
 - **Session ids are optional.** `get_session_id()` returns `None` for stateless
   engines. `GenericCliDriver` is deliberately modelled with
   `supports_sessions=False` so the session-less path is exercised by tests.
-- **Placeholders never fake success.** `CodexDriver` and `GenericCliDriver`
-  advertise `implemented=False` and raise `DriverNotImplementedError` from
-  `start_session`, `resume_session`, `send_prompt` and `wait_for_completion`.
-  There is no code path that returns a fabricated `PromptResult`.
+- **Placeholders never fake success — and real drivers never simulate.**
+  Through Session 006 the placeholders advertised `implemented=False` and
+  raised `DriverNotImplementedError`; Session 007 made `GenericCliDriver`
+  real under the same honesty rules (no fabricated `PromptResult` can ever
+  exist): `exit 0 + non-empty extracted answer` is the success contract, and
+  timeouts, non-zero exits and structurally invalid output all fail with the
+  child's own diagnostics. The one generic capability change since v0.1 is
+  `DriverCapabilities.requires_profile` (Session 006).
 - **`probe_availability()` only looks for a binary on `PATH`** via
   `shutil.which`; it never launches anything.
 
@@ -267,23 +273,31 @@ that wrapper is what `ExecutionReport.executor_started` is derived from.
 `DriverRegistry` maps `driver_id → driver class`, provides `create()`,
 `capabilities()`, `describe_all()` and `display_name()`. `PLANNED_DRIVERS`
 lists `claude_code`, `opencode`, `ollama`, `kimi` as documentation only — they
-are not registered and have no code.
+are not registered and have no code. Simple third-party CLIs do not need a
+dedicated adapter: the real Generic CLI driver (Session 007,
+`drivers/generic_cli_config.py`) runs them from a validated structured
+configuration — executable + literal argv tokens (exact-token placeholders
+`{prompt_file}`/`{workspace}`/`{model}`, everything else fails closed),
+stdin or temp-file prompt transport, bounded stdout/json/jsonl result
+extraction, one supervised process per prompt, stateless by contract.
 
 ---
 
 ## 7. Persistence
 
-SQLite via the Python stdlib (`sqlite3`), schema v3, seven tables:
+SQLite via the Python stdlib (`sqlite3`), schema v5, nine tables:
 
 | Table | Holds |
 |---|---|
-| `schema_meta` | `schema_version` (currently `3`) |
+| `schema_meta` | `schema_version` (currently `5`) |
 | `workspaces` | workspace id, name, repository path, timestamps |
 | `role_configs` | one row per (workspace, role): engine, profile, provider, model, session policy, session id, `same_as_orchestrator`, `extra_json` |
 | `sessions` | session id, workspace, role, driver, external session id, persistent/external flags, closed_at, metadata (incl. `batch_generation`) |
 | `batches` | batch id, workspace, requested size, status, **phase** (v3: the pipeline phase this batch belongs to — the restart recovery anchor) |
 | `tasks` | task id, batch, index, title, prompt, state, attempts, audit rounds, last error, **latest_verdict / verdict_json / fix_prompt / auditor_session_id / builder_session_id / fix_session_id** (v3) |
-| `app_events` | timestamped event log (level, source, message, payload) |
+| `app_events` | timestamped event log (level, source, message, payload); Session 007 bounded retention keeps the newest 10 000 rows |
+| `batch_plans` | durable planning truth (Session 004) + Final Audit (Session 005) |
+| `pending_next_plans` | the PASS-generated next plan until START NEXT BATCH (Session 005) |
 
 Implementation notes:
 
@@ -449,6 +463,29 @@ ONE Final Auditor operation, not two (audit, then planning). The nested next
 plan is validated by the existing strict plan parser, so no second, weaker
 parser exists (D-031).
 
+### Session 007 — the real Generic CLI driver + operational hardening
+
+1. **Generic CLI engine.** `GenericCliDriver` is real and honestly stateless
+   (`supports_sessions=False`, `implemented=True`): one supervised process per
+   prompt from a validated structured configuration
+   (`drivers/generic_cli_config.py`), prompt via stdin or a private temp file,
+   result via verbatim stdout or bounded json/jsonl field extraction. No role,
+   executor or pipeline code changed — the Session 006 `requires_profile`
+   capability and the existing `DriverError` handling carry it (ADR D-039).
+2. **Durable per-role configuration.** The config rides in
+   `role_configs.extra_json` under `extra['generic_cli']`, validated BEFORE
+   persistence (ADR D-040); the UI dialog is structured (no shell box).
+3. **Config export/import** (`core/config_exchange.py`, ADR D-041): versioned
+   document, whole-document validate-before-apply, env values redacted/
+   dropped, bindings excluded, zero model calls.
+4. **History** (`core/history.py` + `ui/history_panel.py`, ADR D-043): a pure
+   read model over the existing durable tables; no new tables, no transcripts.
+5. **Retention** (ADR D-042): `app_events` bounded to the newest 10 000 rows
+   with hysteresis; only the events table is ever pruned.
+6. **Recovery matrix**: the per-phase restart contract is pinned by tests —
+   restored phase + task-state-driven next action + terminal batches stay in
+   history; nothing auto-runs (a fresh controller never has an executor).
+
 ### Session 002 dispatch sequence (one task, stops at `AUDITING_TASK`)
 
 `Executor.dispatch_single_task()` implements exactly this order, and each step is
@@ -579,11 +616,12 @@ The Qt event loop drives the UI, and **no AI process ever runs on it**.
 
 Stated plainly so no future session mistakes a placeholder for a feature:
 
-- **No real Codex / Claude Code / OpenCode / Ollama / Kimi driver.** The
-  FINAL_AUDITOR and ORCHESTRATOR roles run through the generic path with
-  Hermes today; swapping engines is configuration-only, but the Codex
-  adapter itself is Session 006. `PLANNED_DRIVERS` (`claude_code`,
-  `opencode`, `ollama`, `kimi`) still has no code.
+- **No Claude Code / OpenCode / Ollama / Kimi driver.** Hermes, Codex and
+  the Generic CLI are real (Sessions 002/006/007); `PLANNED_DRIVERS`
+  (`claude_code`, `opencode`, `ollama`, `kimi`) still has no code. The
+  Generic CLI has no live third-party-CLI proof yet — its contract is pinned
+  offline against deterministic child processes (Session 007 was a zero-AI
+  session by design).
 - **No automatic next-batch generation or auto-start.** The PASS-generated
   plan waits in `pending_next_plans` until the operator presses START NEXT
   BATCH; START NEXT BATCH itself makes no AI call.
@@ -614,11 +652,11 @@ Stated plainly so no future session mistakes a placeholder for a feature:
 
 ---
 
-## 14. Verification status (v0.5)
+## 14. Verification status (v0.7)
 
 | Check | Result |
 |---|---|
-| `python -m pytest` | **367 passed, 0 failed** (19 files; 334 prior + 33 final-audit tests) |
+| `python -m pytest` | **542 passed, 0 failed** (26 files; 417 prior + 127 Session 007 tests) |
 | Real audit/fix smoke (`scripts/session_003_audit_fix_smoke.py`) | **See `docs/reports/SESSION_003_AUDITOR_FIX_LOOP.md`** — loop intact; terminal is now `READY_FOR_FINAL_AUDIT` (ADR D-025) |
 | Real orchestrated batch smoke (`scripts/session_004_multitask_smoke.py`) | **See `docs/reports/SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md`** — 1 Orchestrator call → exactly 4 tasks → 4 fresh Builder sessions → 1 shared auditor session → `READY_FOR_FINAL_AUDIT`, re-read from SQLite |
 | Real final-audit smoke (`scripts/session_005_final_audit_smoke.py`) | **See `docs/reports/SESSION_005_FINAL_AUDIT_NEXT_BATCH.md`** — ONE Final Auditor call → FINAL PASS + exactly 4 next tasks in the same response → `BATCH_COMPLETE`, next plan persisted, START NEXT BATCH materialised with zero AI calls |

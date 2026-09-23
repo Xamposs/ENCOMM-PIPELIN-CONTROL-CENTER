@@ -760,6 +760,26 @@ class Database:
         row = self.connection.execute("SELECT COUNT(*) AS n FROM app_events").fetchone()
         return int(row["n"]) if row else 0
 
+    def prune_app_events(self, keep: int) -> int:
+        """Trim ``app_events`` to the newest ``keep`` rows; return rows deleted.
+
+        Deterministic count-based retention (Session 007): the newest evidence
+        is preserved, the oldest is deleted, and only the ``app_events`` table
+        is touched — batches, tasks, plans and audits are never pruned.
+        """
+        if keep < 0:
+            keep = 0
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM app_events WHERE event_id NOT IN (
+                    SELECT event_id FROM app_events ORDER BY event_id DESC LIMIT ?
+                )
+                """,
+                (keep,),
+            )
+            return int(cursor.rowcount or 0)
+
     # -- aggregate ---------------------------------------------------------
     def save_pipeline_state(self, state: PipelineState) -> PipelineState:
         """Persist a whole pipeline aggregate in one transaction."""

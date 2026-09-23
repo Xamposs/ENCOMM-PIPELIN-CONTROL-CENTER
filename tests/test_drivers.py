@@ -18,6 +18,7 @@ from encomm_pcc.drivers import (
     BaseDriver,
     CodexDriver,
     DriverCapabilities,
+    DriverError,
     DriverNotImplementedError,
     DriverRegistry,
     GenericCliDriver,
@@ -40,14 +41,15 @@ def test_registry_contains_the_three_v01_adapters(registry: DriverRegistry) -> N
     assert set(registry.driver_ids()) == {c.driver_id for c in IMPLEMENTED_DRIVERS}
 
 
-def test_only_unimplemented_drivers_are_marked_unimplemented(registry: DriverRegistry) -> None:
+def test_only_evidence_gated_flags_mirror_their_markers(registry: DriverRegistry) -> None:
     """`implemented` is a claim about real capability, not a snapshot.
 
-    GenericCli remains a deliberate placeholder.  Hermes and Codex gate their
-    flags on live evidence (D-018): the flags mirror the drivers' own
-    verification markers, so they can only be True after a real run.
+    Session 007: GenericCli is a real driver (`implemented=True`, stateless).
+    Hermes and Codex still gate their flags on live evidence (D-018): the
+    flags mirror the drivers' own verification markers, so they can only be
+    True after a real run.
     """
-    assert registry.capabilities("generic_cli").implemented is False
+    assert registry.capabilities("generic_cli").implemented is True
     from encomm_pcc.drivers.codex import _LIVE_RESUME_VERIFIED, _LIVE_SMOKE_VERIFIED
 
     assert registry.capabilities("codex").implemented == _LIVE_SMOKE_VERIFIED
@@ -117,21 +119,42 @@ def test_registry_rejects_a_driver_without_an_id() -> None:
         DriverRegistry().register(Nameless)
 
 
-def test_placeholder_refuses_every_real_operation(registry: DriverRegistry) -> None:
-    """GenericCli still refuses real work — Codex joined Hermes as real (006)."""
+def test_generic_cli_stateless_contract(registry: DriverRegistry, tmp_path) -> None:
+    """GenericCli is REAL (Session 007) and stays honestly stateless.
+
+    Resume is refused loudly (nothing to resume), a missing configuration
+    fails closed, and an unconfigured-but-valid request still cannot launch
+    anything (the Null runner is the default).
+    """
+    from encomm_pcc.drivers import GenericCliConfigError
+
     driver = registry.create("generic_cli")
     request = SessionRequest(
         role=AgentRole.BUILDER, project_profile="p", session_policy=SessionPolicy.ALWAYS_NEW
     )
 
-    with pytest.raises(DriverNotImplementedError):
-        driver.start_session(request)
-    with pytest.raises(DriverNotImplementedError):
+    # Stateless: there is no session to resume, ever.
+    with pytest.raises(DriverError, match="stateless"):
         driver.resume_session("sess_x", request)
 
-    fake_session = type("S", (), {"session_id": None})()
-    with pytest.raises(DriverNotImplementedError):
-        driver.send_prompt(fake_session, "hello")
+    # No configuration stored -> fail closed before any process.
+    with pytest.raises(GenericCliConfigError):
+        driver.start_session(request)
+
+    # An unresolvable executable is refused with an operator-actionable error.
+    request.extra["generic_cli"] = {"executable": "definitely-not-a-real-agent-xyz"}
+    with pytest.raises(DriverError, match="could not be found on PATH"):
+        driver.start_session(request)
+
+    # A valid, resolvable configuration yields a stateless handle that still
+    # cannot launch anything (the default runner is the Null runner).
+    request.extra["generic_cli"] = {"executable": "python", "args": ["--version"]}
+    request.workspace_path = str(tmp_path)
+    session = driver.start_session(request)
+    assert session.session_id is None  # stateless: no session id is invented
+    handle = driver.send_prompt(session, "hello")
+    with pytest.raises(RuntimeError, match="process execution is disabled"):
+        driver.wait_for_completion(handle)
 
 
 def test_driver_state_accessors_default_to_none(registry: DriverRegistry) -> None:

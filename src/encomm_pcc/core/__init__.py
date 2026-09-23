@@ -13,6 +13,19 @@ from .config import (
     default_paths,
     placeholder_role_config,
 )
+from .config_exchange import (
+    CONFIG_EXPORT_FORMAT,
+    CONFIG_EXPORT_VERSION,
+    MAX_EXPORT_BYTES,
+    REDACTED_VALUE,
+    ConfigExchangeError,
+    ExportInput,
+    apply_import,
+    build_export,
+    read_export,
+    validate_export,
+    write_export,
+)
 from .controller import ControlOutcome, ControlResult, PipelineController
 from .events import EventLog, Listener, LogRecord, NullEventLog
 from .executor import (
@@ -84,6 +97,9 @@ __all__ = [
     "BatchOutcome",
     "BatchRunReport",
     "BatchRunner",
+    "CONFIG_EXPORT_FORMAT",
+    "CONFIG_EXPORT_VERSION",
+    "ConfigExchangeError",
     "ControlOutcome",
     "ControlResult",
     "DEFAULT_BATCH_SIZE",
@@ -92,6 +108,7 @@ __all__ = [
     "ExecutionOutcome",
     "ExecutionReport",
     "Executor",
+    "ExportInput",
     "FINAL_AUDITOR_ROLE",
     "FINAL_AUDIT_ENVELOPE_END",
     "FINAL_AUDIT_ENVELOPE_START",
@@ -103,6 +120,7 @@ __all__ = [
     "LogRecord",
     "MAX_AUDIT_ROUNDS",
     "MAX_BATCH_SIZE",
+    "MAX_EXPORT_BYTES",
     "MAX_NEXT_BATCH_SIZE",
     "MIN_BATCH_SIZE",
     "MIN_NEXT_BATCH_SIZE",
@@ -116,6 +134,7 @@ __all__ = [
     "PlanReport",
     "PLANNING_OUTPUT_SCHEMA",
     "ProfileDiscoveryResult",
+    "REDACTED_VALUE",
     "ROLE_SESSION_POLICY_DESCRIPTION",
     "RepoFingerprint",
     "SessionAction",
@@ -127,6 +146,8 @@ __all__ = [
     "TaskNextAction",
     "TaskSpec",
     "VerdictParseError",
+    "apply_import",
+    "build_export",
     "capture_repo_fingerprint",
     "decide_session_action",
     "default_paths",
@@ -139,5 +160,8 @@ __all__ = [
     "parse_profile_list",
     "placeholder_role_config",
     "profile_roots",
+    "read_export",
     "render_planning_prompt",
+    "validate_export",
+    "write_export",
 ]

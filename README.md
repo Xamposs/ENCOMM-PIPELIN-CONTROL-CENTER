@@ -5,7 +5,7 @@ orchestrator agents, builders, task auditors and final auditors, with
 configurable session policies, multi-task batches, automatic audit/fix loops
 and final batch audits.
 
-**Current version: 0.6.0 — real Codex driver + session discovery/selector.** The architecture,
+**Current version: 0.7.0 — real Generic CLI driver + operational hardening.** The architecture,
 the desktop shell, the **first real engine integration**, the **complete
 controlled audit/fix loop** (Session 003), the **real multi-task batch**
 (Session 004), the **real Final Auditor** (Session 005), and the **real Codex
@@ -24,8 +24,15 @@ cumulative verdict AND the next batch plan in the same response (strict
 fails-closed parsing; a read-only guard BLOCKS an auditor that modified the
 repo). On PASS the batch becomes BATCH_COMPLETE and the next plan is
 persisted — **nothing auto-starts**: START NEXT BATCH materialises the
-persisted plan deterministically with no AI call. The Codex and Generic-CLI
-adapters remain deliberate placeholders that refuse to do real work. See
+persisted plan deterministically with no AI call. Session 007 made the
+**Generic CLI adapter real** (any compatible command-line agent: a validated
+structured argv configuration — never a shell command — stdin or temp-file
+prompt transport, bounded stdout/json/jsonl result extraction, one supervised
+process per prompt, honestly stateless) and added the operational hardening
+layer: versioned, secret-free **configuration export/import**, a read-only
+**batch/run history** surface, **bounded event retention**, a full
+**restart/recovery matrix**, and a **role-configurable Generic CLI settings
+dialog**. See
 [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5 for the precise list of
 what is and is not implemented.
 
@@ -55,7 +62,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-417 tests covering imports/compile, the domain model (including the audit
+542 tests covering imports/compile, the domain model (including the audit
 verdict contract, the strict batch-plan contract and the external-session
 binding), the phase state machine,
 persistence round-trips (schema v5 + the v1→…→v5 upgrade chain), driver

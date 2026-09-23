@@ -31,7 +31,7 @@ explicitly.
 
 ## 1. Version
 
-`0.6.0` — real Codex driver + generic session discovery/selector. Session 006.
+`0.7.0` — real Generic CLI driver + operational hardening. Session 007.
 
 ---
 
@@ -72,7 +72,13 @@ explicitly.
 | **Restart-safe handoff** | **Works** | READY_FOR_FINAL_AUDIT, FINAL_AUDIT_RUNNING (recovery requires a real re-run), completed audit and the pending next plan all survive restart; UI re-enables buttons from persisted state |
 | `CodexDriver` — real adapter | **Works — Session 006** | `codex exec --json -s <sandbox> -C <ws> -` with the prompt on stdin; live-proven new session (`01a0cb24…`, marker, exit 0) and resume through the generic FINAL_AUDITOR path (strict PASS + 4-task next plan, same thread id) |
 | Generic session discovery + selector | **Works — Session 006** | driver-neutral `SessionDiscoverer`; read-only Codex rollout discovery (dedupe, newest-first, workspace-match); RolePanel selector binds existing sessions with zero model calls; NEW SESSION clears the binding |
-| Real Codex adapter / engine switching UI | **Works — Session 006** | Codex is selectable for ORCHESTRATOR/FINAL_AUDITOR from the UI (configuration only); `GenericCliDriver` remains the standing placeholder |
+| Real Codex adapter / engine switching UI | **Works — Session 006** | Codex is selectable for ORCHESTRATOR/FINAL_AUDITOR from the UI (configuration only) |
+| **Real GenericCliDriver** | **Works — Session 007** | any compatible CLI via a validated structured argv config (never a shell command); stdin/temp-file prompt transport; bounded stdout/json/jsonl result extraction; one supervised process per prompt; honestly stateless (`supports_sessions=False`); unconfigured roles block before any process |
+| **Generic CLI settings dialog** | **Works — Session 007** | structured per-role editor in the UI (no free-form command box); config validated before persistence; durable in `extra` (no schema change); engine-switch-safe |
+| **Configuration export/import** | **Works — Session 007** | versioned `encomm-pcc-config` v1; validate-before-apply; env values redacted on export and dropped on import; session bindings excluded/refused; zero model calls |
+| **Batch/run history** | **Works — Session 007** | read-only HISTORY panel over the durable tables (rows + bounded detail); no new tables, no transcripts |
+| **Bounded event retention** | **Works — Session 007** | `app_events` capped at 10 000 newest rows with hysteresis; batches/tasks/plans never pruned |
+| **Restart/recovery matrix** | **Works — Session 007** | every pipeline phase restarts into a safe durable state; in-flight work is never trusted complete; nothing auto-runs |
 
 ### Verified at the end of Session 003
 
@@ -134,7 +140,8 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   ├── session_003_audit_fix_smoke.py  Real audit/fix loop smoke (Session 003)
 │   ├── session_004_multitask_smoke.py  Real orchestrated batch smoke (Session 004; --fake offline mode)
 │   ├── session_005_final_audit_smoke.py  Real one-call final-audit smoke (Session 005; --fake offline mode)
-│   └── session_006_codex_smoke.py  Real Codex new-session + resume/final-audit smoke (Session 006)
+│   ├── session_006_codex_smoke.py  Real Codex new-session + resume/final-audit smoke (Session 006)
+│   └── session_006_call2_retry.py  Session 006 evidence-driven retry script
 ├── src/encomm_pcc/
 │   ├── __init__.py             __version__ = "0.6.0"
 │   ├── app.py                  run(), build_controller(), attach_default_executor(),
@@ -161,12 +168,19 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │   │                       (timeout + tree kill), NullProcessRunner
 │   │   ├── hermes_cli.py       The verified Hermes CLI contract
 │   │   ├── hermes.py           HermesDriver — REAL (implemented=True)
-│   │   ├── codex.py            CodexDriver      (placeholder)
-│   │   ├── generic_cli.py      GenericCliDriver (placeholder, stateless)
+│   │   ├── codex.py            CodexDriver      (real, Session 006)
+│   │   ├── codex_cli.py        The verified Codex CLI contract (pure module)
+│   │   ├── codex_discovery.py  Read-only Codex rollout discovery
+│   │   ├── generic_cli.py      GenericCliDriver (real, stateless — Session 007)
+│   │   ├── generic_cli_config.py  The validated Generic CLI config contract
+│   │   ├── session_discovery.py   Driver-neutral session-discovery protocol
 │   │   └── registry.py         DriverRegistry, IMPLEMENTED_DRIVERS,
 │   │                           PLANNED_DRIVERS
 │   ├── core/
-│   │   ├── config.py           AppPaths, batch-size bounds (1..5), placeholders
+│   │   ├── config.py           AppPaths, batch-size bounds (1..5), placeholders,
+│   │   │                       MAX_APP_EVENTS retention bounds (Session 007)
+│   │   ├── config_exchange.py  Versioned config export/import (Session 007)
+│   │   ├── history.py          Batch/run history read model (Session 007)
 │   │   ├── events.py           EventLog, LogRecord, NullEventLog
 │   │   ├── session_manager.py  decide_session_action, SessionManager,
 │   │   │                       restore_session (restart recovery)
@@ -195,7 +209,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │   │                       FinalAuditPanel, LogPanel, TaskPanel
 │   │   └── worker.py           ExecutorWorker (dispatch/audit/fix/batch/
 │   │                           final_audit actions)
-├── tests/                      367 tests across 19 files
+├── tests/                      542 tests across 26 files
 └── docs/
     ├── ARCHITECTURE.md         Actual architecture (read second)
     ├── CURRENT_STATE.md        This file (read first)
@@ -206,7 +220,8 @@ ENCOMM PIPELINE CONTROL CENTER/
         ├── SESSION_002_HERMES_EXECUTOR.md
         ├── SESSION_003_AUDITOR_FIX_LOOP.md
         ├── SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md
-        └── SESSION_005_FINAL_AUDIT_NEXT_BATCH.md
+        ├── SESSION_005_FINAL_AUDIT_NEXT_BATCH.md
+        └── SESSION_007_GENERIC_CLI_OPERATIONAL_HARDENING.md
 ```
 
 ---
@@ -251,6 +266,12 @@ without a new ADR:
 | D-031 | Strict final-audit parser fails closed; ONE call returns verdict AND next plan |
 | D-032 | Schema v5: durable Final Audit + `pending_next_plans`; the operator starts the next batch |
 | D-033 | Final-audit failures land in explicit operator states, never an automatic global fix loop |
+| D-034…D-038 | Codex CLI contract / resume evidence rule / read-only discovery / durable binding / capability-driven selector (Session 006) |
+| D-039 | Generic CLI is real: structured argv, never a shell command; honestly stateless |
+| D-040 | Generic CLI config is durable role state, validated before persistence |
+| D-041 | Config export/import is versioned, strict, secret-free |
+| D-042 | Bounded `app_events` retention (count-based, hysteresis, events-only) |
+| D-043 | History is a read model over durable batch records, never transcripts |
 
 ---
 
@@ -260,10 +281,10 @@ Stated bluntly so nothing is over-claimed:
 
 1. **Real live proof is a 4-task next plan** (the smoke requests 4); the
    5-task next plan is proven offline (parser + START NEXT BATCH matrix).
-2. **`CodexDriver`/`GenericCliDriver` remain placeholders.** The FINAL_AUDITOR
-   works through the generic path today with Hermes; swapping engines is
-   configuration-only, and Session 006 adds the real Codex adapter plus the
-   UI for switching the expensive roles to it.
+2. **`GenericCliDriver` is real but has no live third-party-CLI proof yet**
+   (Session 007 was deliberately zero-AI). The argv/transport/result contract
+   is fully pinned offline; a live run against one real CLI is the natural
+   first item for a follow-up session.
 3. **Pause/stop are boundary-only** (a running prompt finishes and persists its
    result first). No mid-prompt cancellation (`supports_cancellation=False`).
    This includes a running final-audit call.
@@ -278,8 +299,10 @@ Stated bluntly so nothing is over-claimed:
    surfaced, never papered over).
 8. **UI tests are offscreen only.**
 9. **No packaging.**
-10. **The real CodexDriver and the Claude/OpenCode/Ollama/Kimi adapters do
-    not exist yet** — Session 006+.
+10. **The Claude/OpenCode/Ollama/Kimi adapters do not exist yet.** Simple
+    third-party CLIs are already covered by the real Generic CLI driver
+    (Session 007); dedicated adapters arrive with their own discovery/binding
+    work.
 
 ---
 
@@ -301,16 +324,18 @@ touch them:
 
 ## 7. Exact next recommended phase
 
-**Session 007 — the next engine or operational hardening (Phase 5/6).**
+**Session 008 — a live Generic CLI proof or the remaining Phase 6 items.**
 
-Session 006 delivered the real Codex adapter, the generic session-discovery
-abstraction, the binding model and the UI selector. Reasonable next steps,
-in the order the architecture prefers:
+Session 007 completed Phase 5 (real Generic CLI driver) and delivered the
+first tranche of Phase 6 (config export/import, history, event retention,
+recovery matrix, documentation reconciliation). Reasonable next steps:
 
-1. `GenericCliDriver` gains its configurable argv (the last Phase 5 item) or
-   `ClaudeCodeDriver` reuses the Session 006 discovery/binding infrastructure.
-2. Operational hardening (Phase 6): packaging, `app_events` retention,
-   config export/import.
+1. A live Generic CLI proof against one real third-party CLI (one child
+   process, evidence-captured) — the only uncovered claim left in the
+   Session 007 driver work.
+2. Packaging (PyInstaller), run-history event drill-down, or a
+   `ClaudeCodeDriver` reusing the Session 006 discovery/binding
+   infrastructure.
 3. A UI pass surfacing the executor's final-audit report details (token
    usage from the Codex `turn.completed` usage payload is already parsed
    and carried in metadata).

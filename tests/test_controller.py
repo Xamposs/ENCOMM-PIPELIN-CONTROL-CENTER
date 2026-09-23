@@ -155,9 +155,10 @@ def test_driver_capabilities_are_exposed(controller: PipelineController) -> None
     rows = controller.driver_capabilities()
     assert {r["driver_id"] for r in rows} == {"codex", "generic_cli", "hermes"}
     by_id = {r["driver_id"]: r for r in rows}
-    # Still-unimplemented placeholders must not claim capability…
-    assert by_id["generic_cli"]["implemented"] is False
-    # …Codex gates its flag on live evidence (D-018)…
+    # Session 007: GenericCli is a real, stateless driver (it cannot launch
+    # anything without the operator's stored configuration).
+    assert by_id["generic_cli"]["implemented"] is True
+    # Codex gates its flag on live evidence (D-018)…
     from encomm_pcc.drivers.codex import _LIVE_SMOKE_VERIFIED
 
     assert by_id["codex"]["implemented"] == _LIVE_SMOKE_VERIFIED

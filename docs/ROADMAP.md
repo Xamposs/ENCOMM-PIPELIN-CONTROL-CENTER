@@ -234,7 +234,11 @@ Order (each is one class + one registry entry):
 3. `OpenCodeDriver`
 4. `OllamaDriver` (local models)
 5. `KimiDriver`
-6. `GenericCliDriver` gains a configurable argv field in role config
+6. `GenericCliDriver` — ✅ DONE (Session 007): real, stateless, driven by a
+   validated structured argv configuration (never a shell command), stdin/
+   temp-file prompt transport, bounded stdout/json/jsonl result extraction
+   (ADR D-039/D-040). No live third-party-CLI proof yet — the only open
+   claim.
 
 Exit criteria: adding each engine changes no role, UI or executor code — only
 the driver module and `IMPLEMENTED_DRIVERS`. Any required change elsewhere is a
@@ -248,11 +252,21 @@ which future engines inherit for free.
 
 - Packaging (PyInstaller or equivalent), versioned releases.
 - Schema migrations, once a released schema must change in place.
-- Config export/import; run history browsing.
-- Bounded retention for `app_events`.
-- Recovery from crash mid-batch, driven purely by persisted state.
+- Config export/import — ✅ DONE (Session 007, ADR D-041): versioned,
+  strict validate-before-apply, secret-free.
+- Run history browsing — ✅ DONE (Session 007, ADR D-043): read-only
+  HISTORY panel over the durable batch records.
+- Bounded retention for `app_events` — ✅ DONE (Session 007, ADR D-042):
+  newest 10 000 rows, hysteresis, events-only.
+- Recovery from crash mid-batch, driven purely by persisted state —
+  ✅ pinned by the Session 007 recovery matrix (13 cases; the executor
+  behaviour itself is Session 003–005 work).
 - Optional: MCP surface for shaped shell output across long sessions
   (see the `encomm-leanctx` skill's `OPTIONAL_MCP_CAPABILITY` note).
+
+Exit criteria note (Session 007): the whole phase was delivered with ZERO
+real AI model operations — every proof is offline (deterministic child
+processes, in-process fakes, real SQLite round-trips).
 
 ---
 

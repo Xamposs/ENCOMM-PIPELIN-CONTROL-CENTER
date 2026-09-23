@@ -149,6 +149,7 @@ class RolePanel(QGroupBox):
         self._fields = _ROLE_FIELDS[role]
         self._loading = False
         self._profiles: tuple[str, ...] = tuple(profiles)
+        self._generic_cli_visible: bool = False
 
         form = QFormLayout(self)
 
@@ -239,6 +240,25 @@ class RolePanel(QGroupBox):
             self.policy_label = QLabel()
             form.addRow("Session policy", self.policy_label)
 
+        # -- Generic CLI configuration (Session 007) ------------------------------
+        # A capability/configuration-driven subsection: the row only exists
+        # while the selected engine is generic_cli.  The editor is a structured
+        # dialog, never a free-form shell textbox.
+        self.generic_cli_button: QPushButton | None = None
+        self.generic_cli_note: QLabel | None = None
+        self.generic_cli_button = QPushButton("Configure Generic CLI…")
+        self.generic_cli_button.setToolTip(
+            "Executable, argv tokens, prompt transport, result mode and "
+            "timeout for the Generic CLI engine. Structured values only — "
+            "never a shell command string."
+        )
+        self.generic_cli_button.clicked.connect(self._on_configure_generic_cli)
+        form.addRow("", self.generic_cli_button)
+        self.generic_cli_note = QLabel("")
+        self.generic_cli_note.setWordWrap(True)
+        self.generic_cli_note.setStyleSheet("color: palette(mid);")
+        form.addRow("", self.generic_cli_note)
+
         # -- capability hint -----------------------------------------------------------
         self.capability_label = QLabel()
         self.capability_label.setWordWrap(True)
@@ -287,6 +307,60 @@ class RolePanel(QGroupBox):
         if not caps.implemented:
             return False
         return hasattr(self._registry.get_class(engine), "discover_sessions")
+
+    # -- Generic CLI configuration surface (Session 007) ----------------------
+    def _engine_is_generic_cli(self) -> bool:
+        return (self.engine_combo.currentData() or "") == "generic_cli"
+
+    def _update_generic_cli_visibility(self, *, animate: bool = True) -> None:
+        """Show the Generic CLI row only when the selected engine is generic_cli.
+
+        Switching away from Generic CLI never destroys the stored
+        configuration — it stays durable in ``extra`` and re-appears when the
+        operator selects the engine again.
+        """
+        if self.generic_cli_button is None or self.generic_cli_note is None:
+            return
+        visible = self._engine_is_generic_cli()
+        self._generic_cli_visible = visible
+        self.generic_cli_button.setVisible(visible)
+        self.generic_cli_note.setVisible(visible)
+        if visible:
+            stored = self._controller.generic_cli_config(self.role)
+            if stored is not None:
+                executable = stored.get("executable", "?")
+                transport = stored.get("prompt_transport", "stdin")
+                mode = stored.get("result_mode", "stdout_text")
+                self.generic_cli_note.setText(
+                    f"Configured: {executable} | transport: {transport} | "
+                    f"result: {mode}."
+                )
+            else:
+                self.generic_cli_note.setText(
+                    "No Generic CLI configuration stored yet — dispatching "
+                    "will fail until it is configured."
+                )
+            if animate:
+                self.generic_cli_button.adjustSize()
+
+    def _on_configure_generic_cli(self) -> None:
+        """Open the structured config dialog and persist the result (no engine contact)."""
+        from .generic_cli_dialog import GenericCliConfigDialog
+
+        dialog = GenericCliConfigDialog(
+            self.role,
+            self._controller.generic_cli_config(self.role),
+            parent=self,
+        )
+        if dialog.exec() != GenericCliConfigDialog.Accepted:
+            return
+        try:
+            config_dict = dialog.build_config_dict()
+        except Exception as exc:  # noqa: BLE001 - never persist an unvalidated value
+            self.generic_cli_note.setText(f"Not saved — {exc}")
+            return
+        self._controller.set_generic_cli_config(self.role, config_dict)
+        self._update_generic_cli_visibility(animate=False)
 
     def update_session_options(self, result, descriptors) -> None:
         """Render a discovery result (window-provided; the panel never probes)."""
@@ -347,6 +421,7 @@ class RolePanel(QGroupBox):
         self.changed.emit(self.role, self.values())
         self._rebuild_session_combo()
         self._update_session_enablement()
+        self._update_generic_cli_visibility()
         self._update_capability_hint()
 
     # -- data -------------------------------------------------------------
@@ -392,6 +467,7 @@ class RolePanel(QGroupBox):
 
         self._rebuild_session_combo()
         self._update_session_enablement()
+        self._update_generic_cli_visibility()
         self._update_capability_hint()
 
     def _update_session_enablement(self) -> None:
@@ -427,7 +503,20 @@ class RolePanel(QGroupBox):
             return
         caps = self._registry.capabilities(engine)
         state = "placeholder — not implemented" if not caps.implemented else "implemented"
-        binary = "binary found on PATH" if self._registry.get_class(engine).probe_availability() else "binary not found on PATH"
+        driver_class = self._registry.get_class(engine)
+        if engine == "generic_cli":
+            stored = self._controller.generic_cli_config(self.role)
+            binary = (
+                "configuration stored"
+                if stored is not None
+                else "not configured yet (open “Configure Generic CLI…”)"
+            )
+        else:
+            binary = (
+                "binary found on PATH"
+                if driver_class.probe_availability()
+                else "binary not found on PATH"
+            )
         sessions = "sessions supported" if caps.supports_sessions else "stateless engine"
         discovery = (
             "; existing-session discovery available"
@@ -968,9 +1057,27 @@ class TaskPanel(QGroupBox):
         # -- engine / driver availability ---------------------------------
         if engine and controller.registry.is_registered(engine):
             caps = controller.registry.capabilities(engine)
-            resolver = getattr(controller.registry.get_class(engine), "resolve_executable", None)
-            executable = resolver() if callable(resolver) else None
-            where = f"CLI found: {executable}" if executable else "CLI NOT found on PATH"
+            if engine == "generic_cli":
+                stored = controller.generic_cli_config(AgentRole.BUILDER)
+                if stored is not None:
+                    from ..drivers import GenericCliDriver
+
+                    resolved = GenericCliDriver.resolve_executable(
+                        str(stored.get("executable") or "")
+                    )
+                    where = (
+                        f"executable found: {resolved}"
+                        if resolved
+                        else f"executable NOT found: {stored.get('executable')!r}"
+                    )
+                else:
+                    where = "not configured (use ROLES → Builder → Configure Generic CLI…)"
+            else:
+                resolver = getattr(
+                    controller.registry.get_class(engine), "resolve_executable", None
+                )
+                executable = resolver() if callable(resolver) else None
+                where = f"CLI found: {executable}" if executable else "CLI NOT found on PATH"
             state = "implemented" if caps.implemented else "placeholder (refuses real work)"
             self.driver_label.setText(
                 f"'{caps.display_name}' ({engine}) — {state}; {where}; "

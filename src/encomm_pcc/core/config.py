@@ -30,6 +30,15 @@ MIN_BATCH_SIZE = 1
 MAX_BATCH_SIZE = 5
 DEFAULT_BATCH_SIZE = 5
 
+#: Session 007 — bounded ``app_events`` retention (deterministic, count-based).
+#: 10 000 events is roughly dozens of full batch cycles of operational
+#: evidence at the executor's event rate, keeps the SQLite file small, and is
+#: far above anything a single debugging session needs.  Cleanup is
+#: opportunistic (every ``EVENT_PRUNE_INTERVAL`` appends the log is trimmed
+#: back to this bound), never per appended line.
+MAX_APP_EVENTS = 10_000
+EVENT_PRUNE_INTERVAL = 500
+
 #: Environment variable that redirects all application state (used by tests).
 DATA_DIR_ENV = "ENCOMM_PCC_DATA_DIR"
 

@@ -264,6 +264,53 @@ class PipelineController:
             )
         return removed
 
+    # -- generic CLI configuration (Session 007) -------------------------------
+    def set_generic_cli_config(self, role: AgentRole, config_dict: dict | None) -> AgentRoleConfig:
+        """Store (or clear) the role's safe Generic CLI configuration.
+
+        ``config_dict`` is the structured, validated representation from
+        :meth:`encomm_pcc.drivers.generic_cli_config.GenericCliConfig.to_dict`
+        (or ``None`` to clear).  It is validated by constructing a
+        :class:`GenericCliConfig` BEFORE anything is written, so an invalid
+        configuration never reaches durable state.  The value rides in
+        ``role_configs.extra_json`` (Session 006 binding pattern) — no schema
+        change, no shell command string is ever stored.
+        """
+        from ..drivers import GenericCliConfig
+
+        if config_dict is not None:
+            # Validate before persisting anything (fail closed).
+            GenericCliConfig.from_mapping(config_dict)
+        config = self.state.config_for(role)
+        extra = dict(config.extra or {})
+        if config_dict is None:
+            extra.pop("generic_cli", None)
+            changed = "generic_cli" in (config.extra or {})
+        else:
+            extra["generic_cli"] = dict(config_dict)
+            changed = True
+        if not changed and config_dict is None:
+            return config
+        config.extra = extra
+        self._persist()
+        if config_dict is None:
+            self.events.info(
+                f"{role.value}: Generic CLI configuration cleared.", source="controller"
+            )
+        else:
+            self.events.info(
+                f"{role.value}: Generic CLI configuration stored for executable "
+                f"'{config_dict.get('executable', '')}'. No engine contact was made.",
+                source="controller",
+            )
+        return config
+
+    def generic_cli_config(self, role: AgentRole) -> dict | None:
+        """The stored Generic CLI config dict for ``role`` (None when unset)."""
+        extra = self.state.config_for(role).extra or {}
+        value = extra.get("generic_cli")
+        return dict(value) if isinstance(value, dict) and value else None
+
     # -- driver introspection ------------------------------------------------
     def driver_capabilities(self) -> list[Mapping[str, Any]]:
         """Capability rows for every registered driver (UI + diagnostics)."""

@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 Listener = Callable[["LogRecord"], None]
 
 
+def _retention_bounds() -> tuple[int, int]:
+    """(max_events, prune_interval) from the config module."""
+    from .config import EVENT_PRUNE_INTERVAL, MAX_APP_EVENTS
+
+    return MAX_APP_EVENTS, EVENT_PRUNE_INTERVAL
+
+
 @dataclass(frozen=True, slots=True)
 class LogRecord:
     """One timestamped application event."""
@@ -40,11 +47,19 @@ class LogRecord:
 class EventLog:
     """Append-only event log with optional SQLite persistence and listeners."""
 
-    def __init__(self, database: Database | None = None, echo: bool = False) -> None:
+    def __init__(
+        self,
+        database: Database | None = None,
+        echo: bool = False,
+        *,
+        retention_enabled: bool = True,
+    ) -> None:
         self._database = database
         self._listeners: list[Listener] = []
         self._echo = echo
         self._history: list[LogRecord] = []
+        self._retention_enabled = retention_enabled
+        self._appends_since_prune = 0
 
     # -- subscription ----------------------------------------------------
     def subscribe(self, listener: Listener) -> Callable[[], None]:
@@ -88,6 +103,7 @@ class EventLog:
                 )
             except Exception:  # pragma: no cover - logging must never crash the UI
                 logger.exception("Failed to persist event: %s", record.message)
+            self._maybe_prune_database()
 
         if self._echo:
             logger.log(
@@ -111,6 +127,35 @@ class EventLog:
         return record
 
     # -- convenience ------------------------------------------------------
+    def _maybe_prune_database(self) -> None:
+        """Opportunistic bounded retention (Session 007).
+
+        Cheap counting on every append; the actual DELETE runs at most once
+        per ``EVENT_PRUNE_INTERVAL`` appends AND only when the table is over
+        ``MAX_APP_EVENTS``.  Retention never runs inside the append
+        transaction and never touches anything but ``app_events``.  Failures
+        are logged, never raised — pruning must not break logging.
+        """
+        if not self._retention_enabled or self._database is None:
+            return
+        self._appends_since_prune += 1
+        if self._appends_since_prune < _retention_bounds()[1]:
+            return
+        self._appends_since_prune = 0
+        try:
+            max_events, _ = _retention_bounds()
+            if self._database.event_count() > max_events:
+                deleted = self._database.prune_app_events(max_events)
+                if deleted:
+                    logger.info(
+                        "Event retention: pruned %d old app_events rows "
+                        "(bound: %d).",
+                        deleted,
+                        max_events,
+                    )
+        except Exception:  # pragma: no cover - retention must never break logging
+            logger.exception("app_events retention failed")
+
     def debug(self, message: str, **kwargs: Any) -> LogRecord:
         return self.emit(message, level=EventLevel.DEBUG, **kwargs)
 

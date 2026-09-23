@@ -30,6 +30,7 @@ from ..core import APP_NAME, ExecutionReport, FinalAuditReport, PipelineControll
 from ..core.executor import StartNextBatchReport
 from ..domain import AgentRole, PipelinePhase
 from ..drivers import PLANNED_DRIVERS
+from .history_panel import HistoryPanel
 from .panels import BatchPanel, FinalAuditPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
 from .worker import start_executor_worker
 
@@ -69,6 +70,7 @@ class MainWindow(QMainWindow):
         self.task_panel = TaskPanel(
             controller, profiles=self._profiles, profile_method=self._profile_method
         )
+        self.history_panel = HistoryPanel(controller)
         self.log_panel = LogPanel()
 
         # -- configuration area -------------------------------------------
@@ -104,9 +106,11 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(scroll)
+        splitter.addWidget(self.history_panel)
         splitter.addWidget(self.log_panel)
         splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 2)
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -498,6 +502,7 @@ class MainWindow(QMainWindow):
             self.controller.events.info(message, source="ui")
         self.batch_panel.refresh()
         self.task_panel.refresh()
+        self.history_panel.refresh()
         for panel in self.role_panels.values():
             panel.refresh_session_field()
         self.statusBar().showMessage(f"Phase: {phase.value}")
@@ -538,6 +543,7 @@ class MainWindow(QMainWindow):
         if isinstance(report, ExecutionReport):
             self.task_panel.show_report(report)
             self.batch_panel.refresh()
+            self.history_panel.refresh()
             for panel in self.role_panels.values():
                 panel.refresh_session_field()
             self.controller.events.info(f"Dispatch finished — {report.summary()}", source="ui")

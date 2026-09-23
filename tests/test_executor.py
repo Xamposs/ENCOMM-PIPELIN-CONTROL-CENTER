@@ -320,9 +320,10 @@ def test_missing_workspace_blocks_before_anything_starts(
     assert controller.state.batch is None
 
 
-def test_placeholder_engine_blocks(builder_controller, database) -> None:  # noqa: ANN001
-    # generic_cli is the standing placeholder: codex became a real driver in
-    # Session 006 and its refusal depends on live evidence, not identity.
+def test_unconfigured_generic_cli_blocks(builder_controller, database) -> None:  # noqa: ANN001
+    # Session 007: generic_cli is a REAL driver, but a role without a stored
+    # Generic CLI configuration is refused fail-closed before any process —
+    # the same preflight path an unimplemented driver used to take.
     builder_controller.set_role_config(AgentRole.BUILDER, engine="generic_cli")
     executor = Executor(
         builder_controller,
@@ -333,7 +334,7 @@ def test_placeholder_engine_blocks(builder_controller, database) -> None:  # noq
     report = executor.dispatch_single_task(TaskSpec(title="t", prompt="p"))
 
     assert report.outcome is ExecutionOutcome.BLOCKED
-    assert "placeholder" in report.message
+    assert "No Generic CLI configuration" in report.message
     assert report.executor_started is False
 
 
