@@ -31,7 +31,16 @@ explicitly.
 
 ## 1. Version
 
-`0.7.0` — real Generic CLI driver + operational hardening. Session 007.
+`0.8.0` — Windows release candidate. Session 008: PyInstaller one-folder
+packaging with a `--smoke-test` self-test, the per-user data-root contract
+pinned by tests, an operator DIAGNOSTICS surface (version, data dir,
+database, workspace readiness, engine availability), provider-shaped usage
+lines in the Task panel, a bounded bootstrap file log, config
+export/import round-trip proof, a real Generic CLI third-party proof
+(opencode), and a REAL mixed Codex/Hermes 2-task acceptance run with a
+controlled mid-batch restart — which found and fixed two restart defects
+(auditor-session continuity D-047; the UI restart path losing the machine
+phase).
 
 ---
 
@@ -79,6 +88,14 @@ explicitly.
 | **Batch/run history** | **Works — Session 007** | read-only HISTORY panel over the durable tables (rows + bounded detail); no new tables, no transcripts |
 | **Bounded event retention** | **Works — Session 007** | `app_events` capped at 10 000 newest rows with hysteresis; batches/tasks/plans never pruned |
 | **Restart/recovery matrix** | **Works — Session 007** | every pipeline phase restarts into a safe durable state; in-flight work is never trusted complete; nothing auto-runs |
+| **Windows packaging** | **Works — Session 008** | `ENCOMM-PCC.spec` + `scripts/build_windows.ps1`; one-folder `dist/ENCOMM-PCC/ENCOMM-PCC.exe`; `schema.sql` shipped as data; no credentials bundled (D-044) |
+| **Packaged self-test** | **Works — Session 008** | `ENCOMM-PCC.exe --smoke-test` exits 0 offscreen: imports, writable app data, SQLite + schema gate, controller, driver registry, Qt window, clean shutdown (D-045) |
+| **Per-user data root** | **Works — Session 008** | `%LOCALAPPDATA%\ENCOMM Pipeline Control Center\`, `ENCOMM_PCC_DATA_DIR` override; one resolver for dev + packaged; tests never touch production data |
+| **DIAGNOSTICS panel** | **Works — Session 008** | version, app data dir, DB status, workspace readiness (git/HEAD/dirty/guard), per-engine PATH probes, Generic CLI role state; read-only, auto-refreshed |
+| **Usage visibility** | **Works — Session 008** | Task panel renders provider-reported tokens (Hermes `tokens{}` / Codex `input/cached/output`) — provider-shaped, never merged or invented |
+| **Bounded bootstrap log** | **Works — Session 008** | `logs/bootstrap.log` RotatingFileHandler 1 MB × 2 in the per-user data dir (D-046) |
+| **Generic CLI live proof** | **Works — Session 008** | ONE real opencode call through `GenericCliConfig → GenericCliDriver → ProcessSpec → SubprocessRunner` → marker `ENCOMM_PCC_GENERIC_CLI_REAL_OK` (exit 0) |
+| **Real mixed-engine acceptance** | **Works — Session 008** | Codex Orchestrator + 2 fresh Hermes Builders + ONE persistent Task Auditor + Codex Final Auditor, controlled mid-batch restart, final verdict + next plan, START NEXT BATCH with zero AI calls |
 
 ### Verified at the end of Session 003
 
@@ -143,9 +160,10 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   ├── session_006_codex_smoke.py  Real Codex new-session + resume/final-audit smoke (Session 006)
 │   └── session_006_call2_retry.py  Session 006 evidence-driven retry script
 ├── src/encomm_pcc/
-│   ├── __init__.py             __version__ = "0.6.0"
-│   ├── app.py                  run(), build_controller(), attach_default_executor(),
-│   │                           restore_state(), discover_hermes_profiles()
+│   ├── __init__.py             __version__ = "0.7.0"
+│   ├── app.py                  run(), run_smoke_test(), build_controller(),
+│   │                           attach_default_executor(), restore_state(),
+│   │                           discover_hermes_profiles()
 │   ├── domain/
 │   │   ├── enums.py            AgentRole, SessionPolicy, PipelinePhase,
 │   │   │                       TaskState, BatchStatus, EventLevel
@@ -180,6 +198,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │   ├── config.py           AppPaths, batch-size bounds (1..5), placeholders,
 │   │   │                       MAX_APP_EVENTS retention bounds (Session 007)
 │   │   ├── config_exchange.py  Versioned config export/import (Session 007)
+│   │   ├── diagnostics.py      Operator diagnostics + workspace readiness (Session 008)
 │   │   ├── history.py          Batch/run history read model (Session 007)
 │   │   ├── events.py           EventLog, LogRecord, NullEventLog
 │   │   ├── session_manager.py  decide_session_action, SessionManager,
@@ -205,23 +224,28 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │   └── database.py         Database (v1→…→v5 targeted upgrades)
 │   ├── ui/
 │   │   ├── main_window.py      MainWindow (+ audit/fix/final-audit worker wiring)
+│   │   ├── diagnostics_panel.py  DIAGNOSTICS section (Session 008)
 │   │   ├── panels.py           WorkspacePanel, RolePanel, BatchPanel,
 │   │   │                       FinalAuditPanel, LogPanel, TaskPanel
 │   │   └── worker.py           ExecutorWorker (dispatch/audit/fix/batch/
 │   │                           final_audit actions)
-├── tests/                      542 tests across 26 files
+├── ENCOMM-PCC.spec             PyInstaller one-folder build spec (Session 008)
+├── dist/                       Windows build output (never committed)
+├── tests/                      571 tests across 31 files
 └── docs/
     ├── ARCHITECTURE.md         Actual architecture (read second)
     ├── CURRENT_STATE.md        This file (read first)
     ├── ROADMAP.md              Phased plan
-    ├── DECISIONS.md            D-001 … D-033 with reasons
+    ├── DECISIONS.md            D-001 … D-047 with reasons
     └── reports/
         ├── SESSION_001_FOUNDATION.md
         ├── SESSION_002_HERMES_EXECUTOR.md
         ├── SESSION_003_AUDITOR_FIX_LOOP.md
         ├── SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md
         ├── SESSION_005_FINAL_AUDIT_NEXT_BATCH.md
-        └── SESSION_007_GENERIC_CLI_OPERATIONAL_HARDENING.md
+        ├── SESSION_006_CODEX_DRIVER_SESSION_SELECTOR.md
+        ├── SESSION_007_GENERIC_CLI_OPERATIONAL_HARDENING.md
+        └── SESSION_008_WINDOWS_RELEASE_CANDIDATE.md
 ```
 
 ---
@@ -298,7 +322,8 @@ Stated bluntly so nothing is over-claimed:
 7. **A `--resume` failure fails the run** (provider-side session loss is
    surfaced, never papered over).
 8. **UI tests are offscreen only.**
-9. **No packaging.**
+9. **No installer** — the Windows release is a one-folder PyInstaller
+   build (Session 008); no MSI/registry integration.
 10. **The Claude/OpenCode/Ollama/Kimi adapters do not exist yet.** Simple
     third-party CLIs are already covered by the real Generic CLI driver
     (Session 007); dedicated adapters arrive with their own discovery/binding

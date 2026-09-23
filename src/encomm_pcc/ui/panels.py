@@ -928,6 +928,37 @@ class LogPanel(QGroupBox):
         self.count_label.setText(f"{self._count} events")
 
 
+def _usage_lines(metadata: dict) -> list[str]:
+    """Provider-reported usage from the driver's ``stream`` summary (§34).
+
+    Keys are rendered exactly as the provider reports them — unlike counters
+    are never merged or normalised, and missing values are never invented.
+    """
+    stream = metadata.get("stream")
+    if not isinstance(stream, dict):
+        return []
+    lines: list[str] = []
+    model = stream.get("model")
+    if model:
+        lines.append(f"model          : {model}")
+    tokens = stream.get("tokens")
+    if isinstance(tokens, dict):
+        parts = [f"{k}={v}" for k, v in sorted(tokens.items()) if v is not None]
+        if parts:
+            lines.append("usage(hermes)  : " + ", ".join(parts))
+    direct = [
+        (k, stream[k])
+        for k in ("input_tokens", "cached_input_tokens", "output_tokens")
+        if isinstance(stream.get(k), int)
+    ]
+    if direct:
+        lines.append("usage(codex)   : " + ", ".join(f"{k}={v}" for k, v in direct))
+    tool_use = stream.get("tool_use_count")
+    if isinstance(tool_use, int):
+        lines.append(f"tool_calls     : {tool_use}")
+    return lines
+
+
 class TaskPanel(QGroupBox):
     """TASK section — one controlled task, dispatched through the executor.
 
@@ -1216,6 +1247,7 @@ class TaskPanel(QGroupBox):
             ]
             if result.metadata.get("argv"):
                 lines.append(f"argv           : {result.metadata['argv']}")
+            lines.extend(_usage_lines(result.metadata))
             text = result.text or ""
             lines.append("")
             lines.append("--- output ---")

@@ -1144,3 +1144,102 @@ model and again in the UI.
 **Consequence.** Terminal batches (COMPLETE/FAILED/STOPPED) are deliberately
 not restored as active work (`load_active_batch` already excluded them) —
 history is where they live. Pinned by the 12-case matrix.
+
+
+---
+
+## D-044 — The production data root is the per-user app-data directory; packaging never bundles state
+
+**Date:** Session 008
+**Status:** Accepted
+
+**Context.** The Windows release candidate must not treat the Git repository
+or the executable directory as its writable data home, and changing paths
+must never silently destroy existing user data.
+
+**Decision.** `AppPaths.resolve()` remains the single path resolver for BOTH
+launch modes: production default `%LOCALAPPDATA%\ENCOMM Pipeline Control
+Center\` (database + `logs/`), overridable with `ENCOMM_PCC_DATA_DIR` for
+tests and multi-instance use. The packaged app resolves the SAME default —
+one resolver, unit-tested (`tests/test_app_paths.py`), and tests are pinned
+to never write into the real production directory. No legacy on-disk
+database existed at the time of packaging (verified: the directory did not
+exist), so the migration policy is: fresh install creates the per-user
+database; a NEWER schema is refused by the existing D-008 gate; no automatic
+migration of unknown databases is performed. `dist/` artifacts and
+`build/` outputs stay out of Git.
+
+**Consequence.** Development, tests and the packaged exe share one resolver;
+no DB files ship inside the package; no user data is ever overwritten
+silently.
+
+---
+
+## D-045 — The packaged application ships with a `--smoke-test` mode that reuses the real bootstrap
+
+**Date:** Session 008
+**Status:** Accepted
+
+**Context.** A release candidate must prove that the PACKAGED binary can
+construct the real application, without model calls and without a fake
+parallel app.
+
+**Decision.** `python main.py --smoke-test` (same flag in the packaged exe)
+runs `app.run_smoke_test()`: package imports, writable app-data dir, SQLite
+open/create + schema compatibility (fail-closed on a newer schema),
+controller construction, driver-registry availability, offscreen Qt main
+window construction, clean shutdown. It makes ZERO model calls, never
+touches production projects, cannot hang (no event-loop exec), and exits
+0/1. The offscreen platform is set only inside the smoke mode.
+
+**Consequence.** Release validation is one command with a meaningful exit
+code; the smoke path is the application's real bootstrap path, so it cannot
+drift from the app it validates (pinned by `tests/test_packaged_bootstrap.py`).
+
+---
+
+## D-046 — Packaged logging is a bounded, per-user, bootstrap-only file log
+
+**Date:** Session 008
+**Status:** Accepted
+
+**Context.** A windowed packaged exe has no console; bootstrap/package
+failures would otherwise vanish. An unlimited file log recreates the
+unbounded-retention problem D-042 solved for `app_events`.
+
+**Decision.** `configure_logging(paths=...)` adds a `RotatingFileHandler`
+(`logs/bootstrap.log`, 1 MB × 2 backups, UTF-8) to stderr logging when a
+data dir is known. A read-only data dir degrades to stderr-only startup
+instead of failing. `app_events` (D-042) remains the authoritative
+application event store; the file log exists for bootstrap/packaging
+diagnosis only.
+
+**Consequence.** Packaged failures are diagnosable per-user without
+unbounded growth or secrets in logs; the smoke mode emits its evidence
+through the same handler.
+
+---
+
+## D-047 — A restart between tasks rebinds the batch's shared auditor session from any audited task
+
+**Date:** Session 008
+**Status:** Accepted
+
+**Context.** The real mixed-engine acceptance run found that a restart
+between two tasks silently opened a SECOND Task Auditor session:
+`_restore_auditor_session` only consulted the CURRENT task's own
+`auditor_session_id`, which is empty for a task that has not been audited
+yet — violating `persistent_per_batch` across restarts (one session per
+batch).
+
+**Decision.** `_restore_auditor_session` first honours the current task's
+own re-audit session, and otherwise falls back to the most recent audited
+task in the SAME batch (highest index with a persisted
+`auditor_session_id`). The restore stays pure bookkeeping (no engine
+contact, no writes); a genuinely lost provider session still fails the run
+explicitly on resume.
+
+**Consequence.** ONE auditor session per batch survives mid-batch restarts;
+pinned offline by
+`test_restart_between_tasks_resumes_the_shared_auditor_session` (found by
+Session 008 acceptance, fixed before the acceptance re-run).

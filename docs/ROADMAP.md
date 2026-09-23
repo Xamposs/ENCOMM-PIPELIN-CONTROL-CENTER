@@ -248,9 +248,12 @@ which future engines inherit for free.
 
 ---
 
-## Phase 6 — Operational hardening
+## Phase 6 — Operational hardening ✅ DONE (Session 008)
 
-- Packaging (PyInstaller or equivalent), versioned releases.
+- Packaging (PyInstaller or equivalent), versioned releases — ✅ DONE
+  (Session 008): one-folder `dist/ENCOMM-PCC/ENCOMM-PCC.exe` via
+  `ENCOMM-PCC.spec` + `scripts/build_windows.ps1`; packaged `--smoke-test`;
+  release manifest with SHA-256 hashes.
 - Schema migrations, once a released schema must change in place.
 - Config export/import — ✅ DONE (Session 007, ADR D-041): versioned,
   strict validate-before-apply, secret-free.
@@ -264,9 +267,17 @@ which future engines inherit for free.
 - Optional: MCP surface for shaped shell output across long sessions
   (see the `encomm-leanctx` skill's `OPTIONAL_MCP_CAPABILITY` note).
 
-Exit criteria note (Session 007): the whole phase was delivered with ZERO
-real AI model operations — every proof is offline (deterministic child
-processes, in-process fakes, real SQLite round-trips).
+Exit criteria met (Session 008): the phase is complete — packaging, the
+per-user data root, diagnostics, config exchange, history, retention and the
+recovery matrix are all delivered and tested; the real mixed-engine
+acceptance run exercised the full pipeline end to end (its two
+restart-continuity defects are fixed: D-047 and the `restore_state` phase
+restoration).
+
+Session 008 note: the LIVE acceptance added real model operations on top of
+the zero-AI Session 007 phase work — a real Generic CLI proof (one opencode
+call) and a real 2-task Codex/Hermes batch with a controlled restart, a
+legitimate fix loop, a final audit and a next-batch handoff.
 
 ---
 

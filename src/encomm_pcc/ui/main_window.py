@@ -30,6 +30,7 @@ from ..core import APP_NAME, ExecutionReport, FinalAuditReport, PipelineControll
 from ..core.executor import StartNextBatchReport
 from ..domain import AgentRole, PipelinePhase
 from ..drivers import PLANNED_DRIVERS
+from .diagnostics_panel import DiagnosticsPanel
 from .history_panel import HistoryPanel
 from .panels import BatchPanel, FinalAuditPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
 from .worker import start_executor_worker
@@ -71,6 +72,7 @@ class MainWindow(QMainWindow):
             controller, profiles=self._profiles, profile_method=self._profile_method
         )
         self.history_panel = HistoryPanel(controller)
+        self.diagnostics_panel = DiagnosticsPanel(controller)
         self.log_panel = LogPanel()
 
         # -- configuration area -------------------------------------------
@@ -106,11 +108,13 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(scroll)
+        splitter.addWidget(self.diagnostics_panel)
         splitter.addWidget(self.history_panel)
         splitter.addWidget(self.log_panel)
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 2)
+        splitter.setStretchFactor(2, 1)
+        splitter.setStretchFactor(3, 2)
 
         central = QWidget()
         central_layout = QVBoxLayout(central)
@@ -122,6 +126,9 @@ class MainWindow(QMainWindow):
         self._connect_signals()
         self._subscribe_to_events()
         self._log_startup_summary()
+        # Session 008: the operator sees readiness immediately on launch
+        # (read-only; never launches an engine).
+        self.diagnostics_panel.refresh()
 
     # -- wiring ----------------------------------------------------------
     def _connect_signals(self) -> None:
@@ -196,6 +203,7 @@ class MainWindow(QMainWindow):
     def _on_workspace_changed(self, name: str, repo_path: str) -> None:
         self.controller.set_workspace(name, repo_path)
         self.task_panel.refresh()
+        self.diagnostics_panel.refresh()
 
     def _on_role_changed(self, role: AgentRole, values: dict) -> None:
         self.controller.set_role_config(role, **values)

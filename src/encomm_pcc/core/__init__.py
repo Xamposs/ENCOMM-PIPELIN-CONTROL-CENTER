@@ -6,6 +6,7 @@ Qt-free.  The UI is a consumer of this layer, never a peer of it.
 from .batch_runner import BatchOutcome, BatchRunReport, BatchRunner, StepRecord
 from .config import (
     APP_NAME,
+    DATA_DIR_ENV,
     DEFAULT_BATCH_SIZE,
     MAX_BATCH_SIZE,
     MIN_BATCH_SIZE,
@@ -27,6 +28,15 @@ from .config_exchange import (
     write_export,
 )
 from .controller import ControlOutcome, ControlResult, PipelineController
+from .diagnostics import (
+    DriverDiagnostics,
+    WorkspaceReadiness,
+    collect_diagnostics,
+    collect_driver_diagnostics,
+    format_diagnostics,
+    format_workspace_readiness,
+    workspace_readiness_for,
+)
 from .events import EventLog, Listener, LogRecord, NullEventLog
 from .executor import (
     AUDITOR_ROLE,
@@ -90,6 +100,7 @@ from .verdict_parser import (
 
 __all__ = [
     "APP_NAME",
+    "DATA_DIR_ENV",
     "AUDIT_ENVELOPE_END",
     "AUDIT_ENVELOPE_START",
     "AUDITOR_ROLE",
@@ -102,6 +113,13 @@ __all__ = [
     "ConfigExchangeError",
     "ControlOutcome",
     "ControlResult",
+    "DriverDiagnostics",
+    "WorkspaceReadiness",
+    "collect_diagnostics",
+    "collect_driver_diagnostics",
+    "format_diagnostics",
+    "format_workspace_readiness",
+    "workspace_readiness_for",
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_TASK_ROLE",
     "EventLog",

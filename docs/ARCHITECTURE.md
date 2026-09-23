@@ -1,7 +1,7 @@
 # Architecture — ENCOMM Pipeline Control Center
 
-**Version:** 0.7 (real Generic CLI driver + operational hardening)
-**Status:** accurate as of Session 007. This document describes what the code
+**Version:** 0.8 (Windows release candidate)
+**Status:** accurate as of Session 008. This document describes what the code
 actually does today, including what it deliberately does *not* do.
 
 ---
@@ -122,7 +122,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   └── ui/
 │       ├── main_window.py        MainWindow
 │       └── panels.py             WorkspacePanel, RolePanel, BatchPanel, LogPanel
-├── tests/                        542 tests, 26 files
+├── tests/                        571 tests, 31 files
 └── docs/                         This file + CURRENT_STATE, ROADMAP, DECISIONS
     └── reports/                  Per-session reports
 ```
@@ -486,6 +486,32 @@ parser exists (D-031).
    restored phase + task-state-driven next action + terminal batches stay in
    history; nothing auto-runs (a fresh controller never has an executor).
 
+### Session 008 — Windows release candidate surfaces
+
+1. **Packaging.** `ENCOMM-PCC.spec` + `scripts/build_windows.ps1` produce a
+   one-folder PyInstaller build (`dist/ENCOMM-PCC/ENCOMM-PCC.exe`).
+   `schema.sql` ships as DATA next to the compiled persistence package (it is
+   loaded via `Path(__file__)`); no credentials, databases or engine auth
+   state are ever bundled — Hermes/Codex are discovered on the target at
+   runtime (D-044).
+2. **Self-test.** `--smoke-test` (source or packaged) reuses the real
+   bootstrap offscreen: writable app data, SQLite + schema gate, controller,
+   driver registry, Qt main window, clean shutdown; exit 0/1, zero model
+   calls (D-045).
+3. **Diagnostics.** `core/diagnostics.py` (Qt-free) + the DIAGNOSTICS panel:
+   version, app-data dir, database status, workspace readiness (path, git,
+   HEAD, clean/dirty, fingerprint-guard ACTIVE/UNAVAILABLE), per-engine PATH
+   probes, Generic CLI per-role configuration state. Read-only; never
+   launches an engine.
+4. **Usage visibility.** `TaskPanel` renders provider-reported usage from the
+   result metadata's `stream` summary (Hermes `tokens{}`, Codex
+   `input/cached/output tokens`, tool calls) — provider-shaped, never merged
+   or invented.
+5. **Bootstrap log.** Bounded `RotatingFileHandler` in the per-user `logs/`
+   dir for packaged diagnostics (D-046).
+6. **Auditor continuity.** A restart between tasks rebinds the batch's ONE
+   auditor session from the most recent audited task (D-047).
+
 ### Session 002 dispatch sequence (one task, stops at `AUDITING_TASK`)
 
 `Executor.dispatch_single_task()` implements exactly this order, and each step is
@@ -652,11 +678,11 @@ Stated plainly so no future session mistakes a placeholder for a feature:
 
 ---
 
-## 14. Verification status (v0.7)
+## 14. Verification status (v0.8)
 
 | Check | Result |
 |---|---|
-| `python -m pytest` | **542 passed, 0 failed** (26 files; 417 prior + 127 Session 007 tests) |
+| `python -m pytest` | **571 passed, 0 failed** (31 files) |
 | Real audit/fix smoke (`scripts/session_003_audit_fix_smoke.py`) | **See `docs/reports/SESSION_003_AUDITOR_FIX_LOOP.md`** — loop intact; terminal is now `READY_FOR_FINAL_AUDIT` (ADR D-025) |
 | Real orchestrated batch smoke (`scripts/session_004_multitask_smoke.py`) | **See `docs/reports/SESSION_004_ORCHESTRATOR_MULTITASK_BATCH.md`** — 1 Orchestrator call → exactly 4 tasks → 4 fresh Builder sessions → 1 shared auditor session → `READY_FOR_FINAL_AUDIT`, re-read from SQLite |
 | Real final-audit smoke (`scripts/session_005_final_audit_smoke.py`) | **See `docs/reports/SESSION_005_FINAL_AUDIT_NEXT_BATCH.md`** — ONE Final Auditor call → FINAL PASS + exactly 4 next tasks in the same response → `BATCH_COMPLETE`, next plan persisted, START NEXT BATCH materialised with zero AI calls |

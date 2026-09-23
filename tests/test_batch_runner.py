@@ -607,3 +607,79 @@ def test_ready_batch_reloads_from_sqlite_with_plan_and_summary(
     assert summary["shared_auditor_session_id"] == "auditor_1"
     assert summary["orchestrator_session_id"] == "orch_1"
     assert summary["final_phase"] == "READY_FOR_FINAL_AUDIT"
+
+def test_restart_between_tasks_resumes_the_shared_auditor_session(
+    batch_controller, database, registry  # noqa: ANN001
+) -> None:
+    """Session 008 regression (brief §25/§27): a restart BETWEEN two tasks
+    must resume the batch's ONE auditor session for the next task's FIRST
+    audit.
+
+    Found by the real mixed-engine acceptance run: the pre-fix restore only
+    consulted the current task's own ``auditor_session_id`` — empty for a
+    task that had not been audited yet — so a mid-batch restart silently
+    opened a SECOND auditor session, violating ``persistent_per_batch``.
+    """
+    ScriptedBatchDriver.reset()
+    executor = Executor(
+        batch_controller,
+        registry=registry,
+        runner=PermissiveRunner(),
+        database=database,
+        profile_discovery=discovery_stub,
+    )
+    batch_controller.attach_executor(executor)
+    ScriptedBatchDriver.shared = [
+        ok_result("orch_1", build_plan_text(2)),
+        ok_result("builder_1", "t1 done"),
+        ok_result("auditor_1", verdict_text("PASS")),
+        # pause right after task 1 is approved (op 3) — the safe boundary
+    ]
+    ScriptedBatchDriver.hooks[3] = executor.request_pause
+    first = BatchRunner(executor).run_batch(project_brief="x", batch_size=2)
+    assert first.outcome is BatchOutcome.PAUSED
+
+    workspace_id = batch_controller.state.workspace.workspace_id
+    restored = database.load_pipeline_state(workspace_id)
+    assert restored is not None and restored.batch is not None
+    states = {t.index: t.state for t in restored.batch.tasks}
+    assert states[1] is TaskState.APPROVED
+    assert states[2] is TaskState.PENDING
+    assert restored.batch.tasks[0].auditor_session_id == "auditor_1"
+
+    # -- "restart": only SQLite survives ------------------------------------
+    ScriptedBatchDriver.reset()
+    ScriptedBatchDriver.shared = [
+        ok_result("builder_2", "t2 done"),
+        ok_result("auditor_1", verdict_text("PASS")),
+    ]
+    fresh_events = EventLog(database)
+    fresh_controller = PipelineController(
+        database=database, event_log=fresh_events, state=restored
+    )
+    fresh_executor = Executor(
+        fresh_controller,
+        registry=registry,
+        runner=PermissiveRunner(),
+        database=database,
+        profile_discovery=discovery_stub,
+    )
+    fresh_controller.attach_executor(fresh_executor)
+
+    report = BatchRunner(fresh_executor).run_batch(resume=True)
+    assert report.outcome is BatchOutcome.READY_FOR_FINAL_AUDIT
+
+    tasks = {t.index: t for t in fresh_executor.controller.state.batch.tasks}
+    # The SAME auditor session was resumed for task 2's first audit.
+    assert ScriptedBatchDriver.resumed == ["auditor_1"], (
+        "a restart between tasks must resume the batch's shared auditor session"
+    )
+    assert tasks[1].auditor_session_id == tasks[2].auditor_session_id == "auditor_1"
+    # Builders stay always-new.
+    assert tasks[1].builder_session_id != tasks[2].builder_session_id
+    assert {t.state for t in tasks.values()} == {TaskState.APPROVED}
+
+
+def auditor_session_of(tasks, index: int) -> str | None:
+    by_index = {t.index: t for t in tasks}
+    return by_index[index].auditor_session_id

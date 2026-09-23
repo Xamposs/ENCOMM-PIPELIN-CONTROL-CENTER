@@ -1912,10 +1912,30 @@ class Executor:
         ``SessionManager`` from a value the database already holds so the
         ``persistent_per_batch`` decision can REUSE the same external session
         for a re-audit without contacting the engine beforehand.
+
+        Session 008 (restart between tasks): the batch shares ONE auditor
+        session, but a task that has not been audited yet carries no
+        ``auditor_session_id`` of its own — so the restore falls back to the
+        most recent audited task in the same batch.  Without this, a restart
+        between two tasks silently opened a second auditor session (found by
+        the Session 008 real mixed-engine acceptance run).
         """
         sessions = self.controller.sessions
-        if task.auditor_session_id and sessions.current_session_id(AUDITOR_ROLE) is None:
+        if sessions.current_session_id(AUDITOR_ROLE) is not None:
+            return
+        if task.auditor_session_id:
             sessions.restore_session(AUDITOR_ROLE, task.auditor_session_id)
+            return
+        batch = self.controller.state.batch
+        if batch is None:
+            return
+        for candidate in sorted(
+            (t for t in batch.tasks if t.auditor_session_id),
+            key=lambda t: t.index,
+            reverse=True,
+        ):
+            sessions.restore_session(AUDITOR_ROLE, candidate.auditor_session_id)
+            return
 
     def _audit(
         self, *, index: int | None = None, timeout_s: float | None
