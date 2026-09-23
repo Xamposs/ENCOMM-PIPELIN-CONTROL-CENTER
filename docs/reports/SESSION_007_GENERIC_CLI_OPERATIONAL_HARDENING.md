@@ -156,9 +156,15 @@ scratch repos were created; no network calls were made by the application.
 
 ## GIT_STATUS
 
-Filled at commit time — see the commit gate section of the session log
-(sha recorded here after push; `git rev-parse HEAD` must equal
-`git rev-parse origin/main` before this section is final).
+- Baseline: `de32aa47977e90b8f96b495272e58c1916f87f38` (verified before any edit)
+- Final commit: **`1dade2cf1119fd0dbddfd90c5fe15bc82d20c22b`** —
+  `feat: real Generic CLI driver + operational hardening (Session 007, v0.7.0)`
+- Pushed to `origin/main`; verified `git rev-parse HEAD` ==
+  `git rev-parse origin/main` (== `1dade2c…`) immediately after the push.
+- 33 files changed, 4479 insertions(+), 97 deletions(-); 12 new files
+  (1 report, 5 source modules, 6 test files). `git diff --check` clean;
+  secret scan over the added lines: NO_SECRETS_FOUND; no `.db`/logs/scratch
+  staged.
 
 ## NEXT_RECOMMENDED_SESSION
 
