@@ -446,7 +446,10 @@ class TestSimpleModeDefault:
             index = panel.auditor_profile.findText("encomm-auditor")
             assert index >= 0
             panel.auditor_profile.setCurrentIndex(index)
-            panel._apply_role_profile(AgentRole.TASK_AUDITOR, panel.auditor_profile)
+            panel._apply_role_config(
+                AgentRole.TASK_AUDITOR, panel.auditor_profile,
+                panel.auditor_provider, panel.auditor_model,
+            )
             config = controller.state.config_for(AgentRole.TASK_AUDITOR)
             assert config.project_profile == "encomm-auditor"
             assert config.engine == "hermes"

@@ -28,7 +28,14 @@ from PySide6.QtWidgets import (
 )
 
 from .. import __version__
-from ..core import APP_NAME, ExecutionReport, FinalAuditReport, PipelineController, TaskSpec
+from ..core import (
+    APP_NAME,
+    ContinuousRunReport,
+    ExecutionReport,
+    FinalAuditReport,
+    PipelineController,
+    TaskSpec,
+)
 from ..core.executor import StartNextBatchReport
 from ..domain import AgentRole, PipelinePhase
 from ..drivers import PLANNED_DRIVERS
@@ -408,12 +415,18 @@ class MainWindow(QMainWindow):
     def _on_simple_start(self, brief: str, size: int, continuous: bool) -> None:
         """SIMPLE START: one brief, one size, optional continuous run."""
         self._simple_continuous = bool(continuous)
-        self._on_plan_and_start(brief, size)
+        if self._simple_continuous:
+            self._start_continuous_worker(brief=brief, size=size, resume=False)
+        else:
+            self._on_plan_and_start(brief, size)
 
     def _on_simple_continue(self, continuous: bool) -> None:
         """RECOVERY CONTINUE: resume from durable state (never auto-run)."""
         self._simple_continuous = bool(continuous)
-        self._on_resume_batch()
+        if self._simple_continuous:
+            self._start_continuous_worker(brief="", size=0, resume=True)
+        else:
+            self._on_resume_batch()
 
     def _on_plan_and_start(self, brief: str, size: int) -> None:
         """Session 004: ONE autonomous batch run, off the UI thread."""
@@ -494,13 +507,13 @@ class MainWindow(QMainWindow):
                 f"Final audit finished — {report.summary()}", source="ui"
             )
             if report.outcome.value == "PASSED":
-                if self._simple_continuous:
-                    self._continuous_handoff()
-                else:
-                    self.statusBar().showMessage(
-                        "FINAL AUDIT: PASS — batch COMPLETE. The next batch plan is "
-                        "persisted; press START NEXT BATCH when ready (nothing auto-runs)."
-                    )
+                # Session 010: the continuous loop lives in the core
+                # ContinuousRunner (worker action), so a manual Final PASS here
+                # simply reports the persisted handoff — never a UI-side loop.
+                self.statusBar().showMessage(
+                    "FINAL AUDIT: PASS — batch COMPLETE. The next batch plan is "
+                    "persisted; press START NEXT BATCH when ready (nothing auto-runs)."
+                )
             elif report.outcome.value == "NEEDS_FIX":
                 self.statusBar().showMessage(
                     "FINAL AUDIT: NEEDS_FIX — findings persisted; operator handling "
@@ -513,40 +526,108 @@ class MainWindow(QMainWindow):
             return
         self.statusBar().showMessage("Final audit finished without a report.")
 
-    def _continuous_handoff(self) -> None:
-        """Continuous Run (§25): after a Final PASS, materialise and run the
-        next batch with ZERO planning calls (the persisted pending plan)."""
+    def _start_continuous_worker(self, *, brief: str, size: int, resume: bool) -> None:
+        """Continuous Run (Session 010): the CORE ContinuousRunner owns the loop.
+
+        Simple START + Continuous → ``continuous`` (initial plan inside batch 1);
+        Recovery CONTINUE + Continuous → ``continuous_resume`` (durable state).
+        Both run off the UI thread and both keep every Final Audit and the
+        zero-AI ``start_next_batch()`` handoff inside the core — the window
+        never duplicates pipeline logic and never simulates clicks.
+        """
         executor = self.controller.executor
         if executor is None:
-            return
-        if executor.stop_requested or executor.pause_requested:
-            self.statusBar().showMessage(
-                "Continuous Run: stopping/pausing at the batch boundary as requested."
+            self.controller.events.error(
+                "Continuous Run requested, but no executor is attached.", source="ui"
             )
+            self.statusBar().showMessage("No executor attached — nothing was started.")
             return
-        from ..core.executor import StartNextBatchReport
+        if executor.is_running or (self._thread is not None and self._thread.isRunning()):
+            self.statusBar().showMessage("A batch is already running.")
+            return
+        if resume and size <= 0:
+            batch = self.controller.state.batch
+            size = batch.size if batch is not None else 0
+        self.controller.events.info(
+            f"CONTINUOUS RUN {'resumed' if resume else 'started'} via the core "
+            "ContinuousRunner (final audit + zero-AI next batch run automatically) "
+            "— off the UI thread.",
+            source="ui",
+        )
+        self.statusBar().showMessage(
+            "Continuous Run active — batches chain automatically until STOP. "
+            "STOP/PAUSE take effect at the next safe boundary."
+        )
+        thread, worker = start_executor_worker(
+            executor,
+            TaskSpec(title="", prompt=""),
+            timeout_s=self._dispatch_timeout_s,
+            action="continuous_resume" if resume else "continuous",
+            resume=resume,
+            project_brief=brief,
+            batch_size=size or None,
+            next_batch_size=5,
+            parent=self,
+        )
+        worker.finished.connect(self._on_continuous_finished)
+        thread.finished.connect(self._on_dispatch_thread_finished)
+        self._thread, self._worker = thread, worker
+        thread.start()
 
-        handed = executor.start_next_batch()
-        if isinstance(handed, StartNextBatchReport) and handed.ok:
+    def _continuous_stop_message(self, report: ContinuousRunReport) -> str:
+        """Translate the core stop reason into operator language (§8)."""
+        reason = report.stop_reason
+        if reason == "STOP_REQUESTED":
+            return (
+                f"Continuous Run stopped safely as requested after {report.batches_run} "
+                "batch(es) — results are persisted."
+            )
+        if reason == "PAUSED":
+            return (
+                "Continuous Run paused safely after the current operation — "
+                "press CONTINUE (with Continuous Run ticked) to resume."
+            )
+        if reason == "BATCH_BLOCKED":
+            return (
+                "Continuous Run stopped: the batch is BLOCKED and needs your "
+                f"attention. {report.message}"
+            )
+        if reason == "BATCH_FAILED":
+            return (
+                "Continuous Run stopped: a batch operation FAILED. "
+                f"{report.message}"
+            )
+        if reason == "FINAL_AUDIT_NOT_PASS":
+            return (
+                "Continuous Run stopped: the Final Audit did not return PASS — "
+                f"operator attention required. {report.message}"
+            )
+        if reason == "NO_PENDING_PLAN":
+            return (
+                "Continuous Run stopped: the Final Audit PASSED but no next-batch "
+                "plan was persisted, so there is nothing to continue with."
+            )
+        if reason == "NEXT_BATCH_REFUSED":
+            return f"Continuous Run stopped: the next batch was refused. {report.message}"
+        return f"Continuous Run finished: {report.summary()}"
+
+    def _on_continuous_finished(self, report: object) -> None:
+        """Terminal ContinuousRunReport: refresh everything, state the reason."""
+        self._after_control("", self.controller.machine.phase)
+        if isinstance(report, ContinuousRunReport):
             self.controller.events.info(
-                f"CONTINUOUS: next batch materialised with zero planning calls "
-                f"({handed.task_count} tasks) — running it now.",
-                source="ui",
+                f"Continuous run finished — {report.summary()}", source="ui"
             )
-            brief = (
-                self.controller.state.batch.project_brief
-                if self.controller.state.batch is not None
-                else ""
+            self.statusBar().showMessage(self._continuous_stop_message(report))
+            self.simple_panel.refresh()
+            return
+        if isinstance(report, ExecutionReport):
+            self.controller.events.error(
+                f"Continuous run failed — {report.summary()}", source="ui"
             )
-            size = (
-                self.controller.state.batch.size
-                if self.controller.state.batch is not None
-                else 5
-            )
-            self._start_batch_worker(brief=brief, size=size, resume=False)
-        else:
-            message = getattr(handed, "message", "handoff refused")
-            self.statusBar().showMessage(f"Continuous Run stopped: {message}")
+            self.statusBar().showMessage(f"Continuous Run failed: {report.message}")
+            return
+        self.statusBar().showMessage("Continuous Run finished without a report.")
 
     def _on_start_next_batch(self) -> None:
         """START NEXT BATCH: deterministic handoff — never an AI call."""
@@ -611,9 +692,13 @@ class MainWindow(QMainWindow):
                 f"Batch: {report.outcome.value} — {report.message}"
             )
             if report.outcome.value == "READY_FOR_FINAL_AUDIT":
+                # Session 010 (§6): this terminal is only reachable with
+                # Continuous Run OFF — a continuous run's Final Audit happens
+                # inside the core ContinuousRunner on the worker thread.
                 self.statusBar().showMessage(
-                    "READY FOR FINAL AUDIT — the batch stops here. "
-                    "The Final Auditor arrives in a later session."
+                    "READY FOR FINAL AUDIT — every task is APPROVED. "
+                    "Press RUN FINAL AUDIT (Advanced) to close the batch, "
+                    "or STOP to end here."
                 )
             return
         if isinstance(report, ExecutionReport):

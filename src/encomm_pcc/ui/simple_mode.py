@@ -125,12 +125,29 @@ class SimpleModePanel(QWidget):
         coder_form.addWidget(QLabel("Profile:"))
         self.coder_profile = self._make_profile_combo()
         coder_form.addWidget(self.coder_profile, 1)
+        # Session 010 (§10): Provider + Model ride the SAME durable
+        # AgentRoleConfig fields — no parallel configuration.
+        coder_form.addWidget(QLabel("Provider:"))
+        self.coder_provider = QLineEdit()
+        self.coder_provider.setPlaceholderText("e.g. openrouter")
+        self.coder_provider.setMaximumWidth(120)
+        coder_form.addWidget(self.coder_provider)
+        coder_form.addWidget(QLabel("Model:"))
+        self.coder_model = QLineEdit()
+        self.coder_model.setPlaceholderText("e.g. deepseek/deepseek-v4.1-flash")
+        self.coder_model.setMaximumWidth(180)
+        coder_form.addWidget(self.coder_model)
         coder_hint = QLabel("Session mode: Automatic — NEW session per task/fix")
         coder_hint.setStyleSheet("color: palette(mid);")
         coder_form.addWidget(coder_hint)
         self.coder_profile.activated.connect(
-            lambda _i: self._apply_role_profile(AgentRole.BUILDER, self.coder_profile)
+            lambda _i: self._apply_role_config(
+                AgentRole.BUILDER, self.coder_profile,
+                self.coder_provider, self.coder_model,
+            )
         )
+        self.coder_provider.editingFinished.connect(self._apply_coder_config)
+        self.coder_model.editingFinished.connect(self._apply_coder_config)
         layout.addWidget(coder_box)
 
         # -- AUDITOR (Hermes, persistent per batch) -----------------------------
@@ -141,6 +158,17 @@ class SimpleModePanel(QWidget):
         auditor_form.addWidget(QLabel("Profile:"))
         self.auditor_profile = self._make_profile_combo()
         auditor_form.addWidget(self.auditor_profile, 1)
+        # Session 010 (§11): Provider + Model on the SAME durable config.
+        auditor_form.addWidget(QLabel("Provider:"))
+        self.auditor_provider = QLineEdit()
+        self.auditor_provider.setPlaceholderText("e.g. openrouter")
+        self.auditor_provider.setMaximumWidth(120)
+        auditor_form.addWidget(self.auditor_provider)
+        auditor_form.addWidget(QLabel("Model:"))
+        self.auditor_model = QLineEdit()
+        self.auditor_model.setPlaceholderText("e.g. deepseek/deepseek-v4.1-flash")
+        self.auditor_model.setMaximumWidth(180)
+        auditor_form.addWidget(self.auditor_model)
         auditor_form.addWidget(QLabel("Session:"))
         self.auditor_session = QComboBox()
         self.auditor_session.addItem("New session for this batch", "")
@@ -150,8 +178,13 @@ class SimpleModePanel(QWidget):
         auditor_form.addWidget(auditor_refresh)
         self.auditor_session.activated.connect(self._on_auditor_session_selected)
         self.auditor_profile.activated.connect(
-            lambda _i: self._apply_role_profile(AgentRole.TASK_AUDITOR, self.auditor_profile)
+            lambda _i: self._apply_role_config(
+                AgentRole.TASK_AUDITOR, self.auditor_profile,
+                self.auditor_provider, self.auditor_model,
+            )
         )
+        self.auditor_provider.editingFinished.connect(self._apply_auditor_config)
+        self.auditor_model.editingFinished.connect(self._apply_auditor_config)
         layout.addWidget(auditor_box)
 
         # -- run controls ---------------------------------------------------
@@ -207,6 +240,35 @@ class SimpleModePanel(QWidget):
         advanced.clicked.connect(self._on_advanced)
         layout.addWidget(advanced)
 
+        # -- Coder recovery override (Session 010, §14/§15) --------------------
+        # One-shot: applies ONLY to the current interrupted task/fix, then the
+        # automatic NEW-session-per-task policy resumes.  Hidden unless the
+        # executor reports a pending override (armed by the recovery handler).
+        self.coder_recovery_box = QGroupBox("CODER RECOVERY OVERRIDE (one-shot)")
+        coder_recovery_form = QHBoxLayout(self.coder_recovery_box)
+        coder_recovery_form.addWidget(
+            QLabel("Interrupted Coder session:")
+        )
+        self.coder_recovery_session = QComboBox()
+        coder_recovery_form.addWidget(self.coder_recovery_session, 1)
+        coder_recovery_refresh = QPushButton("Refresh")
+        coder_recovery_refresh.clicked.connect(self._on_refresh_coder_recovery_sessions)
+        coder_recovery_form.addWidget(coder_recovery_refresh)
+        self.coder_recovery_apply = QPushButton("Resume saved session")
+        self.coder_recovery_apply.clicked.connect(self._on_apply_coder_recovery)
+        coder_recovery_form.addWidget(self.coder_recovery_apply)
+        self.coder_recovery_clear = QPushButton("Restart in NEW session")
+        self.coder_recovery_clear.clicked.connect(self._on_clear_coder_recovery)
+        coder_recovery_form.addWidget(self.coder_recovery_clear)
+        coder_recovery_hint = QLabel(
+            "Applies to the CURRENT task/fix only — afterwards new sessions resume as normal."
+        )
+        coder_recovery_hint.setStyleSheet("color: palette(mid);")
+        coder_recovery_hint.setWordWrap(True)
+        coder_recovery_form.addWidget(coder_recovery_hint, 1)
+        self.coder_recovery_box.setVisible(False)
+        layout.addWidget(self.coder_recovery_box)
+
         self._sync_from_controller()
         self._refresh_recovery()
 
@@ -221,10 +283,33 @@ class SimpleModePanel(QWidget):
         return combo
 
     # -- config → controller (§34) ------------------------------------------
-    def _apply_role_profile(self, role: AgentRole, combo: QComboBox) -> None:
-        profile = combo.currentText().strip()
-        engine = "hermes"
-        self.controller.set_role_config(role, engine=engine, project_profile=profile)
+    def _apply_role_config(
+        self,
+        role: AgentRole,
+        profile_combo: QComboBox,
+        provider_edit: QLineEdit | None = None,
+        model_edit: QLineEdit | None = None,
+    ) -> None:
+        """Write profile AND provider/model into the SAME durable role config."""
+        profile = profile_combo.currentText().strip()
+        fields: dict[str, Any] = {"engine": "hermes", "project_profile": profile}
+        if provider_edit is not None:
+            fields["provider"] = provider_edit.text().strip()
+        if model_edit is not None:
+            fields["model"] = model_edit.text().strip()
+        self.controller.set_role_config(role, **fields)
+
+    def _apply_coder_config(self) -> None:
+        self._apply_role_config(
+            AgentRole.BUILDER, self.coder_profile,
+            self.coder_provider, self.coder_model,
+        )
+
+    def _apply_auditor_config(self) -> None:
+        self._apply_role_config(
+            AgentRole.TASK_AUDITOR, self.auditor_profile,
+            self.auditor_provider, self.auditor_model,
+        )
 
     def _on_repo_changed(self) -> None:
         path = self.repo_edit.text().strip()
@@ -286,6 +371,61 @@ class SimpleModePanel(QWidget):
     def _on_auditor_session_selected(self, index: int) -> None:
         self._bind_selected(AgentRole.TASK_AUDITOR, self.auditor_session, index)
 
+    # -- Coder recovery override (Session 010, §14/§15) ----------------------
+    def _coder_recovery_executor(self):
+        executor = self.controller.executor
+        if executor is None or not hasattr(executor, "coder_recovery_armed"):
+            return None
+        return executor
+
+    def _on_refresh_coder_recovery_sessions(self) -> None:
+        """Profile-scoped session list for the CODER profile (§14)."""
+        self._refresh_sessions(AgentRole.BUILDER, self.coder_recovery_session)
+
+    def _on_apply_coder_recovery(self) -> None:
+        """Arm the ONE-SHOT override with the selected saved session.
+
+        The next Builder operation resumes this session for the CURRENT
+        interrupted task/fix only; afterwards new sessions resume as normal.
+        """
+        executor = self._coder_recovery_executor()
+        if executor is None:
+            return
+        session_id = str(self.coder_recovery_session.currentData() or "").strip()
+        if not session_id:
+            self.show_message(
+                "Select a saved Coder session first (or restart in a NEW session)."
+            )
+            return
+        executor.arm_coder_recovery(session_id)
+        self.coder_recovery_box.setVisible(False)
+        self.show_message(
+            f"Coder recovery armed: {session_id} will be resumed for the current "
+            "task/fix only, then new sessions resume as normal."
+        )
+
+    def _on_clear_coder_recovery(self) -> None:
+        """Drop the override: the interrupted task restarts in a NEW session."""
+        executor = self._coder_recovery_executor()
+        if executor is None:
+            return
+        executor.clear_coder_recovery()
+        self.coder_recovery_box.setVisible(False)
+        self.show_message(
+            "Coder recovery cleared — the interrupted task restarts in a NEW "
+            "session (the normal automatic policy)."
+        )
+
+    def show_coder_recovery(self, interrupted_session_id: str | None = None) -> None:
+        """Expose the one-shot override (called by the recovery affordance)."""
+        if interrupted_session_id:
+            self.coder_recovery_session.blockSignals(True)
+            if self.coder_recovery_session.findText(interrupted_session_id) < 0:
+                self.coder_recovery_session.addItem(interrupted_session_id, interrupted_session_id)
+            self.coder_recovery_session.setCurrentText(interrupted_session_id)
+            self.coder_recovery_session.blockSignals(False)
+        self.coder_recovery_box.setVisible(True)
+
     def _bind_selected(self, role: AgentRole, combo: QComboBox, index: int) -> None:
         session_id = str(combo.itemData(index) or "")
         engine = self.controller.state.resolved_engine_for(role) or (
@@ -340,9 +480,17 @@ class SimpleModePanel(QWidget):
         coder = state.config_for(AgentRole.BUILDER)
         if coder.project_profile:
             self._select_combo_text(self.coder_profile, coder.project_profile)
+        if coder.provider:
+            self.coder_provider.setText(coder.provider)
+        if coder.model:
+            self.coder_model.setText(coder.model)
         auditor = state.config_for(AgentRole.TASK_AUDITOR)
         if auditor.project_profile:
             self._select_combo_text(self.auditor_profile, auditor.project_profile)
+        if auditor.provider:
+            self.auditor_provider.setText(auditor.provider)
+        if auditor.model:
+            self.auditor_model.setText(auditor.model)
         if state.batch is not None:
             self.goal_edit.setPlainText(state.batch.project_brief or "")
 

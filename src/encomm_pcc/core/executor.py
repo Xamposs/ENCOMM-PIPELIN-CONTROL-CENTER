@@ -537,6 +537,12 @@ class Executor:
         self._active = False
         self._stop_requested = False
         self._pause_requested = False
+        #: Session 010 (§14/§15): the ONE-SHOT Coder recovery override.  When
+        #: armed by the operator, exactly the NEXT Builder operation resumes
+        #: this saved session instead of opening a fresh one; it is consumed
+        #: immediately afterwards (success OR failure) and the mandatory
+        #: ``always_new`` policy resumes for every following task.
+        self._coder_recovery_session: str | None = None
         self._recorder = _LaunchRecorder(runner) if runner is not None else None
         self._runner = runner
         # Drivers get the *recording* runner, so "a process really started" is
@@ -586,6 +592,47 @@ class Executor:
     def pause_requested(self) -> bool:
         with self._runner_lock:
             return self._pause_requested
+
+    # -- one-shot Coder recovery override (Session 010, §14/§15) ------------
+    def arm_coder_recovery(self, session_id: str) -> None:
+        """Arm the ONE-SHOT Coder recovery override with a real session id.
+
+        The NEXT Builder operation (build or fix) will resume this session
+        instead of opening a fresh one; after that single operation the
+        override is cleared and the mandatory ``always_new`` policy governs
+        every following task again.  Arming is bookkeeping only — no engine
+        contact happens here.  ``always_new`` itself is never changed.
+        """
+        cleaned = str(session_id or "").strip()
+        if not cleaned:
+            raise ValueError("Coder recovery needs a real session id.")
+        with self._runner_lock:
+            self._coder_recovery_session = cleaned
+        self.events.info(
+            f"Coder recovery armed: the NEXT Builder operation will resume saved "
+            f"session {cleaned}; afterwards new sessions resume as normal "
+            "(one-shot override, 'always_new' unchanged).",
+            source="executor",
+        )
+
+    def coder_recovery_armed(self) -> bool:
+        """True while a one-shot Coder recovery override waits to be consumed."""
+        with self._runner_lock:
+            return self._coder_recovery_session is not None
+
+    def _consume_coder_recovery(self) -> str | None:
+        """Pop the pending override (one-shot: consumed on first use)."""
+        with self._runner_lock:
+            session_id = self._coder_recovery_session
+            self._coder_recovery_session = None
+        return session_id
+
+    def clear_coder_recovery(self) -> bool:
+        """Drop the pending override without consuming it (operator escape)."""
+        with self._runner_lock:
+            armed = self._coder_recovery_session is not None
+            self._coder_recovery_session = None
+        return armed
 
     @property
     def is_running(self) -> bool:
@@ -1085,11 +1132,20 @@ class Executor:
                 message=message,
             )
 
+        # Session 010 (§14/§15): consume a pending ONE-SHOT Coder recovery
+        # override BEFORE the policy decides.  The armed id (a real saved
+        # session) is resumed for exactly this interrupted operation; the
+        # override is gone afterwards and 'always_new' governs every later
+        # build/fix.  The policy itself is never changed.
+        recovery_session = self._consume_coder_recovery()
+
         # BUILDER's `always_new` policy: the decision must be NEW — a build
         # never reuses a Builder session (session isolation is a hard contract).
+        # The one exception is the armed recovery override above: resuming the
+        # operator's saved session for the interrupted operation only.
         self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
-        if decision.action is SessionAction.REUSE:
+        if decision.action is SessionAction.REUSE and recovery_session is None:
             self.events.error(
                 f"Build run for task {task.task_id}: session policy returned REUSE "
                 f"({decision.session_id}); the policy must be 'always_new' — refusing.",
@@ -1105,6 +1161,29 @@ class Executor:
             f"Session policy for {role.value}: {decision.action.value} — {decision.reason}",
             source="executor",
         )
+
+        # Session 010 recovery: an armed override RESUMES the operator's saved
+        # session for this single operation (a resume failure fails the run
+        # honestly — a lost provider session is never papered over).
+        if recovery_session is not None:
+            self.events.info(
+                f"Coder recovery override: resuming saved session {recovery_session} "
+                "for this operation only (one-shot).",
+                source="executor",
+            )
+            try:
+                session = driver.resume_session(recovery_session, request)
+            except (DriverError, DriverNotImplementedError) as exc:
+                message = (
+                    f"Coder recovery: resuming saved Builder session "
+                    f"{recovery_session} failed: {exc}"
+                )
+                self.events.error(message, source="executor")
+                return ExecutionReport(
+                    outcome=ExecutionOutcome.FAILED,
+                    phase=machine.phase,
+                    message=message,
+                )
 
         # Move the pipeline into RUNNING_TASK over legal edges only.
         if machine.phase is PipelinePhase.PLANNING_BATCH:
