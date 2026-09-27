@@ -410,7 +410,10 @@ def test_selector_visibility_follows_engine_discovery(qapp, database) -> None:
 
     controller.set_role_config(AgentRole.ORCHESTRATOR, engine="hermes")
     panel.refresh_from_controller()
-    assert panel.refresh_sessions_button.isEnabled() is False
+    # Session 009: Hermes gained real profile-scoped session discovery, so the
+    # selector is now enabled for the hermes engine too (was False in the
+    # Session 006 contract, when only Codex implemented discovery).
+    assert panel.refresh_sessions_button.isEnabled() is True
     window.close()
 
 

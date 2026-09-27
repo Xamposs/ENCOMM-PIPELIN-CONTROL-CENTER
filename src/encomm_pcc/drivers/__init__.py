@@ -35,6 +35,7 @@ from .generic_cli_config import (
     GenericCliConfigError,
 )
 from .hermes import HermesDriver
+from .hermes_discovery import HermesSessionDiscovery
 from .hermes_cli import (
     EXIT_AGENT_FAILURE,
     EXIT_INTERRUPTED,
@@ -97,6 +98,7 @@ __all__ = [
     "RESULT_MODES",
     "HermesCliError",
     "HermesDriver",
+    "HermesSessionDiscovery",
     "HermesRunOutput",
     "IMPLEMENTED_DRIVERS",
     "NullProcessRunner",

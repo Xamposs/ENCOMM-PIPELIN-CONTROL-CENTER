@@ -49,8 +49,10 @@ from .hermes_cli import (
     child_environment,
     invocation_description,
     parse_stream_json,
+    resolve_executable_path,
 )
 from .process import ProcessSpec
+from .session_discovery import DEFAULT_DISCOVERY_LIMIT, SessionDiscoveryResult
 
 __all__ = ["DEFAULT_PROMPT_TIMEOUT_S", "HermesDriver"]
 
@@ -116,12 +118,45 @@ class HermesDriver(BaseDriver):
 
     @classmethod
     def resolve_executable(cls) -> str | None:
-        """Absolute path of the Hermes launcher, or ``None`` when absent."""
-        for name in cls.executables:
-            found = shutil.which(name)
-            if found:
-                return found
-        return None
+        """Absolute path of the Hermes launcher, or ``None`` when absent.
+
+        Prefers the distribution's own ``hermes\\bin`` shim (verified working
+        on hosts where a rebuilt venv entry-point shim exits 0 with empty
+        stdout), then falls back to the bare ``PATH`` lookup.
+        """
+        return resolve_executable_path(cls.executables)
+
+    def discover_sessions(
+        self,
+        *,
+        workspace_path: str | None = None,
+        limit: int = DEFAULT_DISCOVERY_LIMIT,
+        session_discovery: "HermesSessionDiscovery | None" = None,
+        profile: str | None = None,
+    ) -> SessionDiscoveryResult:
+        """Profile-scoped read-only listing of existing Hermes sessions.
+
+        The profile comes from the caller (the role's configured
+        ``project_profile``) so the result can never contain another
+        profile's sessions.  Zero model calls: the CLI listing subcommand is
+        a local database read.
+        """
+        # Late import: hermes_discovery resolves the driver's executable and
+        # child-environment helpers, so a module-level import would be
+        # circular (hermes_discovery → hermes → hermes_discovery).
+        from .hermes_discovery import HermesSessionDiscovery
+
+        # The driver's own injected runner is the ONLY process path (D-006):
+        # with the production SubprocessRunner the official CLI listing is
+        # used; with NullProcessRunner (tests, hand-built controllers) the
+        # CLI path fails softly and discovery degrades to the read-only
+        # session store — never launching anything by surprise.
+        discovery = session_discovery or HermesSessionDiscovery(runner=self._runner)
+        return discovery.discover_sessions(
+            profile=profile,
+            workspace_path=workspace_path,
+            limit=limit,
+        )
 
     # -- session lifecycle -------------------------------------------------
     def start_session(self, request: SessionRequest) -> DriverSession:

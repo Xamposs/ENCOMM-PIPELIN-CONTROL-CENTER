@@ -131,6 +131,9 @@ class RolePanel(QGroupBox):
     changed = Signal(object, dict)
     #: (role, external_session_id or "" for NEW) — window binds/clears.
     session_selected = Signal(object, str)
+    #: Session 009 (§15): the profile changed and a stored binding no longer
+    #: matches it — the window clears the inactive binding.
+    stale_profile_binding = Signal(object)
     #: (role,) — window runs driver discovery and calls update_session_options.
     sessions_refresh_requested = Signal(object)
 
@@ -163,15 +166,23 @@ class RolePanel(QGroupBox):
         form.addRow("Engine", self.engine_combo)
 
         # -- profile ------------------------------------------------------
-        self.profile_edit = QLineEdit()
-        self.profile_edit.setPlaceholderText("profile / project name")
+        # Session 009 (§10): a real discovered-profile dropdown when profile
+        # discovery succeeded; manual entry remains the fallback (an editable
+        # combo still accepts free text, so nothing is lost).
         if self._profiles:
-            completer = QCompleter(list(self._profiles), self.profile_edit)
-            completer.setCaseSensitivity(Qt.CaseInsensitive)
-            completer.setFilterMode(Qt.MatchContains)
-            self.profile_edit.setCompleter(completer)
+            self.profile_edit = QComboBox()
+            self.profile_edit.setEditable(True)
+            self.profile_edit.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            for _profile_name in self._profiles:
+                self.profile_edit.addItem(_profile_name)
             self.profile_edit.setToolTip(
                 "Discovered Hermes profiles: " + ", ".join(self._profiles)
+            )
+        else:
+            self.profile_edit = QLineEdit()
+            self.profile_edit.setPlaceholderText("profile / project name")
+            self.profile_edit.setToolTip(
+                "No profiles discovered — type the Hermes profile name manually."
             )
         form.addRow(_PROFILE_LABEL[role], self.profile_edit)
 
@@ -271,7 +282,15 @@ class RolePanel(QGroupBox):
     # -- wiring ----------------------------------------------------------
     def _connect_signals(self) -> None:
         self.engine_combo.currentIndexChanged.connect(self._emit_changed)
-        self.profile_edit.editingFinished.connect(self._emit_changed)
+        if isinstance(self.profile_edit, QComboBox):
+            # Same focus-out contract as the QLineEdit it replaces, plus an
+            # explicit signal when the operator picks a row.
+            line_edit = self.profile_edit.lineEdit()
+            if line_edit is not None:
+                line_edit.editingFinished.connect(self._emit_changed)
+            self.profile_edit.activated.connect(self._emit_changed)
+        else:
+            self.profile_edit.editingFinished.connect(self._emit_changed)
         if self.provider_edit is not None:
             self.provider_edit.editingFinished.connect(self._emit_changed)
         if self.model_edit is not None:
@@ -405,6 +424,11 @@ class RolePanel(QGroupBox):
             for descriptor in self._session_descriptors:
                 if binding is not None and descriptor.session_id == binding.external_session_id:
                     continue  # already shown as the bound row
+                # Session 009 (§19): a discovered session is offered only for
+                # the profile it belongs to — never for another profile.
+                descriptor_profile = str((descriptor.metadata or {}).get("profile") or "")
+                if descriptor_profile and descriptor_profile != self._profile_text().strip():
+                    continue
                 label = descriptor.label(90)
                 self.session_combo.addItem(label, descriptor.session_id)
         finally:
@@ -418,17 +442,44 @@ class RolePanel(QGroupBox):
     def _emit_changed(self, *_args: Any) -> None:
         if self._loading:
             return
+        previous_profile = str(
+            self._controller.role_config(self.role).project_profile or ""
+        )
+        new_profile = self._profile_text().strip()
         self.changed.emit(self.role, self.values())
         self._rebuild_session_combo()
         self._update_session_enablement()
         self._update_generic_cli_visibility()
+        # Session 009 (§15): changing the profile must invalidate any binding
+        # recorded under the previous profile — never silently reuse it.
+        if new_profile != previous_profile:
+            self.stale_profile_binding.emit(self.role)
         self._update_capability_hint()
+
+    # -- profile field helpers (Session 009) --------------------------------
+    def _profile_text(self) -> str:
+        """The current profile text (combo or line edit)."""
+        if isinstance(self.profile_edit, QComboBox):
+            return self.profile_edit.currentText()
+        return self.profile_edit.text()
+
+    def _set_profile_text(self, value: str) -> None:
+        """Set the profile text without emitting signals (caller guards)."""
+        if isinstance(self.profile_edit, QComboBox):
+            index = self.profile_edit.findText(value)
+            if index >= 0:
+                self.profile_edit.setCurrentIndex(index)
+            else:
+                # Manual/fallback entry: replace the line-edit text in place.
+                self.profile_edit.setEditText(value)
+            return
+        self.profile_edit.setText(value)
 
     # -- data -------------------------------------------------------------
     def values(self) -> dict[str, Any]:
         data: dict[str, Any] = {
             "engine": self.engine_combo.currentData() or "",
-            "project_profile": self.profile_edit.text().strip(),
+            "project_profile": self._profile_text().strip(),
         }
         if self.provider_edit is not None:
             data["provider"] = self.provider_edit.text().strip()
@@ -445,7 +496,7 @@ class RolePanel(QGroupBox):
             engine = str(data.get("engine", ""))
             index = self.engine_combo.findData(engine)
             self.engine_combo.setCurrentIndex(index if index >= 0 else self.engine_combo.count() - 1)
-            self.profile_edit.setText(str(data.get("project_profile", "")))
+            self._set_profile_text(str(data.get("project_profile", "")))
             if self.provider_edit is not None:
                 self.provider_edit.setText(str(data.get("provider", "")))
             if self.model_edit is not None:

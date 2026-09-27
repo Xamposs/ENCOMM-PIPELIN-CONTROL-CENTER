@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -69,6 +70,35 @@ _MAX_RETAINED_EVENTS = 500
 
 class HermesCliError(RuntimeError):
     """The CLI contract was violated: bad arguments or unparsable output."""
+
+
+# -- executable resolution --------------------------------------------------
+#: The Hermes distribution's own shim directory (``hermes\bin``), checked
+#: before the bare ``PATH`` lookup.  Session 009 evidence: a rebuilt
+#: venv-entry-point ``hermes.exe`` on this host exits 0 with **empty stdout**
+#: for every command that runs app machinery, while the distribution shim in
+#: the install's ``bin`` directory works.  Preferring the known-good shim
+#: first keeps driver launches correct on such hosts; the ``PATH`` lookup
+#: remains the fallback (and the only path on machines without that shim).
+_PREFERRED_SHIM: str | None = os.environ.get("LOCALAPPDATA") and os.path.join(
+    str(os.environ.get("LOCALAPPDATA")), "hermes", "bin", "hermes.exe"
+)
+
+
+def resolve_executable_path(executables: Iterable[str]) -> str | None:
+    """Resolve the Hermes launcher: known-good distribution shim, then PATH.
+
+    ``executables`` is the driver's ordered name list (``hermes``,
+    ``hermes.exe``, …) used for the ``shutil.which`` fallback.  Read-only;
+    never launches anything.
+    """
+    if _PREFERRED_SHIM and os.path.isfile(_PREFERRED_SHIM):
+        return _PREFERRED_SHIM
+    for name in executables:
+        found = shutil.which(name)
+        if found:
+            return found
+    return None
 
 
 # -- child environment ---------------------------------------------------------

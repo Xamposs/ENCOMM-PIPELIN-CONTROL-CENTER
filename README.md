@@ -8,7 +8,7 @@ engine CLIs (Hermes, Codex, or any compatible command-line agent), with
 SQLite persistence, restart recovery, and strict fail-closed parsing of every
 model answer.
 
-**Current version: 0.8.0 — Windows release candidate.**
+**Current version: 0.9.0 — Simple Mode + Continuous Run (pre-release; live acceptance pending).**
 
 - **Works today:** role-based mixed-engine batches (e.g. Codex plans → Hermes
   builds → Hermes audits → Codex final audit), autonomous multi-task batches

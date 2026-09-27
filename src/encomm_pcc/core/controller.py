@@ -227,12 +227,17 @@ class PipelineController:
         title: str | None = None,
         workspace_path: str | None = None,
         metadata: dict | None = None,
+        profile: str | None = None,
     ) -> ExternalSessionBinding:
         """Bind a discovered external session to ``role`` — never contacts the engine.
 
         The binding is durable state on the role config (persisted with the
         rest of the configuration).  No model call happens here; the engine is
         contacted only when the role actually executes.
+
+        Session 009 (§19): the role's configured profile is recorded with the
+        binding so validity covers ``engine AND profile`` — a session from
+        ``profile_a`` can never be resumed under ``profile_b``.
         """
         extra = dict(metadata or {})
         binding = ExternalSessionBinding(
@@ -243,13 +248,39 @@ class PipelineController:
         )
         config = self.state.config_for(role)
         config.set_external_session_binding(binding)
+        binding_profile = str(
+            profile if profile is not None else config.project_profile
+        ).strip()
+        extra_out = dict(config.extra)
+        extra_out["external_session_profile"] = binding_profile
+        config.extra = extra_out
         self._persist()
         self.events.info(
             f"{role.value}: external session bound to driver '{driver_id}' "
-            f"({external_session_id}). No engine contact was made.",
+            f"(profile '{binding_profile or 'none'}', {external_session_id}). "
+            "No engine contact was made.",
             source="controller",
         )
         return binding
+
+    def binding_profile_mismatch(
+        self, config: AgentRoleConfig
+    ) -> ExternalSessionBinding | None:
+        """The stored binding when it is STALE under §19's rule, else ``None``.
+
+        Returns the binding (truthy) only when the currently configured
+        profile differs from the profile recorded at bind time.  An
+        engine-valid binding recorded under a different profile must never be
+        resumed; callers clear it or render it inactive.
+        """
+        binding = config.external_session_binding()
+        if binding is None:
+            return None
+        recorded = str((config.extra or {}).get("external_session_profile") or "").strip()
+        current = str(config.project_profile or "").strip()
+        if recorded and current and recorded != current:
+            return binding
+        return None
 
     def clear_external_session(self, role: AgentRole) -> bool:
         """Clear the role's external binding (the NEW SESSION operation)."""

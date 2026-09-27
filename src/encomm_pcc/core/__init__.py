@@ -4,6 +4,7 @@ Qt-free.  The UI is a consumer of this layer, never a peer of it.
 """
 
 from .batch_runner import BatchOutcome, BatchRunReport, BatchRunner, StepRecord
+from .continuous_runner import ContinuousRunReport, ContinuousRunner
 from .config import (
     APP_NAME,
     DATA_DIR_ENV,
@@ -108,6 +109,8 @@ __all__ = [
     "BatchOutcome",
     "BatchRunReport",
     "BatchRunner",
+    "ContinuousRunReport",
+    "ContinuousRunner",
     "CONFIG_EXPORT_FORMAT",
     "CONFIG_EXPORT_VERSION",
     "ConfigExchangeError",

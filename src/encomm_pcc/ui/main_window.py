@@ -11,7 +11,7 @@ through :func:`~encomm_pcc.ui.worker.start_executor_worker`, and the resulting
 
 from __future__ import annotations
 
-from typing import Sequence
+from typing import Any, Sequence
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
@@ -19,8 +19,10 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QMainWindow,
+    QPushButton,
     QScrollArea,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +35,7 @@ from ..drivers import PLANNED_DRIVERS
 from .diagnostics_panel import DiagnosticsPanel
 from .history_panel import HistoryPanel
 from .panels import BatchPanel, FinalAuditPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
+from .simple_mode import SimpleModePanel
 from .worker import start_executor_worker
 
 __all__ = ["MainWindow"]
@@ -116,10 +119,28 @@ class MainWindow(QMainWindow):
         splitter.setStretchFactor(2, 1)
         splitter.setStretchFactor(3, 2)
 
-        central = QWidget()
-        central_layout = QVBoxLayout(central)
-        central_layout.addWidget(splitter)
-        self.setCentralWidget(central)
+        # The full detailed window stays intact as ADVANCED / DETAILS (§7, §45).
+        self.advanced_view = QWidget()
+        advanced_layout = QVBoxLayout(self.advanced_view)
+        advanced_layout.setContentsMargins(0, 0, 0, 0)
+        advanced_layout.addWidget(splitter)
+        simple_again = QPushButton("Simple Mode")
+        simple_again.clicked.connect(self._show_simple_mode)
+        advanced_layout.addWidget(simple_again)
+
+        # Session 009 (§7): SIMPLE MODE is the DEFAULT surface.
+        self.simple_panel = SimpleModePanel(controller, profiles=profiles, parent=self)
+        self.simple_panel.request_advanced = self._show_advanced_mode
+        self.simple_panel.request_start = self._on_simple_start
+        self.simple_panel.request_continue = self._on_simple_continue
+        self.simple_panel.request_pause = self._on_pause
+        self.simple_panel.request_stop = self._on_stop
+        self._simple_continuous = False
+
+        self.mode_stack = QStackedWidget()
+        self.mode_stack.addWidget(self.simple_panel)  # index 0 — default
+        self.mode_stack.addWidget(self.advanced_view)  # index 1
+        self.setCentralWidget(self.mode_stack)
 
         self.statusBar().showMessage(self._idle_status())
 
@@ -150,6 +171,7 @@ class MainWindow(QMainWindow):
         for panel in self.role_panels.values():
             panel.session_selected.connect(self._on_session_selected)
             panel.sessions_refresh_requested.connect(self._on_sessions_refresh)
+            panel.stale_profile_binding.connect(self._on_stale_profile_binding)
 
     def _subscribe_to_events(self) -> None:
         self.controller.events.subscribe(self._on_event)
@@ -218,7 +240,9 @@ class MainWindow(QMainWindow):
         """Run driver discovery for ``role``'s engine and render the options.
 
         Read-only and offline: discovery never contacts the engine's model and
-        never launches a process.
+        never launches a process.  Session 009 (§15): Hermes discovery is
+        profile-scoped — the role's configured profile is passed through so
+        only that profile's sessions are listed.
         """
         panel = self.role_panels[role]
         engine = self.controller.state.resolved_engine_for(role)
@@ -235,8 +259,22 @@ class MainWindow(QMainWindow):
             )
             return
         workspace = self.controller.state.workspace.repo_path or None
+        profile = str(
+            self.controller.state.config_for(role).project_profile or ""
+        ).strip()
+        result: Any
         try:
-            result = discoverer(workspace_path=workspace)
+            result = discoverer(workspace_path=workspace, profile=profile)
+        except TypeError:
+            # A driver whose discovery has no profile parameter (Codex).
+            try:
+                result = discoverer(workspace_path=workspace)
+            except Exception as exc:  # noqa: BLE001 - discovery must never break the UI
+                self.controller.events.error(
+                    f"{role.value}: session discovery failed: {exc}", source="ui"
+                )
+                panel.update_session_options(None, [])
+                return
         except Exception as exc:  # noqa: BLE001 - discovery must never break the UI
             self.controller.events.error(
                 f"{role.value}: session discovery failed: {exc}", source="ui"
@@ -244,10 +282,34 @@ class MainWindow(QMainWindow):
             panel.update_session_options(None, [])
             return
         panel.update_session_options(result, result.sessions)
+        scope = f" for profile '{profile}'" if profile else ""
         self.controller.events.info(
             f"{role.value}: session discovery via {result.mechanism or engine} "
-            f"found {len(result.sessions)} session(s).",
+            f"found {len(result.sessions)} session(s){scope}.",
             source="ui",
+        )
+
+    def _on_stale_profile_binding(self, role: AgentRole) -> None:
+        """Session 009 (§15): drop a binding recorded under another profile."""
+        config = self.controller.state.config_for(role)
+        binding = config.external_session_binding()
+        if binding is None:
+            return
+        recorded = str((config.extra or {}).get("external_session_profile") or "").strip()
+        current = str(config.project_profile or "").strip()
+        if not (recorded and current and recorded != current):
+            return
+        self.controller.clear_external_session(role)
+        self.role_panels[role]._rebuild_session_combo()  # noqa: SLF001
+        self.controller.events.warning(
+            f"{role.value}: session binding {binding.external_session_id} was recorded "
+            f"under profile '{recorded}' and is inactive under '{current}' — "
+            "the next run creates a new session.",
+            source="ui",
+        )
+        self.statusBar().showMessage(
+            f"{role.value}: profile changed — the previous session binding was "
+            "cleared (sessions never cross profiles)."
         )
 
     def _on_session_selected(self, role: AgentRole, external_session_id: str) -> None:
@@ -335,6 +397,24 @@ class MainWindow(QMainWindow):
         result = self.controller.request_stop()
         self._after_control(result.message, result.phase)
 
+    # -- Simple / Advanced mode switching (Session 009 §7) -----------------
+    def _show_advanced_mode(self) -> None:
+        self.mode_stack.setCurrentWidget(self.advanced_view)
+
+    def _show_simple_mode(self) -> None:
+        self.simple_panel.refresh()
+        self.mode_stack.setCurrentWidget(self.simple_panel)
+
+    def _on_simple_start(self, brief: str, size: int, continuous: bool) -> None:
+        """SIMPLE START: one brief, one size, optional continuous run."""
+        self._simple_continuous = bool(continuous)
+        self._on_plan_and_start(brief, size)
+
+    def _on_simple_continue(self, continuous: bool) -> None:
+        """RECOVERY CONTINUE: resume from durable state (never auto-run)."""
+        self._simple_continuous = bool(continuous)
+        self._on_resume_batch()
+
     def _on_plan_and_start(self, brief: str, size: int) -> None:
         """Session 004: ONE autonomous batch run, off the UI thread."""
         executor = self.controller.executor
@@ -414,10 +494,13 @@ class MainWindow(QMainWindow):
                 f"Final audit finished — {report.summary()}", source="ui"
             )
             if report.outcome.value == "PASSED":
-                self.statusBar().showMessage(
-                    "FINAL AUDIT: PASS — batch COMPLETE. The next batch plan is "
-                    "persisted; press START NEXT BATCH when ready (nothing auto-runs)."
-                )
+                if self._simple_continuous:
+                    self._continuous_handoff()
+                else:
+                    self.statusBar().showMessage(
+                        "FINAL AUDIT: PASS — batch COMPLETE. The next batch plan is "
+                        "persisted; press START NEXT BATCH when ready (nothing auto-runs)."
+                    )
             elif report.outcome.value == "NEEDS_FIX":
                 self.statusBar().showMessage(
                     "FINAL AUDIT: NEEDS_FIX — findings persisted; operator handling "
@@ -429,6 +512,41 @@ class MainWindow(QMainWindow):
                 )
             return
         self.statusBar().showMessage("Final audit finished without a report.")
+
+    def _continuous_handoff(self) -> None:
+        """Continuous Run (§25): after a Final PASS, materialise and run the
+        next batch with ZERO planning calls (the persisted pending plan)."""
+        executor = self.controller.executor
+        if executor is None:
+            return
+        if executor.stop_requested or executor.pause_requested:
+            self.statusBar().showMessage(
+                "Continuous Run: stopping/pausing at the batch boundary as requested."
+            )
+            return
+        from ..core.executor import StartNextBatchReport
+
+        handed = executor.start_next_batch()
+        if isinstance(handed, StartNextBatchReport) and handed.ok:
+            self.controller.events.info(
+                f"CONTINUOUS: next batch materialised with zero planning calls "
+                f"({handed.task_count} tasks) — running it now.",
+                source="ui",
+            )
+            brief = (
+                self.controller.state.batch.project_brief
+                if self.controller.state.batch is not None
+                else ""
+            )
+            size = (
+                self.controller.state.batch.size
+                if self.controller.state.batch is not None
+                else 5
+            )
+            self._start_batch_worker(brief=brief, size=size, resume=False)
+        else:
+            message = getattr(handed, "message", "handoff refused")
+            self.statusBar().showMessage(f"Continuous Run stopped: {message}")
 
     def _on_start_next_batch(self) -> None:
         """START NEXT BATCH: deterministic handoff — never an AI call."""
