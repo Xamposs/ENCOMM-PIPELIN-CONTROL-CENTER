@@ -1243,3 +1243,85 @@ explicitly on resume.
 pinned offline by
 `test_restart_between_tasks_resumes_the_shared_auditor_session` (found by
 Session 008 acceptance, fixed before the acceptance re-run).
+
+
+---
+
+## D-048 — Simple Mode is the default operator surface, writing the SAME durable role configs
+
+**Date:** Session 009
+**Status:** Accepted
+
+**Context.** The Session 008 operator experience exposed the full
+four-panel grid on launch. The v0.9 brief mandated a Simple Mode that a
+non-expert can drive (project, goal, three roles, one START button) without
+removing any Advanced capability.
+
+**Decision.** The main window becomes a mode stack: `SimpleModePanel` at
+index 0 (default), the Session-008 advanced window at index 1. Simple Mode
+controls write the SAME `AgentRoleConfig` objects through
+`PipelineController.set_role_config` — there is no parallel configuration
+model, no import/export bridge, no sync step. In Session 010 the Simple
+CODER/AUDITOR boxes gained Provider/Model fields that flow into the same
+durable configs and are read back by `_sync_from_controller`.
+
+**Consequence.** One source of truth for configuration; mode switching
+never loses settings; pinned by `tests/test_session_010.py` §21
+(persistence + round-trip through the real panel).
+
+---
+
+## D-049 — Continuous execution is owned by the core ContinuousRunner, reached only through worker actions
+
+**Date:** Session 010
+**Status:** Accepted
+
+**Context.** Session 009's `ContinuousRunner` existed in core, but the
+Simple START path ran a single batch and the UI-side `_continuous_handoff()`
+then re-planned via `_start_batch_worker(resume=False)` — a duplicated loop
+in the UI AND a second planning call, violating the zero-AI handoff
+invariant. The reviewer flagged both.
+
+**Decision.** The UI owns no loop logic. `ExecutorWorker` gains the actions
+`continuous` (fresh) and `continuous_resume` (from durable state), which
+delegate to the core `ContinuousRunner` on the worker thread.
+`MainWindow._start_continuous_worker()` is the only entry point and
+`_on_continuous_finished()` translates `ContinuousStopReason` values into
+operator language (§8 stop reasons). The UI-owned handoff was deleted.
+Found and fixed en route: `start_executor_worker()` silently dropped
+`resume`/`project_brief`/`batch_size`/`next_batch_size` (TypeError on every
+advanced PLAN + START BATCH click), and `ContinuousRunner` mislabeled a
+mid-batch STOP as PAUSED because `BatchRunner` clears the stop flag at the
+boundary — the STOPPED outcome is now the deterministic stop signal.
+
+**Consequence.** Exactly one planning call per continuous run with zero-AI
+next-batch handoffs (pinned by the real MainWindow→worker→core test);
+boundary stop/pause semantics unchanged; stop reasons honest.
+
+---
+
+## D-050 — The Coder recovery override is ONE-SHOT and never mutates the always_new policy
+
+**Date:** Session 010
+**Status:** Accepted
+
+**Context.** `always_new` (D-022) refuses to resume a Builder session. When
+a build is interrupted (crash, provider loss), the saved session id stays in
+SQLite and is otherwise unreachable — the operator had no sanctioned way to
+continue the interrupted work.
+
+**Decision.** The Executor gains `arm_coder_recovery(session_id)` /
+`coder_recovery_armed()` / `clear_coder_recovery()` plus a private consume.
+The override is armed explicitly (Simple Mode recovery affordance
+preselecting the saved interrupted session) and is consumed by exactly ONE
+Builder operation, checked BEFORE the session-policy decision; it bypasses
+the REUSE refusal once, leaves the `always_new` policy value untouched, and
+an `always_new` run with the override still honours the policy after
+consumption. If the provider-side resume fails, the run fails honestly and
+the override is still consumed. The override is process-scoped — it is not
+persisted.
+
+**Consequence.** Interrupted Builder work is resumable by explicit operator
+decision only; no silent policy drift; pinned by the Session 010 one-shot
+matrix (armed→consumed exactly once; restart-in-NEW clears it; resume
+failure honest).

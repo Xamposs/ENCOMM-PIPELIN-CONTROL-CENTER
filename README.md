@@ -10,11 +10,15 @@ model answer.
 
 **Current version: 0.9.0 — Simple Mode + Continuous Run (pre-release; live acceptance pending).**
 
-- **Works today:** role-based mixed-engine batches (e.g. Codex plans → Hermes
-  builds → Hermes audits → Codex final audit), autonomous multi-task batches
-  with the audit/fix loop, one-call final audit + next-batch handoff,
-  restart/recovery at every phase, config export/import, run history, and a
-  Windows packaged build with a self-test mode.
+- **Works today:** Simple Mode (default surface) — enter the goal, pick an
+  engine for Architect / Coder / Auditor, tick CONTINUOUS and press START:
+  batch after batch runs autonomously with the audit/fix loop, an automatic
+  final audit after each batch, and a zero-AI handoff to the next batch
+  (one planning call for the whole run). Advanced Mode keeps every
+  fine-grained control: role-based mixed-engine batches, restart/recovery at
+  every phase, the one-shot Coder recovery override, session discovery and
+  binding, config export/import, run history, and a Windows packaged build
+  with a self-test mode.
 - **Operator guide:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 - **What is deliberately not implemented:** see
   [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5.
@@ -63,19 +67,25 @@ runtime, and missing engines show as unavailable instead of crashing.
 
 Override with the `ENCOMM_PCC_DATA_DIR` environment variable.
 
-## Basic workflow
+## Basic workflow (Simple Mode)
 
-1. Set the **WORKSPACE** path (a git repository is strongly recommended).
-2. Check **DIAGNOSTICS**: data dir, database, workspace readiness, engines.
-3. Configure the four roles (ORCHESTRATOR / BUILDER / TASK_AUDITOR /
-   FINAL_AUDITOR) — engines are configuration, not code.
-4. Enter the **PROJECT BRIEF**, choose the batch size (1–5), press
-   **PLAN + START BATCH**.
-5. The batch runs autonomously (fresh Builder → Task Auditor → capped fix
-   loop → next task). Pause/Stop take effect at safe boundaries.
-6. At `READY_FOR_FINAL_AUDIT`, press **RUN FINAL AUDIT** — one call returns
-   the cumulative verdict AND the next batch plan.
-7. On PASS: **VIEW NEXT TASKS**, then **START NEXT BATCH** (zero AI calls).
+1. Set the **WORKSPACE** name + path (a git repository is strongly
+   recommended) and read the **DIAGNOSTICS** line.
+2. **ARCHITECT** (plans and final-audits; one Codex thread), **CODER**
+   (builds each task; fresh session every time), **AUDITOR** (checks each
+   task; one session for the batch): pick engine, Hermes profile,
+   provider, model — all from Simple Mode; they write the same durable role
+   configuration as Advanced Mode.
+3. Enter the **PROJECT GOAL** (the brief the Architect plans from), choose
+   tasks per batch (1–5).
+4. Press **START**. Leave **CONTINUOUS** ticked for batch-after-batch
+   operation: each batch ends with an automatic final audit; a PASS hands
+   off to the next batch with zero AI calls. PAUSE and STOP take effect at
+   safe boundaries and are reported in plain language.
+5. If a Builder session was lost provider-side (e.g. after a machine
+   restart), the **CODER RECOVERY OVERRIDE** offers to resume the saved
+   session for exactly one operation — an explicit operator decision, never
+   automatic.
 
 Full instructions with every button:
 [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
@@ -87,7 +97,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-The suite (570+ tests) never touches a network or a real engine. Real
+The suite (600+ tests) never touches a network or a real engine. Real
 end-to-end runs are separate, explicitly invoked scripts:
 
 ```bash
@@ -98,8 +108,11 @@ python scripts/session_008_acceptance.py --profile <hermes-profile>     # real m
 python scripts/session_008_config_roundtrip.py                          # config export/import round trip
 ```
 
-## Known v0.8 limitations
+## Known limitations (v0.9)
 
+- **Live acceptance of the Session 009/010 Simple Mode + Continuous path is
+  pending** — proven by 604 offline tests; the real Codex + Hermes run is the
+  gate for 1.0.0.
 - No mid-prompt cancellation (boundary-only pause/stop; a running prompt
   finishes and persists first).
 - Read-only planning/audit guards are vacuous on non-git workspaces.
@@ -109,9 +122,8 @@ python scripts/session_008_config_roundtrip.py                          # config
 - Config export/import is a core API surface, not a UI dialog.
 - Restart mid-batch rebinds the shared Task Auditor session from SQLite; if
   the provider lost the session, the run fails explicitly instead of
-  silently starting a new one.
-- opencode's free-tier models require opencode ≥ 1.18.0 (the Session 008
-  Generic CLI proof used an already-configured provider instead).
+  silently starting a new one — and the one-shot Coder recovery override is
+  the operator's tool for the Builder side.
 
 ---
 
@@ -119,7 +131,7 @@ python scripts/session_008_config_roundtrip.py                          # config
 
 | File | Purpose |
 |---|---|
-| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | **Operator guide** — every section and button |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | **Operator guide** — Simple Mode first, then Advanced |
 | [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) | Canonical handoff file (read first in every dev session) |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | The actual architecture, including deliberate non-goals |
 | [docs/DECISIONS.md](docs/DECISIONS.md) | Architecture decisions with reasons |
