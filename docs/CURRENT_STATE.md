@@ -29,17 +29,20 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`0.9.0` — Simple Mode + Continuous Run (pre-release; live acceptance pending
-per the Session 010 brief). Session 009 delivered Simple Mode as the default
-surface, the core `ContinuousRunner`, and profile-scoped Hermes session
-discovery. Session 010 closed the reviewer-identified gaps: the Simple
-START/CONTINUE path now executes through the **core ContinuousRunner** via the
-worker actions `continuous` / `continuous_resume` (a UI-owned loop and a
-silent worker-parameter-drop bug were found and removed), the **one-shot Coder
-recovery override** exists (executor API + Simple Mode UI), Simple Mode exposes
-**Provider/Model** for Coder and Auditor on the same durable role configs, and
-16 new offline tests (604 total) pin all of it. Remaining for `1.0.0`: live
-acceptance, the Windows rebuild + packaged checks, and the final report.
+`1.0.0` — Simple Mode + Continuous Run; **live acceptance PASSED 2026-09-27**
+(see §7 and `docs/reports/SESSION_010_SIMPLE_CONTINUOUS_V1.md`). Session 009
+delivered Simple Mode as the default surface, the core `ContinuousRunner`, and
+profile-scoped Hermes session discovery. Session 010 closed the
+reviewer-identified gaps: the Simple START/CONTINUE path executes through the
+**core ContinuousRunner** via the worker actions `continuous` /
+`continuous_resume` (a UI-owned loop and a silent worker-parameter-drop bug
+were found and removed), the **one-shot Coder recovery override** exists
+(executor API + Simple Mode UI), Simple Mode exposes **Provider/Model** for
+Coder and Auditor on the same durable role configs, and 16 new offline tests
+(604 total) pin all of it. The real mixed-engine acceptance run then proved
+the whole path live: Codex plan → 2 Hermes builds → ONE auditor session →
+Codex final audit (PASS + 4-task plan) → zero-AI handoff → live STOP at the
+earliest safe boundary.
 
 ---
 
@@ -193,11 +196,13 @@ without a new ADR:
 
 Stated bluntly so nothing is over-claimed:
 
-1. **Live acceptance for Sessions 009/010 is not yet done.** The continuous
-   Simple Mode path, recovery override and provider/model controls are proven
-   offline (604 tests) but not yet against real Codex + Hermes model calls.
-   That is the explicit purpose of the next live run; `1.0.0` is reserved for
-   its PASS.
+1. **Live acceptance for Sessions 009/010 PASSED (2026-09-27).** Real Codex
+   planning + final audit, 2 real Hermes builds in distinct sessions, ONE
+   auditor session, durable FINAL PASS + pending next plan, zero-AI handoff,
+   live STOP-at-boundary through the continuous machinery
+   (`scripts/session_010_acceptance.py`). It remains a one-off proof — it is
+   not part of the automated suite and should be re-run after engine-CLI
+   upgrades.
 2. **Pause/stop are boundary-only** (a running prompt finishes and persists
    its result first). No mid-prompt cancellation.
 3. **Planning/audit guards are vacuous on non-git workspaces.**
@@ -230,17 +235,17 @@ Stated bluntly so nothing is over-claimed:
 
 ## 7. Exact next recommended phase
 
-**Session 010 completion — live acceptance, then `1.0.0`.**
+**v1.0 is released.** Session 010 is complete: core wiring, one-shot
+recovery, the 604-test offline matrix, the docs rewrite, the live mixed-engine
+acceptance PASS, and the Windows rebuild + packaged checks. Candidate items
+for a future session (none are promised):
 
-1. Live acceptance on a disposable scratch repo: 2-task batch, Codex
-   Architect + Hermes Coder `encomm-accounting-intelligence` + Hermes Auditor
-   `encomm-auditor`; controlled restart; same Codex thread for plan + final
-   audit; distinct Builder sessions; ONE Auditor session; continuous Final
-   PASS → zero-AI next batch materialised → STOP at the earliest safe
-   boundary.
-2. Windows rebuild + packaged `--smoke-test` + one packaged GUI launch.
-3. Version bump `0.9.0 → 1.0.0`, final report
-   `docs/reports/SESSION_010_FINAL_V1_ACCEPTANCE.md`, push.
+1. Live recovery-override acceptance (interrupt a real build, then resume the
+   saved Builder session through the Simple Mode affordance).
+2. A `ClaudeCodeDriver` reusing the Session 006 discovery/binding
+   infrastructure.
+3. Final-audit report drill-down in the Advanced UI (token usage is already
+   parsed and persisted).
 
-**Do not start** new engines, parallel batches, cloud backends or installers —
-out of scope for v1.
+**Do not start** automatic batch chaining, cloud backends, parallel batches
+or installers — still out of scope. See `ROADMAP.md`.

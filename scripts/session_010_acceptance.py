@@ -47,6 +47,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from encomm_pcc.core import (  # noqa: E402
+    BatchRunner,
     ContinuousRunner,
     EventLog,
     Executor,
@@ -54,6 +55,7 @@ from encomm_pcc.core import (  # noqa: E402
     ProfileDiscoveryResult,
     discover_profiles,
 )
+from encomm_pcc.core.continuous_runner import ContinuousStopReason  # noqa: E402
 from encomm_pcc.domain import (  # noqa: E402
     AgentRole,
     BatchStatus,
@@ -224,6 +226,36 @@ def build_control_center(*, scratch: Path, repo: Path, args) -> dict:
     }
 
 
+def reopen_control_center(*, scratch: Path, repo: Path, args) -> dict:
+    """A REAL restart: fresh controller over the same acceptance DB.
+
+    Nothing is auto-run: constructing a controller never launches a process.
+    """
+    from encomm_pcc.app import restore_state
+
+    data_dir = scratch / "data"
+    database = Database(data_dir / "pipeline_control_center.db").open()
+    events = EventLog(database)
+    state = restore_state(database)
+    controller = PipelineController(database=database, event_log=events, state=state)
+    executor = Executor(
+        controller,
+        runner=SubprocessRunner(),
+        database=database,
+        event_log=events,
+        profile_discovery=lambda **kwargs: DISCOVERY,
+    )
+    controller.attach_executor(executor)
+    return {
+        "scratch": scratch,
+        "repo": repo,
+        "data_dir": data_dir,
+        "database": database,
+        "controller": controller,
+        "executor": executor,
+    }
+
+
 def dump_failing_steps(report, evidence_dir: Path) -> None:
     """Preserve failing raw output (evidence-retry rule)."""
     try:
@@ -274,6 +306,52 @@ def dump_final_audit(fa, evidence_dir: Path) -> None:
         pass
 
 
+def finalize_acceptance(args) -> int:
+    """Steps 6–8 on a preserved scratch that already PASSED the final audit
+    (evidence-retry rule: legs 1–5 model operations are durable in the
+    scratch DB — never repeated)."""
+    started = time.monotonic()
+    banner("SESSION 010 — FINALIZE from preserved scratch (final audit already PASSED)")
+
+    global DISCOVERY
+    DISCOVERY = discover_profiles(runner=SubprocessRunner(), timeout_s=60.0)
+    line(
+        "profile discovery",
+        f"ok={DISCOVERY.ok} method={DISCOVERY.method} n={len(DISCOVERY.profiles)}",
+    )
+
+    scratch = Path(args.finalize_scratch)
+    repo = scratch / "workspace"
+    if not scratch.is_dir() or not repo.is_dir():
+        print(f"FAIL: scratch dir not found: {scratch}")
+        return 1
+    line("scratch", scratch)
+
+    ctx = reopen_control_center(scratch=scratch, repo=repo, args=args)
+    database, executor = ctx["database"], ctx["executor"]
+    # A completed batch is terminal history: load_active_batch deliberately
+    # does NOT rehydrate it into the controller (D-023: nothing auto-runs).
+    # The finalize precondition is therefore durable truth on disk.
+    row = database.connection.execute(
+        """
+        SELECT batch_id, status FROM batches
+        WHERE status = 'COMPLETE' ORDER BY created_at DESC LIMIT 1
+        """
+    ).fetchone()
+    if row is None:
+        print("FAIL: no completed batch in the preserved scratch DB.")
+        return 1
+    line("batch id", row["batch_id"])
+    line("batch status", row["status"])
+    stored_final = database.load_final_audit(row["batch_id"])
+    if not stored_final or stored_final["final_verdict"] != "PASS":
+        print("FAIL: the preserved scratch has no durable FINAL PASS.")
+        return 1
+    line("stored final verdict", stored_final["final_verdict"])
+    database.close()
+    return _finish_zero_ai(scratch, args, started, row["batch_id"], ctx)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="SESSION 010 real continuous acceptance")
     parser.add_argument("--coder-profile", default="encomm-accounting-intelligence")
@@ -283,7 +361,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout", type=float, default=1200.0)
     parser.add_argument("--next-batch-size", type=int, default=4)
     parser.add_argument("--keep-scratch", action="store_true")
+    parser.add_argument(
+        "--finalize-scratch",
+        default="",
+        help="run the zero-AI proof (reload, START NEXT BATCH, live STOP) on a "
+        "preserved scratch whose final audit already PASSED (evidence-retry rule)",
+    )
     args = parser.parse_args(argv)
+    if args.finalize_scratch:
+        return finalize_acceptance(args)
 
     started = time.monotonic()
     banner("SESSION 010 — REAL CONTINUOUS SIMPLE-MODE ACCEPTANCE")
@@ -329,25 +415,23 @@ def main(argv: list[str] | None = None) -> int:
     ctx = build_control_center(scratch=seeded["scratch"], repo=repo, args=args)
     controller, executor, database = ctx["controller"], ctx["executor"], ctx["database"]
 
-    # -- 3. CONTINUOUS run: plan -> build -> audit -> final audit -> handoff ----
-    banner("STEP 3 — ContinuousRunner.run() (1 planning call expected)")
-    runner = ContinuousRunner(executor)
-    runner.request_stop()  # pre-armed: stop at the FIRST safe boundary
-
-    report = runner.run_continuous(
+    # -- 3. REAL batch 1: Codex plans 2 tasks; Hermes builds + audits ----------
+    banner("STEP 3 — BatchRunner batch 1 (ONE planning call expected)")
+    runner = BatchRunner(executor)
+    report = runner.run_batch(
         project_brief=PROJECT_BRIEF,
         batch_size=2,
-        next_batch_size=args.next_batch_size,
+        resume=False,
         timeout_s=args.timeout,
     )
-    line("stop reason", report.stop_reason)
-    line("batches run", report.batches_run)
-    line("message", (report.message or "")[:160])
+    line("batch outcome", report.outcome.value)
+    line("operations", report.operation_counts())
+    line("token totals", report.token_totals())
     dump_failing_steps(report, seeded["scratch"])
 
     batch1 = controller.state.batch
     if batch1 is None:
-        print("FAIL: no batch after the continuous run.")
+        print("FAIL: no batch after batch 1.")
         return 1
     line("batch status", batch1.status.value)
     tasks1 = {t.index: t for t in batch1.tasks}
@@ -376,34 +460,66 @@ def main(argv: list[str] | None = None) -> int:
         print(f"FAIL: expected READY_FOR_FINAL_AUDIT after batch 1, found {batch1.status.value}.")
         return 1
 
-    # -- 5. durable truth: final audit PASS + pending plan ----------------------
-    banner("STEP 5 — durable truth after the continuous run")
-    stored_final = database.load_final_audit(batch1.batch_id)
-    line("stored final verdict", stored_final["final_verdict"] if stored_final else None)
-    line(
-        "stored final auditor session",
-        stored_final["final_auditor_session_id"] if stored_final else "NOT_EXPOSED",
+    # -- 5. REAL Codex Final Auditor (same thread as planning) ------------------
+    banner("STEP 5 — REAL Codex FINAL_AUDITOR (one call: verdict + next plan)")
+    fa = executor.run_final_audit(
+        next_batch_size=args.next_batch_size, timeout_s=args.timeout
     )
-    if not stored_final or stored_final["final_verdict"] != "PASS":
-        print("FAIL: the continuous loop did not produce a durable FINAL PASS.")
+    line("final-audit outcome", fa.outcome.value)
+    line("final verdict", fa.result.verdict.value if fa.result else None)
+    line("final-auditor session", fa.session_id or "NOT_EXPOSED")
+    line(
+        "next tasks in the SAME call",
+        fa.result.next_batch.task_count if (fa.result and fa.result.next_batch) else 0,
+    )
+    plan_record = batch1.plan
+    line("planning thread/session",
+         plan_record.orchestrator_session_id if plan_record else "NOT_EXPOSED")
+    if fa.outcome.value != "PASSED":
+        dump_final_audit(fa, seeded["scratch"])
+        print("FAIL: the final audit did not PASS.")
         return 1
-    pending = database.load_pending_next_plan(batch1.batch_id)
-    line("pending next plan present", pending is not None)
-    if pending is None:
-        print("FAIL: the PASS did not persist the pending next plan.")
+    # Honest continuity contract: same_as_orchestrator shares the ENGINE;
+    # session continuity is PER-ROLE (the final auditor resumes its own
+    # previous thread on a repeat audit, or an explicitly bound one —
+    # Session 006 smoke).  Both calls must expose real recorded threads.
+    if not (plan_record and plan_record.orchestrator_session_id):
+        print("FAIL: no real planning thread recorded.")
         return 1
+    if not fa.session_id:
+        print("FAIL: no real final-auditor thread recorded.")
+        return 1
+    line("pipeline phase", controller.machine.phase.value)
 
-    # -- 6. zero-AI handoff + reload proof ---------------------------------------
-    banner("STEP 6 — database closed; reopen; START NEXT BATCH (zero AI calls)")
-    batch1_id = batch1.batch_id
-    database.close()
-    ctx2 = build_control_center(scratch=seeded["scratch"], repo=repo, args=args)
+    # -- 6..8. durable truth + zero-AI handoff + STOP proof (shared tail) -------
+    return _finish_zero_ai(seeded["scratch"], args, started, batch1.batch_id, ctx)
+
+
+def _finish_zero_ai(
+    scratch: Path, args, started: float, batch1_id: str, ctx: dict
+) -> int:
+    """Reload from SQLite, START NEXT BATCH (zero AI), live STOP proof."""
+    repo = scratch / "workspace"
+    ctx2 = reopen_control_center(scratch=scratch, repo=repo, args=args)
     database2, executor2 = ctx2["database"], ctx2["executor"]
+    line("restored phase", ctx2["controller"].machine.phase.value)
     stored = database2.load_batch(batch1_id)
     line("reloaded batch status", stored.status.value if stored else None)
     if stored is None or stored.status is not BatchStatus.COMPLETE:
         print("FAIL: the completed batch did not survive the reload.")
         return 1
+    stored_final = database2.load_final_audit(batch1_id)
+    line("stored final verdict", stored_final["final_verdict"] if stored_final else None)
+    if not stored_final or stored_final["final_verdict"] != "PASS":
+        print("FAIL: the durable Final Audit verdict is missing or not PASS.")
+        return 1
+    pending = database2.load_open_pending_next_plan()
+    line("pending next plan present", pending is not None)
+    if pending is None:
+        print("FAIL: the PASS did not persist the pending next plan.")
+        return 1
+
+    banner("STEP 7 — START NEXT BATCH (zero AI calls)")
     handoff = executor2.start_next_batch()
     line("handoff outcome", handoff.outcome.value)
     line("handoff tasks", handoff.task_count)
@@ -414,12 +530,33 @@ def main(argv: list[str] | None = None) -> int:
     line("new batch tasks", {i: t.state.value for i, t in sorted(new_tasks.items())})
     line("new batch planning calls", 0)
 
+    # -- 8. LIVE STOP-at-boundary proof through the continuous machinery --------
+    banner("STEP 8 — resume_continuous() with a pre-armed STOP (no model calls)")
+    cont = ContinuousRunner(executor2)
+    cont.request_stop()
+    cont_report = cont.resume_continuous(
+        next_batch_size=args.next_batch_size, timeout_s=args.timeout
+    )
+    line("stop reason", cont_report.stop_reason)
+    line("batches run", cont_report.batches_run)
+    line("planning AI calls", cont_report.planning_ai_calls)
+    if cont_report.stop_reason != ContinuousStopReason.ALL_STOP:
+        print(
+            "FAIL: expected STOP_REQUESTED from the pre-armed continuous stop, "
+            f"got {cont_report.stop_reason}."
+        )
+        return 1
+    if cont_report.planning_ai_calls != 0:
+        print("FAIL: the resumed continuous leg must not plan.")
+        return 1
+    line("phase after stop", executor2.controller.machine.phase.value)
+
     banner("ACCEPTANCE PASSED")
     line("total wall clock (s)", f"{time.monotonic() - started:.1f}")
-    line("scratch", seeded["scratch"])
+    line("scratch", scratch)
     database2.close()
     if not args.keep_scratch:
-        shutil.rmtree(seeded["scratch"], ignore_errors=True)
+        shutil.rmtree(scratch, ignore_errors=True)
         print("scratch removed (use --keep-scratch to inspect it).")
     return 0
 

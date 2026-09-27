@@ -1,4 +1,4 @@
-# ENCOMM Pipeline Control Center — Operator Guide (v0.9)
+# ENCOMM Pipeline Control Center — Operator Guide (v1.0)
 
 This guide is written for the **operator** who runs real AI coding batches.
 Everything below refers to actual controls in the desktop application.

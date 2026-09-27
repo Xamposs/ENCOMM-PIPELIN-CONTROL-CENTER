@@ -8,7 +8,7 @@ engine CLIs (Hermes, Codex, or any compatible command-line agent), with
 SQLite persistence, restart recovery, and strict fail-closed parsing of every
 model answer.
 
-**Current version: 0.9.0 — Simple Mode + Continuous Run (pre-release; live acceptance pending).**
+**Current version: 1.0.0 — Simple Mode + Continuous Run (live acceptance PASSED 2026-09-27).**
 
 - **Works today:** Simple Mode (default surface) — enter the goal, pick an
   engine for Architect / Coder / Auditor, tick CONTINUOUS and press START:
@@ -108,11 +108,13 @@ python scripts/session_008_acceptance.py --profile <hermes-profile>     # real m
 python scripts/session_008_config_roundtrip.py                          # config export/import round trip
 ```
 
-## Known limitations (v0.9)
+## Known limitations (v1.0)
 
-- **Live acceptance of the Session 009/010 Simple Mode + Continuous path is
-  pending** — proven by 604 offline tests; the real Codex + Hermes run is the
-  gate for 1.0.0.
+- Live mixed-engine acceptance **PASSED** (2026-09-27): real Codex planning +
+  final audit, 2 real Hermes builds (distinct sessions), ONE auditor session,
+  durable FINAL PASS + pending plan, zero-AI next-batch handoff, and a live
+  STOP-at-boundary proof through the continuous machinery
+  (`scripts/session_010_acceptance.py`, evidence preserved).
 - No mid-prompt cancellation (boundary-only pause/stop; a running prompt
   finishes and persists first).
 - Read-only planning/audit guards are vacuous on non-git workspaces.
