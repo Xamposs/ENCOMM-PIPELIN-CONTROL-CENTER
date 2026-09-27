@@ -66,6 +66,11 @@ class MainWindow(QMainWindow):
         self._dispatch_timeout_s = dispatch_timeout_s
         self._thread = None
         self._worker = None
+        #: Last terminal reports (test/diagnostic surface — the UI itself only
+        #: renders them; nothing reads these for control flow).
+        self._batch_report = None
+        self._continuous_report = None
+        self._final_audit_report = None
 
         self.setWindowTitle(f"{APP_NAME} — v{__version__}")
         self.resize(1180, 920)
@@ -501,6 +506,7 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _on_final_audit_finished(self, report: object) -> None:
+        self._final_audit_report = report
         self._after_control("", self.controller.machine.phase)
         if isinstance(report, FinalAuditReport):
             self.controller.events.info(
@@ -613,6 +619,7 @@ class MainWindow(QMainWindow):
 
     def _on_continuous_finished(self, report: object) -> None:
         """Terminal ContinuousRunReport: refresh everything, state the reason."""
+        self._continuous_report = report
         self._after_control("", self.controller.machine.phase)
         if isinstance(report, ContinuousRunReport):
             self.controller.events.info(
@@ -683,6 +690,7 @@ class MainWindow(QMainWindow):
         """Terminal batch report: refresh everything, show the honest state."""
         from ..core import BatchRunReport
 
+        self._batch_report = report
         self._after_control("", self.controller.machine.phase)
         if isinstance(report, BatchRunReport):
             self.controller.events.info(

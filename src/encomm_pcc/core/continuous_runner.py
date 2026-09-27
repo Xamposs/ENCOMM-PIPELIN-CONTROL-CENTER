@@ -162,7 +162,13 @@ class ContinuousRunner:
 
             if batch_report.outcome is not BatchOutcome.READY_FOR_FINAL_AUDIT:
                 # BLOCKED / FAILED / STOPPED / PAUSED batch: exit safely (§26).
-                if executor.stop_requested:
+                # A stop honoured MID-batch was already consumed by the batch
+                # runner (its boundary path clears the executor flag), so the
+                # STOPPED outcome itself is the deterministic stop signal.
+                if (
+                    executor.stop_requested
+                    or batch_report.outcome is BatchOutcome.STOPPED
+                ):
                     report.stop_reason = ContinuousStopReason.ALL_STOP
                     report.message = "Stopped safely after the current batch."
                 elif batch_report.outcome is BatchOutcome.BLOCKED:

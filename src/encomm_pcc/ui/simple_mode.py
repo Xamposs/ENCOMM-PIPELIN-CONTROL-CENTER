@@ -528,6 +528,25 @@ class SimpleModePanel(QWidget):
                 "started. Press CONTINUE to resume from durable state."
                 + (f" Interrupted task: {current.title}" if current is not None else "")
             )
+            # Session 010 (§14): a Builder operation was interrupted (task left
+            # RUNNING / RUNNING_FIX by a crash or power loss) — expose the
+            # one-shot Coder recovery override with the saved session id when
+            # it is known.  Hidden while a run is actively using the executor.
+            executor = self.controller.executor
+            busy = bool(executor is not None and getattr(executor, "is_running", False))
+            interrupted_builder = (
+                not busy
+                and current is not None
+                and current.state.value in {"RUNNING", "RUNNING_FIX"}
+            )
+            if interrupted_builder and current is not None:
+                saved = current.fix_session_id or current.builder_session_id
+                self.show_coder_recovery(saved or None)
+            elif not (
+                executor is not None
+                and getattr(executor, "coder_recovery_armed", lambda: False)()
+            ):
+                self.coder_recovery_box.setVisible(False)
 
     def refresh(self) -> None:
         """Re-read controller state into the status widgets."""
