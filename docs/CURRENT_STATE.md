@@ -29,20 +29,18 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`1.0.0` — Simple Mode + Continuous Run; **live acceptance PASSED 2026-09-27**
-(see §7 and `docs/reports/SESSION_010_SIMPLE_CONTINUOUS_V1.md`). Session 009
-delivered Simple Mode as the default surface, the core `ContinuousRunner`, and
-profile-scoped Hermes session discovery. Session 010 closed the
-reviewer-identified gaps: the Simple START/CONTINUE path executes through the
-**core ContinuousRunner** via the worker actions `continuous` /
-`continuous_resume` (a UI-owned loop and a silent worker-parameter-drop bug
-were found and removed), the **one-shot Coder recovery override** exists
-(executor API + Simple Mode UI), Simple Mode exposes **Provider/Model** for
-Coder and Auditor on the same durable role configs, and 16 new offline tests
-(604 total) pin all of it. The real mixed-engine acceptance run then proved
-the whole path live: Codex plan → 2 Hermes builds → ONE auditor session →
-Codex final audit (PASS + 4-task plan) → zero-AI handoff → live STOP at the
-earliest safe boundary.
+`1.0.1` — Production UI finalisation (Session 011). Simple Mode is the
+production surface with real engine/profile/session selectors; the
+`same_as_orchestrator` contract is now a **TRUE shared Architect thread** —
+planning and the Final Audit resume the SAME actual external session (live →
+durable binding → persisted plan after restart) and the Final Audit inherits
+the Architect's profile/provider/model; and the Advanced/Details escape hatch
+exists only behind `--debug-ui`. The test suite is **620 passed, 0 failed**
+(604 at Session 010). The Session 010 baseline (Simple Mode default, core
+`ContinuousRunner`, one-shot Coder recovery override, Provider/Model controls,
+live acceptance PASSED 2026-09-27) is fully subsumed.
+References: `docs/reports/SESSION_011_PRODUCTION_UI_SESSION_CONTROL_V1.md`,
+`docs/reports/SESSION_010_SIMPLE_CONTINUOUS_V1.md`.
 
 ---
 
@@ -51,9 +49,9 @@ earliest safe boundary.
 | Capability | Status | Evidence |
 |---|---|---|
 | Desktop application launches | **Works** | `python main.py` starts, Qt event loop runs |
-| **Simple Mode is the DEFAULT surface** | **Works — Session 009/010** | stack index 0; Advanced/Details (the full Session 008 window) is index 1 and unchanged |
+| **Simple Mode is the DEFAULT production surface** | **Works — Session 011** | stack index 0; the Advanced/Details window (full Session 008 window) is index 1 and exists ONLY behind `--debug-ui` (§17); normal launches expose no Advanced button |
 | Simple Mode controls write the SAME durable role configs | **Works — §34** | profile + **provider + model** (Session 010) persist through `set_role_config`; no parallel config model |
-| ARCHITECT = ORCHESTRATOR + FINAL_AUDITOR (one Codex thread) | **Works** | `same_as_orchestrator`; ONE planning call, ONE final-audit call per batch |
+| ARCHITECT = ORCHESTRATOR + FINAL_AUDITOR (one Codex thread) | **Works — Session 011** | `same_as_orchestrator` means the SAME real thread: the Final Audit RESUMES the planning session (live → durable binding → persisted plan after restart), proven by the driver's real `resume_session` calls; the Final Audit inherits the Architect's profile/provider/model |
 | **Continuous Run executes through the core ContinuousRunner** | **Works — Session 010** | Simple START/CONTINUE + Continuous → worker actions `continuous`/`continuous_resume`; the UI owns no loop logic; stop reasons are translated to operator language (§8) |
 | Automatic Final Audit inside the continuous loop | **Works** | `ContinuousRunner._continue_loop` runs `run_final_audit()` after every `READY_FOR_FINAL_AUDIT` batch |
 | **Zero-AI next-batch handoff in the loop** | **Works** | PASS consumes the pending plan via `start_next_batch()`; exactly 1 planning call for the whole run (test-pinned) |
@@ -72,7 +70,7 @@ earliest safe boundary.
 | Windows packaging | **Works — Session 008** | `dist/ENCOMM-PCC/ENCOMM-PCC.exe` + `--smoke-test` |
 | Per-user data root | **Works — Session 008** | `%LOCALAPPDATA%\ENCOMM Pipeline Control Center\`, `ENCOMM_PCC_DATA_DIR` override |
 | DIAGNOSTICS / HISTORY / config export-import / bounded retention | **Works — Session 007/008** | read-only surfaces over durable tables |
-| Automated tests | **Works** | **604 passed, 0 failed** at the Session 010 baseline (588 at Session 009) |
+| Automated tests | **Works** | **620 passed, 0 failed** at the Session 011 baseline (604 at Session 010, 588 at Session 009) |
 | Real mixed-engine acceptance | **Works — Session 008** | Codex Orchestrator → 2 fresh Hermes Builders → ONE persistent Task Auditor across a controlled restart → Codex Final Auditor; final verdict + next plan; zero-AI START NEXT BATCH |
 
 ### Verified at the end of Session 009

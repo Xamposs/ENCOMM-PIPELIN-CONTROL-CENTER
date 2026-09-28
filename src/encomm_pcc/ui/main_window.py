@@ -57,6 +57,7 @@ class MainWindow(QMainWindow):
         profiles: Sequence[str] = (),
         profile_method: str = "",
         dispatch_timeout_s: float | None = None,
+        debug_ui: bool = False,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -64,6 +65,10 @@ class MainWindow(QMainWindow):
         self._profiles: tuple[str, ...] = tuple(profiles)
         self._profile_method = profile_method
         self._dispatch_timeout_s = dispatch_timeout_s
+        #: Session 011 (§17): the full debug/detailed surface is a developer
+        #: tool — reachable only behind ``--debug-ui``; the normal launch
+        #: exposes the clean production UI (Simple Mode, no Advanced button).
+        self.debug_ui = bool(debug_ui)
         self._thread = None
         self._worker = None
         #: Last terminal reports (test/diagnostic surface — the UI itself only
@@ -140,9 +145,14 @@ class MainWindow(QMainWindow):
         simple_again.clicked.connect(self._show_simple_mode)
         advanced_layout.addWidget(simple_again)
 
-        # Session 009 (§7): SIMPLE MODE is the DEFAULT surface.
-        self.simple_panel = SimpleModePanel(controller, profiles=profiles, parent=self)
-        self.simple_panel.request_advanced = self._show_advanced_mode
+        # Session 009 (§7): SIMPLE MODE is the DEFAULT surface.  Session 011
+        # (§17): the Advanced / Details escape hatch exists only behind
+        # --debug-ui; normal launches are production-only.
+        self.simple_panel = SimpleModePanel(
+            controller, profiles=profiles, parent=self, debug_ui=self.debug_ui
+        )
+        if self.debug_ui:
+            self.simple_panel.request_advanced = self._show_advanced_mode
         self.simple_panel.request_start = self._on_simple_start
         self.simple_panel.request_continue = self._on_simple_continue
         self.simple_panel.request_pause = self._on_pause
@@ -193,12 +203,10 @@ class MainWindow(QMainWindow):
         self.log_panel.record_received.emit(record)
 
     def _idle_status(self) -> str:
+        # Session 011 (§18): operator language — no debug/TASK references.
         if self.controller.executor_attached:
-            return (
-                "Ready — executor attached; Start creates a batch, TASK dispatches "
-                "one controlled task."
-            )
-        return "Ready — no executor attached; Start records batch state only."
+            return "Ready — choose a project and configure the pipeline."
+        return "Ready — state-only mode (no executor attached)."
 
     def _log_startup_summary(self) -> None:
         events = self.controller.events
@@ -369,8 +377,9 @@ class MainWindow(QMainWindow):
         result = self.controller.request_start(size)
         self._after_control(result.message, result.phase)
         if self.controller.executor_attached:
+            # Session 011 (§18): operator language — no manual TASK dispatch.
             self.statusBar().showMessage(
-                f"{result.phase.value} — use TASK → Dispatch task to run the task."
+                f"{result.phase.value} — press START (or CONTINUE to resume)."
             )
         else:
             self.statusBar().showMessage(
@@ -420,6 +429,7 @@ class MainWindow(QMainWindow):
     def _on_simple_start(self, brief: str, size: int, continuous: bool) -> None:
         """SIMPLE START: one brief, one size, optional continuous run."""
         self._simple_continuous = bool(continuous)
+        self.simple_panel.continuous_active = bool(continuous)
         if self._simple_continuous:
             self._start_continuous_worker(brief=brief, size=size, resume=False)
         else:
@@ -428,6 +438,7 @@ class MainWindow(QMainWindow):
     def _on_simple_continue(self, continuous: bool) -> None:
         """RECOVERY CONTINUE: resume from durable state (never auto-run)."""
         self._simple_continuous = bool(continuous)
+        self.simple_panel.continuous_active = bool(continuous)
         if self._simple_continuous:
             self._start_continuous_worker(brief="", size=0, resume=True)
         else:
@@ -620,6 +631,7 @@ class MainWindow(QMainWindow):
     def _on_continuous_finished(self, report: object) -> None:
         """Terminal ContinuousRunReport: refresh everything, state the reason."""
         self._continuous_report = report
+        self.simple_panel.continuous_active = False
         self._after_control("", self.controller.machine.phase)
         if isinstance(report, ContinuousRunReport):
             self.controller.events.info(
@@ -703,10 +715,12 @@ class MainWindow(QMainWindow):
                 # Session 010 (§6): this terminal is only reachable with
                 # Continuous Run OFF — a continuous run's Final Audit happens
                 # inside the core ContinuousRunner on the worker thread.
+                # Session 011 (§17/§18): no Advanced references in production;
+                # the closed loop lives in Continuous Run.
                 self.statusBar().showMessage(
-                    "READY FOR FINAL AUDIT — every task is APPROVED. "
-                    "Press RUN FINAL AUDIT (Advanced) to close the batch, "
-                    "or STOP to end here."
+                    "Batch ready — every task approved. Tick Continuous Run and "
+                    "press CONTINUE to run the automatic Final Audit and continue "
+                    "to the next batch, or STOP to end here."
                 )
             return
         if isinstance(report, ExecutionReport):
@@ -724,6 +738,8 @@ class MainWindow(QMainWindow):
         self.history_panel.refresh()
         for panel in self.role_panels.values():
             panel.refresh_session_field()
+        # Session 011 (§19): the Simple status panel tracks durable state.
+        self.simple_panel.refresh()
         self.statusBar().showMessage(f"Phase: {phase.value}")
 
     # -- dispatch (off the UI thread) --------------------------------------
@@ -763,6 +779,7 @@ class MainWindow(QMainWindow):
             self.task_panel.show_report(report)
             self.batch_panel.refresh()
             self.history_panel.refresh()
+            self.simple_panel.refresh()
             for panel in self.role_panels.values():
                 panel.refresh_session_field()
             self.controller.events.info(f"Dispatch finished — {report.summary()}", source="ui")

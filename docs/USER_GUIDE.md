@@ -2,9 +2,10 @@
 
 This guide is written for the **operator** who runs real AI coding batches.
 Everything below refers to actual controls in the desktop application.
-**Simple Mode is the default surface** — start there (§A). Advanced Mode
-(the full panel grid, formerly the whole app) is one click away and is
-covered in §B onwards.
+**Simple Mode is the default production surface** — start there (§A). Advanced
+Mode (the full panel grid, formerly the whole app) is the development/debug
+surface: launch with `python main.py --debug-ui` to see the "Advanced /
+Details…" button, then §B onwards covers it.
 
 ---
 
@@ -106,6 +107,10 @@ zero AI calls; the completed batch stays in HISTORY.
 ---
 
 # Part B — Advanced Mode reference
+
+> **Access:** this entire surface is behind the debug flag — start the app as
+> `python main.py --debug-ui`. Normal launches are Simple Mode only and show
+> no Advanced button (Session 011, D-052).
 
 ## B1. Sections
 

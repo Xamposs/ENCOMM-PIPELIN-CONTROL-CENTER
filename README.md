@@ -8,17 +8,22 @@ engine CLIs (Hermes, Codex, or any compatible command-line agent), with
 SQLite persistence, restart recovery, and strict fail-closed parsing of every
 model answer.
 
-**Current version: 1.0.0 — Simple Mode + Continuous Run (live acceptance PASSED 2026-09-27).**
+**Current version: 1.0.1 — Production UI finalisation (Session 011): Simple Mode with real engine/profile/session selectors, shared-Architect-thread continuity, and the Advanced surface gated behind `--debug-ui`.**
 
-- **Works today:** Simple Mode (default surface) — enter the goal, pick an
-  engine for Architect / Coder / Auditor, tick CONTINUOUS and press START:
-  batch after batch runs autonomously with the audit/fix loop, an automatic
-  final audit after each batch, and a zero-AI handoff to the next batch
-  (one planning call for the whole run). Advanced Mode keeps every
-  fine-grained control: role-based mixed-engine batches, restart/recovery at
-  every phase, the one-shot Coder recovery override, session discovery and
-  binding, config export/import, run history, and a Windows packaged build
-  with a self-test mode.
+- **Works today:** Simple Mode (default, production surface) — enter the goal, pick an
+ engine for Architect / Coder / Auditor, configure the Hermes profile (Coder and
+ Auditor) plus provider/model, choose the Coder session mode, and press START:
+ batch after batch runs autonomously with the audit/fix loop, an automatic
+ final audit after each batch, and a zero-AI handoff to the next batch.
+ ARCHITECT plans and final-audits on **one real thread**: planning and the
+ Final Audit resume the same external session (live → durable binding →
+ persisted plan after restart), and the Final Audit inherits the Architect's
+ profile/provider/model configuration. The engine dropdowns are driven by the
+ installed driver registry; Hermes profile changes re-scope session discovery
+ and clear stale bindings automatically. Coder sessions run fresh by default,
+ or **Resume selected session ONCE** for an interrupted build.
+ Advanced Mode (every fine-grained control, the full Session 008 window) is
+ available with `python main.py --debug-ui`.
 - **Operator guide:** [docs/USER_GUIDE.md](docs/USER_GUIDE.md).
 - **What is deliberately not implemented:** see
   [docs/CURRENT_STATE.md](docs/CURRENT_STATE.md) §5.

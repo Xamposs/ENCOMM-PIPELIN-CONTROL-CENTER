@@ -1325,3 +1325,71 @@ persisted.
 decision only; no silent policy drift; pinned by the Session 010 one-shot
 matrix (armed→consumed exactly once; restart-in-NEW clears it; resume
 failure honest).
+
+## D-051 — `same_as_orchestrator` means the SAME real Architect thread, and the Final Auditor inherits the Architect's configuration
+
+**Date:** Session 011
+**Status:** Accepted
+
+**Context.** The Session 008 live acceptance used one Codex thread for
+planning and one for the Final Audit. They were *coincidentally* the same
+session only while the live session survived; after a restart the Final Audit
+fell back to a NEW session over a persisted plan, silently breaking the
+intended "the Architect knows the batch" continuity.
+
+**Decision.** `same_as_orchestrator=True` now means: the Final Audit uses the
+SAME actual external session as planning. The shared session id resolves in
+order (a) the live orchestrator session, (b) the durable external-session
+binding on ORCHESTRATOR, (c) the persisted `plan.orchestrator_session_id`
+after restart; and the session decision for FINAL_AUDITOR is forced to REUSE
+that thread (never NEW) while the flag is set. The Final Audit additionally
+inherits the ARCHITECT's profile/provider/model, so preflight and the session
+request run under the operator's real configuration instead of the FINAL_AUDITOR
+placeholder values. `same_as_orchestrator=False` keeps a fully per-role engine.
+
+**Consequence.** Planning and Final Audit are provably one thread — pinned by
+`resume_session` calls on a scripted driver for the live, bound, and
+after-restart cases — and a Hermes-targeted Architect no longer blocks the
+Final Audit on a placeholder profile. Dedicated Final Auditor engines are
+unaffected.
+
+## D-052 — Advanced/Details (the full debug window) exists only behind `--debug-ui`
+
+**Date:** Session 011
+**Status:** Accepted
+
+**Context.** Session 009 made Simple Mode the default surface but left the
+full Session 008 control window reachable with one click. For production
+operators the debug/advanced surface invites accidental deep tweaks.
+
+**Decision.** `main.py --debug-ui` sets `MainWindow(debug_ui=True)` and adds
+the "Advanced / Details…" button (stack index 1, unchanged window). A normal
+launch constructs Simple Mode only and exposes no Advanced button. The status
+bar and batch messages use operator language with no TASK/debug references.
+
+**Consequence.** Production launches are Simple-only; `--debug-ui` restores
+every fine-grained control, pinned by the Session 011 UI matrix (no Advanced
+button without the flag, present with it).
+
+## D-053 — Simple Mode engine selectors are registry-driven and engine-specific
+
+**Date:** Session 011
+**Status:** Accepted
+
+**Context.** Session 009's engine dropdowns were hard-coded to a small set and
+every engine showed the same fields.
+
+**Decision.** The ARCHITECT/CODER/AUDITOR dropdowns enumerate
+`DriverRegistry.driver_ids()` with capabilities-driven labels. Per role the
+visible fields follow the selected engine's capabilities: Hermes shows the
+profile selector (plus provider/model), Codex shows session discovery/binding,
+stateless engines show a hint. A Hermes profile change re-scopes session
+discovery and auto-clears a stale binding recorded under another profile; an
+engine switch likewise invalidates bindings of the previous driver. The Coder
+session-mode combo (Automatic fresh session by default, or "Resume selected
+session ONCE" which arms the D-050 one-shot override) drives the new
+`session_mode` control hook.
+
+**Consequence.** New engines appear automatically, the UI cannot show
+inapplicable fields, and profile/engine switches never leak sessions across
+scope; pinned by the Session 011 UI matrix.

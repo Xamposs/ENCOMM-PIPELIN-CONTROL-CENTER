@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 #: Session 008 — packaged-application self-test switch (brief §11).
 SMOKE_TEST_FLAG = "--smoke-test"
 
+#: Session 011 (§17) — development-only flag that restores the full
+#: debug/detailed UI.  The normal launch exposes the clean production
+#: interface only (Simple Mode, no Advanced button).
+DEBUG_UI_FLAG = "--debug-ui"
+
 #: Session 008 — bounded on-disk bootstrap log (brief §15): per-user, outside
 #: the installation directory, size-capped so it can never grow without bound.
 BOOTSTRAP_LOG_MAX_BYTES = 1_000_000
@@ -132,14 +137,22 @@ def run(argv: Sequence[str] | None = None) -> int:
     This is the only place that wires the *real* process runner: the executor
     gets a :class:`SubprocessRunner`, so dispatched prompts start real Hermes
     processes.  Tests build controllers without it (see ``attach_default_executor``).
+
+    Session 011 (§17): ``--debug-ui`` re-enables the developer/detailed
+    surface; the flag is stripped before Qt sees the arguments.  Normal
+    launches are production-only.
     """
     from PySide6.QtWidgets import QApplication
 
     from .ui import MainWindow
 
+    argv_list = list(sys.argv[1:] if argv is None else argv)
+    debug_ui = DEBUG_UI_FLAG in argv_list
+    argv_list = [arg for arg in argv_list if arg != DEBUG_UI_FLAG]
+
     paths = default_paths()
     configure_logging(paths=paths)
-    app = QApplication(list(argv) if argv is not None else sys.argv)
+    app = QApplication(["encomm-pcc"] + argv_list)
     app.setApplicationName(APP_NAME)
 
     controller = build_controller(paths=paths)
@@ -149,6 +162,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         controller,
         profiles=discovery.profiles if discovery.ok else (),
         profile_method=discovery.method if discovery.ok else "",
+        debug_ui=debug_ui,
     )
     window.show()
 

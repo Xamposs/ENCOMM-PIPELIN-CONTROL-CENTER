@@ -89,7 +89,7 @@ from .repo_fingerprint import (
     capture_repo_fingerprint,
     fingerprints_equal,
 )
-from .session_manager import SessionAction
+from .session_manager import SessionAction, SessionDecision
 from .verdict_parser import VerdictParseError, parse_audit_verdict
 
 __all__ = [
@@ -1388,6 +1388,25 @@ class Executor:
             )
 
         role, config, engine = self._resolve_role(FINAL_AUDITOR_ROLE)
+        if config.same_as_orchestrator:
+            # Session 011 (§8/§9): 'same as orchestrator' means the SAME
+            # Architect configuration — engine, profile/provider/model AND
+            # the shared thread.  A fresh FINAL_AUDITOR config carries only
+            # placeholder values, so the effective profile/provider/model
+            # inherit from the Architect so preflight and the session request
+            # run under the operator's real configuration.
+            architect = self.controller.state.config_for(AgentRole.ORCHESTRATOR)
+            config = AgentRoleConfig(
+                role=config.role,
+                engine=config.engine,
+                project_profile=architect.project_profile or config.project_profile,
+                provider=architect.provider or config.provider,
+                model=architect.model or config.model,
+                session_policy=config.session_policy,
+                session_id=config.session_id,
+                same_as_orchestrator=True,
+                extra=dict(config.extra or {}),
+            )
         blocked = self._preflight(config, engine, role=role)
         if blocked is not None:
             self.events.error(blocked, source="executor")
@@ -1412,6 +1431,36 @@ class Executor:
         # required; a REUSE resume failure fails honestly (never fabricated).
         self._seed_binding_session(role, engine, config)
         decision = self.controller.sessions.decide(role, config.session_policy, capabilities)
+        if config.same_as_orchestrator:
+            # Session 011 (§8/§9): 'same as orchestrator' means SAME THREAD —
+            # the Final Audit continues the Architect's real session (live →
+            # durable operator binding → persisted planning thread after a
+            # restart), never a fresh one.  The product contract requires the
+            # planning thread and the Final Audit thread to be identical.
+            shared = self._architect_session_id()
+            if shared is not None:
+                decision = SessionDecision(
+                    action=SessionAction.REUSE,
+                    policy=config.session_policy,
+                    reason=(
+                        "same_as_orchestrator: the Final Audit continues the "
+                        f"shared Architect thread {shared} — planning and "
+                        "Final Audit are one continuous session."
+                    ),
+                    session_id=shared,
+                )
+                if self.controller.sessions.current_session_id(role) != shared:
+                    self.controller.sessions.restore_session(role, shared)
+            else:
+                decision = SessionDecision(
+                    action=SessionAction.NEW,
+                    policy=config.session_policy,
+                    reason=(
+                        "same_as_orchestrator: no Architect thread exists yet — "
+                        "this Final Audit is the first Architect operation and "
+                        "creates one."
+                    ),
+                )
         if decision.action is SessionAction.REUSE and decision.session_id:
             try:
                 session = driver.resume_session(decision.session_id, request)
@@ -2519,6 +2568,34 @@ class Executor:
         config = self.controller.state.config_for(role)
         engine = self.controller.state.resolved_engine_for(role)
         return role, config, engine
+
+    def _architect_session_id(self) -> str | None:
+        """The effective external session for the shared Architect role (Session 011).
+
+        Planning and Final Audit must be the SAME actual thread.  Resolution
+        order: (1) the live Orchestrator session in this process, (2) the
+        durable operator-bound Architect session, (3) the persisted planning
+        thread after a restart (the plan record).  Bookkeeping only — no
+        engine contact, and a session id is never fabricated.
+        """
+        sessions = self.controller.sessions
+        live = sessions.current_session_id(AgentRole.ORCHESTRATOR)
+        if live:
+            return live
+        config = self.controller.state.config_for(AgentRole.ORCHESTRATOR)
+        binding = config.external_session_binding()
+        if binding is not None:
+            if sessions.current_session_id(AgentRole.ORCHESTRATOR) is None:
+                sessions.restore_session(
+                    AgentRole.ORCHESTRATOR, binding.external_session_id
+                )
+            return binding.external_session_id
+        batch = self.controller.state.batch
+        if batch is not None and batch.plan is not None:
+            recorded = batch.plan.orchestrator_session_id
+            if recorded:
+                return recorded
+        return None
 
     def _seed_binding_session(
         self, role: AgentRole, engine: str, config: AgentRoleConfig
