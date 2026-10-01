@@ -1393,3 +1393,77 @@ session ONCE" which arms the D-050 one-shot override) drives the new
 **Consequence.** New engines appear automatically, the UI cannot show
 inapplicable fields, and profile/engine switches never leak sessions across
 scope; pinned by the Session 011 UI matrix.
+
+## D-054 — Proposal Mode is a fully isolated parallel domain with an idempotent workspace contract
+
+**Date:** Session 012
+**Status:** Accepted
+
+**Context.** A future autonomous EIC/Horizon proposal review/integration
+loop must be built WITHOUT touching the production-tested Coding Mode
+pipeline (roles, executor, state machine, audit semantics). The proposal
+domain also needs its own document workspace layout, separate from the PCC
+source repository and not required to be a git repository.
+
+**Decision.** A new package `encomm_pcc.proposal` imports NOTHING from
+`encomm_pcc.core/domain/drivers/persistence/ui`; Coding Mode symbols are
+never reused (parallel enums/models/state machine with the repo's
+conventions). `ProposalWorkspace.initialize()` is idempotent over the
+eight-directory contract (`00_SOURCE_OF_TRUTH`…`07_FINAL`): it creates
+missing directories, seeds absent files empty (open mode `"x"`), and NEVER
+overwrites existing content — `03_PROPOSAL/MASTER_PROPOSAL.md` and the
+source-of-truth files are permanently safe from silent replacement. Only
+the Proposal ORCHESTRATOR will ever hold write authority over
+`MASTER_PROPOSAL.md`; reviewers are read-only and return structured
+results with patch PROPOSALS.
+
+**Consequence.** Coding Mode behaviour is structurally unreachable from
+Proposal Mode (pinned by a subprocess import-isolation test and 47
+foundation tests); operator-authored proposal content can never be
+clobbered by initialization. Future execution sessions extend the
+proposal package instead of the coding pipeline.
+
+## D-055 — Proposal Mode owns an explicit, deterministic phase graph with a permanently closed COMPLETE
+
+**Date:** Session 012
+**Status:** Accepted
+
+**Context.** The proposal loop needs its own lifecycle
+(IDLE → SOURCE_VALIDATION → SCIENTIFIC_REVIEW → IMPLEMENTATION_REVIEW →
+RED_TEAM_REVIEW → INTEGRATION → HARD_GATE_VALIDATION → COMPLETE /
+REVISION_REQUIRED) and must never share, alias or map onto the Coding Mode
+`PipelinePhase` graph.
+
+**Decision.** `proposal/state_machine.py` declares `PROPOSAL_TRANSITIONS`
+as a total mapping over `ProposalPhase`; invalid edges raise
+`InvalidProposalTransitionError` and leave the phase unchanged.
+`COMPLETE` has ZERO outgoing edges (it cannot silently reopen);
+`FAILED` is terminal with only the explicit operator `reset()` escape
+hatch; `REVISION_REQUIRED → SCIENTIFIC_REVIEW` begins a fresh review
+iteration in the SAME application state; PAUSED records a resume target;
+BLOCKED recovers only through explicit edges. `validate_proposal_graph()`
+self-checks totality, terminality and IDLE-reachability.
+
+**Consequence.** A completed proposal never reopens itself, no iteration
+restart ever re-creates application state, and the graph invariants are
+machine-checked (`validate_proposal_graph() == []` in the suite).
+
+## D-056 — Hard gates are canonical identifiers and result contracts only; identifiers are fail-closed
+
+**Date:** Session 012
+**Status:** Accepted
+
+**Context.** Future hard-gate validators (mandatory sections, budget
+consistency, page limit, …) need stable, unique identifiers and a result
+shape now, but no validator logic exists yet — and a placeholder that
+always passes would fabricate compliance.
+
+**Decision.** The 14 canonical gate ids are frozen constants
+(`HARD_GATE_IDS_TUPLE`/`HARD_GATE_IDS`). `ProposalHardGateResult` carries
+`gate_id` + `ProposalHardGateStatus` (PASS/FAIL/WARN/NOT_APPLICABLE) and
+REFUSES any non-canonical `gate_id` in `__post_init__` (fail closed). No
+validator, scorer or page counter exists in Session 012 and no result may
+be synthesised by anything but a future real validator.
+
+**Consequence.** Identifiers cannot drift or be typo'd into results;
+nothing can look compliant before a real check exists.
