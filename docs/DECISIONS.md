@@ -1530,3 +1530,77 @@ injected scripted drivers; zero model calls in the suite) while the pure
 contract layer stays verifiably clean (subprocess import-isolation tests pin
 all three boundaries); the future loop orchestrator, UI and persistence
 sessions extend `proposal_runtime`/`proposal` along this same seam.
+
+## D-059 — Review aggregation is a PURE deterministic contract with no numeric score
+
+**Date:** Session 014
+**Status:** Accepted
+
+**Context.** The three-reviewer cycle needs ONE deterministic aggregate over
+the three validated `ProposalReviewResult`s (verdict, findings, patches,
+unverified claims) plus a future-orchestrator-consumable integration brief.
+Ad-hoc aggregation in the runtime layer would let ordering drift between
+runs, invite semantic/LLM deduplication, and tempt a fake-precision 0–100
+score.
+
+**Decision.** `proposal/review_aggregation.py` (PURE package, imports
+nothing from the runtime) owns the entire contract:
+`aggregate_reviews()` validates the three role slots and the iteration
+number (fail closed on mixed roles/iterations) and applies the verdict rule
+BLOCKED if any reviewer returned BLOCKED, else NEEDS_REVISION if any
+returned NEEDS_REVISION, else PASS (PASS requires all three). Findings are
+ordered severity (critical, high, medium, low) → reviewer
+(SCIENTIFIC_REVIEWER, PROPOSAL_ENGINEER, RED_TEAM_REVIEWER) → original
+order via a STABLE sort. Findings are NEVER semantically deduplicated;
+EXACT duplicate content (all fields identical) is kept and MARKED via
+`duplicate_of_index` (deterministic first-occurrence-wins). No numeric
+0–100 score exists anywhere in the contract. `build_integration_brief()`
+projects the bundle into the deterministic brief (verdicts, ordered items,
+severity counts, affected sections, referenced sources,
+`integration_required` true unless a clean issue-free PASS) — a structured
+projection with ZERO model involvement that invents no recommendation.
+
+**Consequence.** Any two runs over identical reviewer output produce
+byte-identical `review_bundle.json`/`integration_brief.json` artifacts
+(test-pinned); the future ORCHESTRATOR integration session consumes a
+stable, reproducible brief; a score, if ever wanted, must arrive as a new
+explicitly-named contract — never grafted onto this one.
+
+## D-060 — Durable review artifacts are the ONLY Proposal Mode persistence, conflict-fail-closed, with file-based safe resume
+
+**Date:** Session 014
+**Status:** Accepted
+
+**Context.** Proposal runs are long; a crash between reviewers must not
+burn paid reviewer calls again, but a persistence database would violate
+the small-adapter boundary (D-058) and silently clobbering previous
+evidence would destroy operator trust in the review record.
+
+**Decision.** `proposal_runtime/review_artifacts.py` and
+`proposal_runtime/version_freeze.py` are the ONLY file writers in the
+package (the executor stays write-free, pinned structurally). Layout:
+`06_VERSIONS/iteration_NNN_pre_review.md` holds the EXACT reviewed bytes
+(written from the same read that produced the cycle hash) with a JSON
+sidecar (iteration, revision, hash, algorithm, source relpath);
+`04_REVIEWS/iteration_NNN/` holds `scientific_review.json`,
+`implementation_review.json`, `red_team_review.json`, `review_bundle.json`,
+`integration_brief.json` — structured parsed data ONLY (no transcript, the
+executor's bounded `raw_excerpt` never reaches disk), deterministic JSON
+(`indent=2`, `sort_keys=True`, LF, EOF newline), atomic writes
+(same-directory temp + `os.replace`). Existing artifacts are NEVER
+overwritten: an existing per-review artifact is accepted only when it
+parses back into the SAME (iteration, role, hash) identity with the SAME
+result; any other existing content is a typed conflict
+(`ArtifactConflictError` / `VersionFreezeError`) that stops the cycle.
+Safe resume: `run_review_cycle()` re-enters at any review phase and reuses
+the durable artifacts of STRICTLY EARLIER completed positions (identity +
+position + parseability enforced); a completed position without its
+artifact, an artifact at the CURRENT position, or any identity mismatch is
+`ARTIFACT_CONFLICT` — never a silent re-run, never a clobber.
+
+**Consequence.** Long proposal runs survive restarts without re-paying
+reviewer calls; the review record is append-only evidence an operator can
+audit; Session 015's ORCHESTRATOR integration executor consumes
+`integration_brief.json` as the authoritative handoff and becomes the ONLY
+future writer of `MASTER_PROPOSAL.md` — during INTEGRATION, exactly as
+D-054 reserves.

@@ -29,18 +29,18 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`1.0.1` — Production UI finalisation (Session 011). Simple Mode is the
-production surface with real engine/profile/session selectors; the
-`same_as_orchestrator` contract is now a **TRUE shared Architect thread** —
-planning and the Final Audit resume the SAME actual external session (live →
-durable binding → persisted plan after restart) and the Final Audit inherits
-the Architect's profile/provider/model; and the Advanced/Details escape hatch
-exists only behind `--debug-ui`. The test suite is **620 passed, 0 failed**
-(604 at Session 010). The Session 010 baseline (Simple Mode default, core
-`ContinuousRunner`, one-shot Coder recovery override, Provider/Model controls,
-live acceptance PASSED 2026-09-27) is fully subsumed.
-References: `docs/reports/SESSION_011_PRODUCTION_UI_SESSION_CONTROL_V1.md`,
-`docs/reports/SESSION_010_SIMPLE_CONTINUOUS_V1.md`.
+`1.0.2` — Deterministic three-reviewer proposal review cycle (Session 014).
+Proposal Mode gains the REAL review loop: source validation, version
+freeze, three strictly-sequential reviewers over ONE frozen revision,
+deterministic aggregation, the integration brief, and durable
+`04_REVIEWS/` + `06_VERSIONS/` artifacts with file-based safe resume — all
+fail-closed, zero model calls in the suite. Coding Mode is unchanged: the
+1.0.1 production surface (Simple Mode default, `same_as_orchestrator`
+shared-Architect-thread continuity, Advanced/Details behind `--debug-ui`)
+is fully subsumed. The test suite is **822 passed, 0 failed** (759 at the
+Session 013 merge). References:
+`docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`,
+`docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`.
 
 **Proposal Mode foundation (Session 012) is MERGED into `main`** via
 **PR #1** (merge commit `c82d688fadc3a47324efb25b163a22acd2cd3190`, feature
@@ -54,8 +54,11 @@ Session 012 boundary no proposal UI, execution, persistence or hard-gate
 validators existed (D-054…D-056;
 `docs/reports/SESSION_012_PROPOSAL_MODE_FOUNDATION.md`).
 
-**Proposal review runtime bridge (Session 013 — branch
-`proposal-session-013`, NOT merged to `main`).** ONE-reviewer execution
+**Proposal review runtime bridge (Session 013 + 013A) is MERGED into
+`main`** via **PR #2** (merge commit
+`7ff806861955bfb698ed3512d2e9f1709de9180e`; Session 013 feature commit
+`d89b894c686c51ca96a8746daba131629bc4a24c`; strict-envelope correction
+`7ba0ab87ffb23f1ba761fc0989e1b9cfe914e96e`). ONE-reviewer execution
 infrastructure, still UI-free: the canonical SHA-256 proposal fingerprint
 (`proposal_fingerprint`, exact bytes, D-057), the deterministic reviewer
 prompt packet with non-negotiable read-only rules, the fail-closed review
@@ -69,10 +72,33 @@ PROPOSAL_ENGINEER, RED_TEAM_REVIEW→RED_TEAM_REVIEWER) is enforced BEFORE any
 driver call; only a fully valid execution advances the phase graph (BLOCKED
 verdicts take the explicit D-055 BLOCKED edge; INTEGRATION is reached but
 never left; COMPLETE stays reserved). All 86 new tests are offline
-(scripted driver, zero model calls). Full suite: **753 passed, 0 failed**.
-No proposal UI, loop orchestration, persistence or hard-gate validators
-exist yet (D-054…D-058;
-`docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`).
+(scripted driver, zero model calls). Post-merge baseline on `main`:
+**759 passed, 0 failed** (673 + 86 at `7ff8068`). At
+the Session 013 boundary NO autonomous multi-review loop existed
+(D-054…D-058; `docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`).
+
+**Deterministic three-reviewer cycle (Session 014 — branch
+`proposal-session-014`, NOT merged to `main`).** The review loop is REAL and
+fail-closed: `run_review_cycle()` walks IDLE → SOURCE_VALIDATION (workspace
+exists, MASTER_PROPOSAL non-empty/readable, fingerprint computes, bounded
+snapshot matches the fingerprinted bytes, iteration number valid — all
+BEFORE any driver call) → version freeze into `06_VERSIONS/` (exact bytes +
+JSON sidecar) → SCIENTIFIC_REVIEWER → PROPOSAL_ENGINEER → RED_TEAM_REVIEWER
+(strictly sequential, same frozen revision, hash re-verified before EACH
+reviewer and before aggregation) → deterministic aggregation
+(`proposal/review_aggregation.py`, verdict rule BLOCKED > NEEDS_REVISION >
+PASS, severity→reviewer→original finding order, exact-duplicate MARKING, no
+0–100 score) → integration brief (pure structured projection,
+`integration_required` flag) → durable artifacts in `04_REVIEWS/iteration_NNN/`
+(3 review JSONs + bundle + brief; deterministic JSON, atomic writes,
+conflict-fail-closed, transcripts never persisted). Safe resume: completed
+review phases reuse their durable artifacts when identity matches
+(iteration + role + hash); anything inconsistent fails closed
+(ARTIFACT_CONFLICT/STALE_PROPOSAL/REVIEW_FAILED/SOURCE_VALIDATION_FAILED).
+63 new offline tests; full suite **822 passed, 0 failed** (v1.0.2).
+No proposal UI, no INTEGRATION executor, no hard-gate validators, no score,
+no parallel reviewers yet (D-054…D-060;
+`docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`).
 
 ---
 
@@ -233,7 +259,8 @@ without a new ADR:
 | D-049 | Continuous execution is owned by the core `ContinuousRunner`, invoked through the worker actions `continuous`/`continuous_resume`; the UI never re-implements the loop (Session 010) |
 | D-050 | The Coder recovery override is ONE-SHOT: armed explicitly with a real session id, consumed by exactly one Builder operation; `always_new` itself is never changed (Session 010) |
 | D-054…D-056 | Proposal Mode FOUNDATION (merged via PR #1, Session 012): fully isolated parallel domain + idempotent never-overwriting workspace contract (D-054); explicit proposal phase graph with a permanently closed COMPLETE and operator-only FAILED escape (D-055); fail-closed canonical hard-gate identifiers, no validators yet (D-056) |
-| D-057, D-058 | Proposal review runtime bridge (branch `proposal-session-013`, Session 013): canonical SHA-256 exact-bytes proposal fingerprint is the ONE `proposal_hash` algorithm (D-057); `proposal_runtime` is the ONLY execution-adapter package — pure `proposal` stays import-clean, Coding Mode never imports proposal packages, one-review executor enforces phase→role mapping before driver contact and a before/after MASTER_PROPOSAL immutability guard (D-058) |
+| D-057, D-058 | Proposal review runtime bridge (merged via PR #2, Session 013): canonical SHA-256 exact-bytes proposal fingerprint is the ONE `proposal_hash` algorithm (D-057); `proposal_runtime` is the ONLY execution-adapter package — pure `proposal` stays import-clean, Coding Mode never imports proposal packages, one-review executor enforces phase→role mapping before driver contact and a before/after MASTER_PROPOSAL immutability guard (D-058) |
+| D-059, D-060 | Three-reviewer cycle (branch `proposal-session-014`, Session 014): review aggregation is a PURE deterministic contract — verdict rule BLOCKED > NEEDS_REVISION > PASS, severity→reviewer→original finding order, exact-duplicate MARKING, no numeric score, integration brief as structured projection (D-059); durable review artifacts are the ONLY persistence — `04_REVIEWS/iteration_NNN/` + `06_VERSIONS/` freeze, deterministic atomic JSON, conflict-fail-closed never-clobber, file-based safe resume keyed on (iteration, role, hash), transcripts never persisted (D-060) |
 
 ---
 
