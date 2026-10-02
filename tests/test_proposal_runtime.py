@@ -485,21 +485,32 @@ class TestReviewExecutor:
         assert len(report.raw_excerpt) == prt.MAX_EXCERPT_CHARS
 
     def test_33_no_full_transcript_persistence_is_introduced(self) -> None:
-        # Structural proof: the runtime package contains no persistence
-        # machinery at all — no database, no file writes, no sqlite.
+        # Session 013 contract, UPDATED BY DESIGN in Session 014: the runtime
+        # package still contains NO database/persistence machinery at all,
+        # and the executor still performs no file I/O (bounded evidence stays
+        # in memory).  Session 014 adds the 04_REVIEWS/+06_VERSIONS/ writers
+        # (review_artifacts.py / version_freeze.py) as the ONLY file writers
+        # in the package — structured artifacts only, transcripts never.
         runtime_dir = SRC_ROOT / "encomm_pcc" / "proposal_runtime"
+        db_forbidden = ("sqlite3", "Database(", "INSERT INTO", "to_csv")
         for path in sorted(runtime_dir.rglob("*.py")):
             text = path.read_text(encoding="utf-8")
-            for forbidden in (
-                "sqlite3",
-                "Database(",
-                "INSERT INTO",
-                "write_text",
-                "write_bytes",
-                ".write(",
-                "to_csv",
-            ):
+            for forbidden in db_forbidden:
                 assert forbidden not in text, f"{path}: contains {forbidden!r}"
+        # The executor itself performs NO file writes at all.
+        executor = (runtime_dir / "review_executor.py").read_text(encoding="utf-8")
+        for forbidden in ("write_text", "write_bytes", ".write(", "open("):
+            assert forbidden not in executor, (
+                f"review_executor.py: contains {forbidden!r}"
+            )
+        # The artifact writers never route the executor's raw-excerpt surface
+        # to disk: no attribute access to raw_excerpt and no whole-report
+        # to_dict() serialisation inside the writers (the loop may keep the
+        # execution to_dict() IN MEMORY; only the whitelisted writers persist).
+        for name in ("review_artifacts.py", "version_freeze.py"):
+            text = (runtime_dir / name).read_text(encoding="utf-8")
+            for forbidden in (".raw_excerpt", "execution.to_dict"):
+                assert forbidden not in text, f"{name}: contains {forbidden!r}"
 
     def test_report_serialises_to_json_friendly_dict(self, tmp_path: Path) -> None:
         root = build_workspace(tmp_path)

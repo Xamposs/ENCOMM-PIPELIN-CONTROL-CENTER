@@ -36,6 +36,17 @@ from .review_packet import (
     ProposalReviewPacket,
     build_review_packet,
 )
+from .review_aggregation import (
+    INTEGRATION_BRIEF_SCHEMA,
+    REVIEWER_ORDER,
+    SEVERITY_ORDER,
+    AggregatedFinding,
+    AggregatedPatch,
+    ProposalCycleVerdict,
+    ProposalReviewBundle,
+    aggregate_reviews,
+    build_integration_brief,
+)
 from .review_parser import (
     ProposalReviewParseError,
     parse_proposal_review,
@@ -59,9 +70,12 @@ from .workspace import (
 )
 
 __all__ = [
+    "AggregatedFinding",
+    "AggregatedPatch",
     "HARD_GATE_IDS",
     "HARD_GATE_IDS_TUPLE",
     "HARD_GATE_STATUS_VALUES",
+    "INTEGRATION_BRIEF_SCHEMA",
     "InvalidProposalTransitionError",
     "MASTER_PROPOSAL_RELPATH",
     "PROPOSAL_HASH_ALGORITHM",
@@ -71,6 +85,7 @@ __all__ = [
     "PROPOSAL_TRANSITIONS",
     "PROPOSAL_WORKSPACE_DIRS",
     "ProposalAgentConfig",
+    "ProposalCycleVerdict",
     "ProposalFinding",
     "ProposalFindingSeverity",
     "ProposalFingerprintError",
@@ -79,6 +94,7 @@ __all__ = [
     "ProposalIterationRecord",
     "ProposalPatch",
     "ProposalPhase",
+    "ProposalReviewBundle",
     "ProposalReviewInputs",
     "ProposalReviewPacket",
     "ProposalReviewParseError",
@@ -87,8 +103,12 @@ __all__ = [
     "ProposalRole",
     "ProposalStateMachine",
     "ProposalWorkspace",
+    "REVIEWER_ORDER",
     "ReviewSourceSnapshot",
+    "SEVERITY_ORDER",
     "SourceSnapshotError",
+    "aggregate_reviews",
+    "build_integration_brief",
     "build_review_packet",
     "load_review_snapshot",
     "parse_proposal_review",
