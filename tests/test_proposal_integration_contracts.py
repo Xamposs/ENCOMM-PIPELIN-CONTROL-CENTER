@@ -147,6 +147,35 @@ class TestIntegrationPacket:
                 )
             )
 
+    def test_previous_findings_unavailable_marker_when_unset(self) -> None:
+        packet = pp.build_integration_packet(make_inputs())
+        assert (
+            "## PREVIOUS FINDINGS (earlier iterations)\n\n[UNAVAILABLE"
+            in packet.prompt_text
+        )
+
+    def test_previous_findings_text_embedded_verbatim(self) -> None:
+        text = '{"findings": [{"message": "earlier iteration finding"}]}'
+        packet = pp.build_integration_packet(
+            make_inputs(previous_findings_text=text)
+        )
+        assert (
+            f"## PREVIOUS FINDINGS (earlier iterations)\n\n{text}"
+            in packet.prompt_text
+        )
+
+    def test_oversized_previous_findings_text_refused(self) -> None:
+        with pytest.raises(ValueError):
+            pp.build_integration_packet(
+                make_inputs(previous_findings_text="x" * 500_000)
+            )
+
+    def test_previous_findings_text_deterministic(self) -> None:
+        text = json.dumps([{"b": 2, "a": 1}], indent=2, sort_keys=True)
+        a = pp.build_integration_packet(make_inputs(previous_findings_text=text))
+        b = pp.build_integration_packet(make_inputs(previous_findings_text=text))
+        assert a.prompt_text == b.prompt_text
+
 
 # ---------------------------------------------------------------------------
 # PARSER — happy path (4)

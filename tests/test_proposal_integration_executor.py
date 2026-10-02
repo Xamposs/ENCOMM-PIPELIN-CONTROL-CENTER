@@ -29,6 +29,7 @@ zero network, zero model calls, real files in ``tmp_path`` only.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
@@ -547,6 +548,311 @@ class TestZeroAiCleanPass:
         machine, report, _driver = self._clean(tmp_path)
         assert report.state_advanced is True
         assert machine.phase is pp.ProposalPhase.HARD_GATE_VALIDATION
+
+
+# ---------------------------------------------------------------------------
+# PREVIOUS FINDINGS propagation (Session 015A corrective)
+# ---------------------------------------------------------------------------
+class TestPreviousFindingsPropagation:
+    """Session 015A: previous findings reach the ORCHESTRATOR prompt.
+
+    The brief's numbered matrix: None/[] render UNAVAILABLE, records reach
+    the prompt deterministically (byte-identical, sorted keys), run_iteration
+    forwarding works, oversized payloads fail BEFORE the driver call, the
+    zero-AI clean-PASS path stays zero-call without rendering, and no raw
+    transcript/provider/model data is introduced.
+    """
+
+    def _needs_revision_to_integration(self, tmp_path):
+        build_workspace(tmp_path)
+        reviewers = default_reviewers(
+            verdicts={pp.ProposalRole.SCIENTIFIC_REVIEWER: "NEEDS_REVISION"},
+            findings_for={pp.ProposalRole.SCIENTIFIC_REVIEWER: [dict(FINDING)]},
+        )
+        machine = ProposalStateMachine()
+        run_cycle_to_integration(tmp_path, machine, reviewers)
+        assert machine.phase is pp.ProposalPhase.INTEGRATION
+        return machine
+
+    def _clean_to_integration(self, tmp_path):
+        build_workspace(tmp_path)
+        reviewers = default_reviewers()  # all PASS, no findings
+        machine = ProposalStateMachine()
+        run_cycle_to_integration(tmp_path, machine, reviewers)
+        assert machine.phase is pp.ProposalPhase.INTEGRATION
+        return machine
+
+    def test_none_renders_unavailable_section(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path, machine, driver, previous_findings=None
+        )
+        assert report.outcome is prt.ProposalIntegrationOutcome.COMPLETED_CHANGED
+        assert (
+            "## PREVIOUS FINDINGS (earlier iterations)\n\n[UNAVAILABLE"
+            in driver.prompts[0]
+        )
+
+    def test_empty_list_renders_unavailable_section(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        driver = ScriptedOrchestrator()
+        report = run_int(tmp_path, machine, driver, previous_findings=[])
+        assert report.outcome is prt.ProposalIntegrationOutcome.COMPLETED_CHANGED
+        assert (
+            "## PREVIOUS FINDINGS (earlier iterations)\n\n[UNAVAILABLE"
+            in driver.prompts[0]
+        )
+
+    def test_records_reach_the_orchestrator_prompt(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        records = [
+            {
+                "severity": "high",
+                "message": "Claim X lacks a source",
+                "reviewer_role": "SCIENTIFIC_REVIEWER",
+                "source_refs": ["00_SOURCE_OF_TRUTH/PROJECT_FACTS.md"],
+            },
+            {
+                "severity": "medium",
+                "message": "Terminology drift in section 2",
+                "reviewer_role": "RED_TEAM_REVIEWER",
+            },
+        ]
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path, machine, driver, previous_findings=records
+        )
+        assert report.outcome is prt.ProposalIntegrationOutcome.COMPLETED_CHANGED
+        prompt = driver.prompts[0]
+        assert "PREVIOUS FINDINGS (earlier iterations)" in prompt
+        # Scope to the previous-findings section body: earlier prompt
+        # sections (the integration brief) legitimately carry similar keys.
+        section = prompt.split(
+            "## PREVIOUS FINDINGS (earlier iterations)\n\n", 1
+        )[1].split("\n\nREQUIRED OUTPUT", 1)[0]
+        for needle in (
+            '"message": "Claim X lacks a source"',
+            '"reviewer_role": "SCIENTIFIC_REVIEWER"',
+            '"severity": "high"',
+            '"message": "Terminology drift in section 2"',
+            '"reviewer_role": "RED_TEAM_REVIEWER"',
+            '"severity": "medium"',
+        ):
+            assert needle in section
+        # Deterministic canonical JSON: keys inside every record sorted.
+        assert section.index('"message"') < section.index('"severity"')
+        assert section.index('"reviewer_role"') < section.index('"severity"')
+
+    def test_rendering_is_byte_identical_across_runs(self, tmp_path):
+        records = [
+            {"z": "last", "a": "first", "m": {"y": 2, "b": 1}},
+            {"k": [3, 1, 2], "id": "finding:7"},
+        ]
+        prompts: list[str] = []
+        for root in (tmp_path / "run-a", tmp_path / "run-b"):
+            machine = self._needs_revision_to_integration(root)
+            driver = ScriptedOrchestrator()
+            report = run_int(root, machine, driver, previous_findings=records)
+            assert report.outcome is (
+                prt.ProposalIntegrationOutcome.COMPLETED_CHANGED
+            )
+            assert len(driver.prompts) == 1
+            prompts.append(driver.prompts[0])
+        assert prompts[0] == prompts[1]
+        # The rendering is exactly the specified canonical JSON.
+        expected = json.dumps(
+            records, indent=2, sort_keys=True, ensure_ascii=False
+        )
+        assert expected in prompts[0]
+
+    def test_key_order_is_sorted_and_stable(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        records = [{"zebra": 1, "alpha": 2, "middle": 3}]
+        driver = ScriptedOrchestrator()
+        run_int(tmp_path, machine, driver, previous_findings=records)
+        prompt = driver.prompts[0]
+        alpha = prompt.index('"alpha"')
+        middle = prompt.index('"middle"')
+        zebra = prompt.index('"zebra"')
+        assert alpha < middle < zebra
+
+    def test_run_iteration_forwards_records_to_the_prompt(self, tmp_path):
+        build_workspace(tmp_path)
+        reviewers = default_reviewers(
+            verdicts={pp.ProposalRole.SCIENTIFIC_REVIEWER: "NEEDS_REVISION"},
+            findings_for={pp.ProposalRole.SCIENTIFIC_REVIEWER: [dict(FINDING)]},
+        )
+        machine = ProposalStateMachine()
+        records = [
+            {
+                "severity": "high",
+                "message": "iteration-1 unresolved finding",
+                "id": "finding:2",
+            }
+        ]
+        report = prt.run_iteration(
+            workspace=tmp_path,
+            state_machine=machine,
+            iteration_number=1,
+            proposal_revision=REVISION,
+            reviewer_drivers=reviewers,
+            orchestrator_driver=ScriptedOrchestrator(),
+            previous_findings_records=records,
+        )
+        assert report.outcome is prt.ProposalIterationOutcome.READY_FOR_NEXT_ITERATION
+        integration = report.integration_report
+        assert integration is not None
+        assert integration["outcome"] == "COMPLETED_CHANGED"
+        # The handoff carries the records verbatim (unchanged NEXT_ITERATION
+        # contract); the prompt assertion lives in the dedicated test below.
+        handoff = json.loads(
+            (tmp_path / "05_CONTROL" / "NEXT_ITERATION.json").read_text()
+        )
+        assert handoff["previous_findings"] == records
+
+    def test_run_iteration_records_reach_driver_prompt(self, tmp_path):
+        build_workspace(tmp_path)
+        reviewers = default_reviewers(
+            verdicts={pp.ProposalRole.SCIENTIFIC_REVIEWER: "NEEDS_REVISION"},
+            findings_for={pp.ProposalRole.SCIENTIFIC_REVIEWER: [dict(FINDING)]},
+        )
+        machine = ProposalStateMachine()
+        records = [{"message": "handoff-records prompt check", "n": 1}]
+        orchestrator = ScriptedOrchestrator()
+        report = prt.run_iteration(
+            workspace=tmp_path,
+            state_machine=machine,
+            iteration_number=1,
+            proposal_revision=REVISION,
+            reviewer_drivers=reviewers,
+            orchestrator_driver=orchestrator,
+            previous_findings_records=records,
+        )
+        assert report.outcome is prt.ProposalIterationOutcome.READY_FOR_NEXT_ITERATION
+        # ScriptedReviewer keeps exactly one attribute `.prompt`; the
+        # orchestrator keeps `.prompts` — the single integration call.
+        assert len(orchestrator.prompts) == 1
+        assert (
+            "## PREVIOUS FINDINGS (earlier iterations)"
+            in orchestrator.prompts[0]
+        )
+        assert '"message": "handoff-records prompt check"' in (
+            orchestrator.prompts[0]
+        )
+
+    def test_oversized_payload_fails_before_driver_call(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        # One field above the packet's per-section cap: the rendering is
+        # deterministic and exceeds MAX_INTEGRATION_PACKET_SECTION_CHARS.
+        oversized = [
+            {
+                "payload": "x" * (400_000 + 1),
+            }
+        ]
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path, machine, driver, previous_findings=oversized
+        )
+        assert report.outcome is prt.ProposalIntegrationOutcome.DRIVER_FAILED
+        assert "previous findings cannot be rendered" in report.error
+        assert driver.started == 0  # ZERO driver contact
+        assert machine.phase is pp.ProposalPhase.INTEGRATION
+        assert (
+            pp.ProposalWorkspace(tmp_path)
+            .master_proposal_path()
+            .read_bytes()
+            == PROPOSAL_V1
+        )
+
+    def test_non_list_previous_findings_rejected(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path, machine, driver, previous_findings="not a list"
+        )
+        assert report.outcome is prt.ProposalIntegrationOutcome.DRIVER_FAILED
+        assert "must be a list" in report.error
+        assert driver.started == 0
+
+    def test_input_records_never_mutated(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        records = [{"b": 2, "a": 1, "nested": {"y": 2, "x": 1}}]
+        snapshot = copy.deepcopy(records)
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path, machine, driver, previous_findings=records
+        )
+        assert report.outcome is prt.ProposalIntegrationOutcome.COMPLETED_CHANGED
+        assert records == snapshot
+
+    def test_no_transcript_or_provider_metadata_introduced(self, tmp_path):
+        machine = self._needs_revision_to_integration(tmp_path)
+        records = [
+            {"message": "legitimate finding", "severity": "medium"},
+        ]
+        driver = ScriptedOrchestrator()
+        run_int(tmp_path, machine, driver, previous_findings=records)
+        prompt = driver.prompts[0]
+        # Scope to the previous-findings section body: the OUTPUT CONTRACT
+        # section after it legitimately quotes the envelope markers, and the
+        # sections before it are not this feature's rendering.
+        section = prompt.split(
+            "## PREVIOUS FINDINGS (earlier iterations)\n\n", 1
+        )[1].split("\n\nREQUIRED OUTPUT", 1)[0]
+        assert "ENCOMM_PROPOSAL_INTEGRATION_START" not in section
+        assert "ENCOMM_PROPOSAL_INTEGRATION_END" not in section
+        for forbidden in (
+            "provider",
+            "model",
+            "driver_id",
+            "session_id",
+            "transcript",
+        ):
+            # The section rendering carries ONLY the records themselves.
+            assert forbidden not in section.lower()
+
+    def test_zero_ai_clean_pass_needs_no_rendering(self, tmp_path):
+        machine = self._clean_to_integration(tmp_path)
+        driver = ScriptedOrchestrator()
+        report = run_int(
+            tmp_path,
+            machine,
+            driver,
+            previous_findings=[{"message": "unused on this path"}],
+        )
+        assert report.outcome is (
+            prt.ProposalIntegrationOutcome.NO_INTEGRATION_REQUIRED
+        )
+        assert driver.started == 0
+        assert driver.prompts == []
+        # The no-op artifact is still written and the machine advanced.
+        assert report.state_advanced is True
+        assert machine.phase is pp.ProposalPhase.HARD_GATE_VALIDATION
+
+    def test_next_iteration_handoff_unchanged(self, tmp_path):
+        build_workspace(tmp_path)
+        reviewers = default_reviewers(
+            verdicts={pp.ProposalRole.SCIENTIFIC_REVIEWER: "NEEDS_REVISION"},
+            findings_for={pp.ProposalRole.SCIENTIFIC_REVIEWER: [dict(FINDING)]},
+        )
+        machine = ProposalStateMachine()
+        report = prt.run_iteration(
+            workspace=tmp_path,
+            state_machine=machine,
+            iteration_number=1,
+            proposal_revision=REVISION,
+            reviewer_drivers=reviewers,
+            orchestrator_driver=ScriptedOrchestrator(),
+        )
+        assert report.outcome is prt.ProposalIterationOutcome.READY_FOR_NEXT_ITERATION
+        data = json.loads(
+            (tmp_path / "05_CONTROL" / "NEXT_ITERATION.json").read_text()
+        )
+        assert data["previous_findings"] == []
+        assert data["next_iteration_number"] == 2
+        assert data["previous_reviewed_hash"] == HASH1
+        assert data["revised_proposal_hash"] == HASH2
 
 
 # ---------------------------------------------------------------------------

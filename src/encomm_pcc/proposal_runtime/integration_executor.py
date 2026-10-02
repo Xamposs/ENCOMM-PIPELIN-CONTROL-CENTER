@@ -55,6 +55,7 @@ from ..proposal.enums import ProposalPhase
 from ..proposal.fingerprint import proposal_fingerprint
 from ..proposal.integration_models import ProposalIntegrationResult
 from ..proposal.integration_packet import (
+    MAX_INTEGRATION_PACKET_SECTION_CHARS,
     ProposalIntegrationInputs,
     build_integration_packet,
 )
@@ -198,6 +199,45 @@ def _brief_actionable(brief: dict[str, Any]) -> bool:
     )
 
 
+def _render_previous_findings(
+    previous_findings: list[dict[str, Any]] | None,
+) -> str:
+    """Deterministic bounded canonical-JSON rendering of previous findings.
+
+    ``None`` and ``[]`` render as the empty string, so the packet renders
+    its existing explicit UNAVAILABLE marker for the section.  Rendering is
+    deterministic (``sort_keys``, fixed indent, ``ensure_ascii=False``) and
+    carries NOTHING but the records themselves: no timestamps, no
+    provider/model metadata, no raw transcripts.  The input list is never
+    mutated.  Only ``None`` or a ``list`` is accepted (the public type
+    contract); anything else fails closed.  An oversized rendering fails
+    CLOSED here — before packet construction and any driver contact — and
+    is never truncated, partially serialised or silently dropped.
+    """
+    if previous_findings is None:
+        return ""
+    if not isinstance(previous_findings, list):
+        raise ValueError(
+            "previous_findings must be a list of finding records or None; "
+            f"got {type(previous_findings).__name__}."
+        )
+    if not previous_findings:
+        return ""
+    rendered = json.dumps(
+        previous_findings,
+        indent=2,
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    if len(rendered) > MAX_INTEGRATION_PACKET_SECTION_CHARS:
+        raise ValueError(
+            "rendered previous findings exceed "
+            f"{MAX_INTEGRATION_PACKET_SECTION_CHARS} characters "
+            f"({len(rendered)}); refusing to embed unbounded input."
+        )
+    return rendered
+
+
 def run_integration(
     *,
     workspace: Path,
@@ -217,6 +257,10 @@ def run_integration(
     number and revision, the injected ORCHESTRATOR ``BaseDriver`` (ignored —
     and REQUIRED to be ``None``-tolerant — on the zero-AI clean-pass path)
     and the optional session policy/timeout forwarded to the driver.
+
+    ``previous_findings`` (the earlier iterations' finding records) is
+    rendered deterministically into the packet's existing PREVIOUS FINDINGS
+    section — bounded and fail-closed BEFORE any driver contact.
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -344,6 +388,14 @@ def run_integration(
             f"bounded source snapshot could not be loaded: {exc}",
         )
     brief_text = json.dumps(brief, indent=2, sort_keys=True, ensure_ascii=False)
+    try:
+        previous_findings_text = _render_previous_findings(previous_findings)
+    except (TypeError, ValueError) as exc:
+        return _fail(
+            ProposalIntegrationOutcome.DRIVER_FAILED,
+            f"previous findings cannot be rendered for the integration "
+            f"packet: {exc}",
+        )
     source_lines: list[str] = []
     source_lines.append("### 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md")
     source_lines.append(
@@ -372,6 +424,7 @@ def run_integration(
                 official_requirements_available=(
                     snapshot.official_requirements_available
                 ),
+                previous_findings_text=previous_findings_text,
             )
         )
     except ValueError as exc:

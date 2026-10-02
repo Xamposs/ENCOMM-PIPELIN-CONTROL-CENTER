@@ -148,6 +148,30 @@ review iteration impossible (brief §14 requires it). The resume-entry set
 now accepts it and walks the existing edge; Session 014's own tests stay
 green unchanged.
 
+> **Session 015A corrective note:** previous-iteration findings are now
+> actually PROPAGATED into the ORCHESTRATOR integration packet, bounded and
+> fail-closed. Session 015 defined `ProposalIntegrationInputs.previous_findings_text`
+> and let `run_integration()` accept `previous_findings` (forwarded by
+> `run_iteration()` as `previous_findings_records`), but the executor built
+> the packet WITHOUT it — the records were silently dropped before the
+> ORCHESTRATOR prompt, breaking the revision-context contract. Fix (ONE
+> module, `integration_executor.py`): `_render_previous_findings()` converts
+> the records to deterministic canonical JSON (`indent=2`, `sort_keys`,
+> `ensure_ascii=False`; `None`/`[]` → empty string → the packet's existing
+> UNAVAILABLE marker) and reuses the existing `PREVIOUS FINDINGS (earlier
+> iterations)` section — no duplicated packet rendering. An oversized
+> rendering exceeds `MAX_INTEGRATION_PACKET_SECTION_CHARS` and fails CLOSED
+> BEFORE packet construction and any driver contact (no truncation, no
+> partial serialization); non-list input is rejected; the input list is
+> never mutated; no timestamps, provider/model metadata or raw transcripts
+> are introduced. The zero-AI clean-PASS path is unchanged (zero driver
+> calls, no rendering), and `NEXT_ITERATION.json` behavior is unchanged.
+> 17 new offline tests (4 packet contracts + 13 runtime, including
+> run_iteration forwarding and byte-identical determinism across two fresh
+> workspaces); full suite 920 → **937 passed, 0 failed**. A consistency
+> scan found no other Session 015 public parameter accepted but silently
+> unused.
+
 ## 7. Failure semantics (implemented exactly)
 
 Wrong state / missing brief / unreadable brief / schema mismatch /
