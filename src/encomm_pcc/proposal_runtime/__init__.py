@@ -22,6 +22,23 @@ the durable integration artifact, the review-freshness gate, the
 helper.
 """
 
+from .hard_gate_artifacts import (
+    HARD_GATE_FEEDBACK_FILENAME,
+    HARD_GATE_FEEDBACK_SCHEMA,
+    HARD_GATES_ARTIFACT_SCHEMA,
+    HARD_GATES_SNAPSHOT_FILENAME,
+    HardGateArtifactConflictError,
+    build_feedback_payload,
+    build_run_artifact,
+    update_latest_hard_gates_snapshot,
+    write_hard_gate_feedback,
+    write_iteration_hard_gates,
+)
+from .hard_gate_runner import (
+    ProposalHardGateRunOutcome,
+    ProposalHardGateRunReport,
+    run_hard_gates,
+)
 from .integration_artifacts import (
     INTEGRATION_RESULT_FILENAME,
     INTEGRATION_RESULT_SCHEMA,
@@ -93,6 +110,10 @@ from .version_freeze_post import (
 )
 
 __all__ = [
+    "HARD_GATE_FEEDBACK_FILENAME",
+    "HARD_GATE_FEEDBACK_SCHEMA",
+    "HARD_GATES_ARTIFACT_SCHEMA",
+    "HARD_GATES_SNAPSHOT_FILENAME",
     "INTEGRATION_RESULT_FILENAME",
     "INTEGRATION_RESULT_SCHEMA",
     "MASTER_PROPOSAL_FILENAME",
@@ -110,9 +131,12 @@ __all__ = [
     "VERSION_FREEZE_SIDECAR_SUFFIX",
     "ArtifactConflictError",
     "ArtifactResumeError",
+    "HardGateArtifactConflictError",
     "MasterProposalWriteError",
     "MasterProposalWriteReport",
     "NextIterationHandoffError",
+    "ProposalHardGateRunOutcome",
+    "ProposalHardGateRunReport",
     "ProposalIntegrationExecutionReport",
     "ProposalIntegrationOutcome",
     "ProposalIterationOutcome",
@@ -128,16 +152,22 @@ __all__ = [
     "SourceValidationError",
     "VersionFreezeError",
     "build_next_iteration_payload",
+    "build_feedback_payload",
+    "build_run_artifact",
     "evaluate_review_freshness",
     "format_iteration_name",
     "freeze_post_integration_version",
     "freeze_pre_review_version",
     "persist_cycle_artifacts",
     "replace_master_proposal",
+    "run_hard_gates",
     "run_integration",
     "run_iteration",
     "run_review",
     "run_review_cycle",
+    "update_latest_hard_gates_snapshot",
     "write_integration_result",
+    "write_hard_gate_feedback",
+    "write_iteration_hard_gates",
     "write_next_iteration_handoff",
 ]

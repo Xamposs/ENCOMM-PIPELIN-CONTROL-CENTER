@@ -8,7 +8,7 @@ engine CLIs (Hermes, Codex, or any compatible command-line agent), with
 SQLite persistence, restart recovery, and strict fail-closed parsing of every
 model answer.
 
-**Current version: 1.1.0 — Session 015: the REAL ORCHESTRATOR integration executor (strict envelope → fail-closed parse → mutation guard → runtime-owned atomic MASTER_PROPOSAL write), post-integration version freeze, durable integration_result.json, zero-AI clean-PASS bypass, review-freshness gate, NEXT_ITERATION.json revision handoff and one-iteration composition; Sessions 012–014 review infrastructure unchanged; 1.0.1's production UI unchanged.**
+**Current version: 1.2.0 — Session 016: the REAL deterministic hard-gate completion engine (14 canonical gates over the bound evidence contract `05_CONTROL/HARD_GATE_EVIDENCE.json`, review-freshness precondition, HARD_GATE_FEEDBACK.json for proposal failures, durable `04_REVIEWS/iteration_NNN/hard_gates.json` audit record + `05_CONTROL/HARD_GATES.json` snapshot) and the FIRST legitimate `ProposalPhase.COMPLETE` path; Sessions 012–015 review/integration infrastructure unchanged; 1.0.1's production UI unchanged.**
 
 - **Works today:** Simple Mode (default, production surface) — enter the goal, pick an
  engine for Architect / Coder / Auditor, configure the Hermes profile (Coder and

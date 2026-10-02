@@ -1703,3 +1703,108 @@ brief that nevertheless carries actionable items fails closed
 **Consequence.** The clean path costs zero model operations (test-pinned:
 zero driver calls); an inconsistent brief can never launder actionable
 findings through the bypass.
+## D-065 — Hard gates are DETERMINISTIC and EVIDENCE-BOUND; no model call ever decides a gate
+
+**Date:** Session 016
+**Status:** Accepted
+
+**Context.** Sessions 012–015 defined the canonical gate ids, the result
+contract and the review/integration machinery, but every gate validator
+was still future work. The first legitimate COMPLETE path must never be
+able to fabricate compliance: an LLM "compliance judgment", a fuzzy
+semantic match or a web lookup would make the proposal's terminal state
+non-reproducible and gullible.
+
+**Decision.** Every canonical gate is evaluated by a PURE deterministic
+function (`proposal/hard_gate_validators.py`) over exactly two inputs: the
+explicit operator-authored evidence contract
+(`05_CONTROL/HARD_GATE_EVIDENCE.json`, schema
+`encomm-pcc.hard-gate-evidence/v1`) and the exact current master-proposal
+bytes. No model/LLM call, no network access, no provider configuration and
+no engine name exists anywhere in the engine; matching is literal and
+structural only (ATX heading equality after whitespace/case
+normalisation, explicit marker records, Decimal-exact arithmetic). The
+evidence document is BIND-VALIDATED against the run's iteration number and
+the exact `proposal_hash`; anything else is refused, never re-bound.
+
+**Consequence.** Two runs over the same workspace produce byte-identical
+`hard_gates.json` artifacts (test-pinned across fresh workspaces); the
+audit record is reproducible evidence, and the only way to change a gate
+outcome is to change real content or real evidence.
+
+## D-066 — Missing, invalid or stale evidence NEVER becomes PASS or NOT_APPLICABLE
+
+**Date:** Session 016
+**Status:** Accepted
+
+**Context.** A gate whose inputs are absent has evaluated NOTHING; an
+engine that reported PASS (or quietly skipped the gate) for missing
+evidence would fabricate compliance exactly as D-056's placeholder ban
+prevented.
+
+**Decision.** Every evidence problem fails closed and is CLASSIFIED:
+absent/zero-byte section or file → `EVIDENCE_MISSING`; present-but-
+malformed → `EVIDENCE_INVALID`; evidence bound to another revision or
+iteration → refused at load (`HardGateEvidenceError`). These classes map
+to the BLOCKED lifecycle outcome — the OPERATOR must supply evidence;
+the proposal itself has not failed. `NOT_APPLICABLE` is accepted ONLY
+from an explicit applicability entry (`applicable=false` + non-empty
+reason), preserved verbatim in the gate result; a gate can never
+self-declare N/A because its input is missing.
+
+**Consequence.** A missing-evidence state is loud (BLOCKED, exact reason
+in the report), never green; the report distinguishes "the proposal needs
+revision" from "operator/evidence input missing" (test-pinned).
+
+## D-067 — COMPLETE requires ALL canonical gates PASS or explicitly justified NOT_APPLICABLE; WARN blocks
+
+**Date:** Session 016
+**Status:** Accepted
+
+**Context.** D-055 permanently closed COMPLETE at the graph level; the
+first real walk onto it needed a completion rule that could not be
+partially satisfied.
+
+**Decision.** `run_hard_gates()` evaluates ALL 14 canonical gates in
+`HARD_GATE_IDS_TUPLE` order (a registry missing, duplicating or extending
+that set is an engine bug refused before any evaluation) and walks
+`HARD_GATE_VALIDATION → COMPLETE` ONLY when every gate result is PASS or
+explicit justified NOT_APPLICABLE — ZERO FAIL, WARN, missing or invalid
+results remain. The review-freshness precondition (D-063, reused — never
+duplicated) runs FIRST: a stale proposal never runs gates and walks to
+REVISION_REQUIRED instead. One WARN (e.g. PAGE_LIMIT measured by an
+explicit estimate) yields INCOMPLETE: the machine legitimately stays at
+`HARD_GATE_VALIDATION` so the operator can supply authoritative evidence
+and re-run — WARN never permits COMPLETE.
+
+**Consequence.** COMPLETE is reachable for the FIRST time through exactly
+one auditable path (test-pinned end to end: review cycle → integration →
+freshness → 14 PASS → COMPLETE), and remains terminal (D-055).
+
+## D-068 — Proposal-content failures and evidence failures have DIFFERENT lifecycle outcomes
+
+**Date:** Session 016
+**Status:** Accepted
+
+**Context.** A budget that does not add up and a missing PAGE_BUDGET.json
+are both "not COMPLETE", but they demand different follow-ups: the first
+needs a new proposal iteration (a content revision), the second needs the
+OPERATOR to supply input. Collapsing both into one state would misdirect
+the next iteration.
+
+**Decision.** At least one gate classified `PROPOSAL_ISSUE` walks
+`HARD_GATE_VALIDATION → REVISION_REQUIRED` after writing the structured
+`05_CONTROL/HARD_GATE_FEEDBACK.json` (schema
+`encomm-pcc.hard-gate-feedback/v1`: iteration, hash, failed gates with
+messages/evidence pointers/failure classes — deterministic remediation
+context only, no AI-generated prose). Evidence-classified failures walk
+to `BLOCKED` with NO feedback file and NO gate-evaluation artifacts for
+the run (nothing was evaluated). The durable per-iteration
+`04_REVIEWS/iteration_NNN/hard_gates.json` is the immutable audit record
+(conflict-fail-closed); `05_CONTROL/HARD_GATES.json` is the latest-state
+snapshot updated atomically under the documented current-state policy
+(a zero-byte seed is an uninitialised control file).
+
+**Consequence.** The next iteration consumes precise, machine-readable
+revision demands; the operator sees exactly which input is missing;
+neither state can be mistaken for the other (test-pinned).
