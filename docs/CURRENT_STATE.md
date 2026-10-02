@@ -29,6 +29,29 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
+`1.2.0` — Deterministic hard-gate completion engine + the FIRST legitimate
+`ProposalPhase.COMPLETE` path (Session 016, branch
+`proposal-session-016`). Proposal Mode gains the REAL HARD-GATE ENGINE:
+the machine-readable evidence contract
+(`05_CONTROL/HARD_GATE_EVIDENCE.json`, schema
+`encomm-pcc.hard-gate-evidence/v1`, bound to ONE iteration + ONE exact
+`proposal_hash`), 14 REAL deterministic validators (PURE, one per canonical
+gate id — no LLM judgment, no fake PASS, no fuzzy matching, Decimal-exact
+arithmetic, WARN blocks COMPLETE), the runtime `run_hard_gates()` executor
+(review-freshness precondition reusing D-063; COMPLETE only when every
+gate is PASS or explicitly justified NOT_APPLICABLE; proposal failures →
+`HARD_GATE_FEEDBACK.json` + REVISION_REQUIRED; evidence failures →
+BLOCKED), and the durable per-iteration
+`04_REVIEWS/iteration_NNN/hard_gates.json` audit record plus the
+`05_CONTROL/HARD_GATES.json` latest-state snapshot. Session 016A
+(corrective, same branch): CLAIM_LEDGER claims carry the canonical
+`claim_id` only (no legacy `id` fallback), and status/failure-class
+coherence invariants plus an engine-level guard make it impossible for
+an inconsistent evaluation to reach COMPLETE. The test suite is
+**1021 passed, 0 failed** (1003 after Session 016; 937 at the Session
+015+015A merge). Reference:
+`docs/reports/SESSION_016_HARD_GATE_ENGINE.md` (Session 016A note).
+
 `1.1.0` — ORCHESTRATOR integration + deterministic revision handoff
 (Session 015). Proposal Mode gains the REAL INTEGRATION phase: the
 strict-envelope ORCHESTRATOR integration packet and fail-closed parser
@@ -112,8 +135,12 @@ No proposal UI, no INTEGRATION executor, no hard-gate validators, no score,
 no parallel reviewers yet (D-054…D-060;
 `docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`).
 
-**ORCHESTRATOR integration + revision handoff (Session 015 — branch
-`proposal-session-015`).** The INTEGRATION phase is REAL and fail-closed:
+**ORCHESTRATOR integration + revision handoff (Session 015 + 015A —
+MERGED to `main` via PR #4**; merge commit
+`fdaaf5d0f4b509b11a17f3843446310b2bc0a3f2`; Session 015 feature commit
+`8a9332e204a1b035a741baa7c124ea101cb911f0`; Session 015A corrective commit
+`692199e939f0b8eef5df7b9b5b42fa4ac3f44e9e`; post-merge verified baseline
+on `main`: **937 passed, 0 failed**).** The INTEGRATION phase is REAL and fail-closed:
 `run_integration()` consumes the authoritative
 `04_REVIEWS/iteration_NNN/integration_brief.json` (iteration + hash
 verified against the live master BEFORE any driver contact), takes the
@@ -301,7 +328,8 @@ without a new ADR:
 | D-054…D-056 | Proposal Mode FOUNDATION (merged via PR #1, Session 012): fully isolated parallel domain + idempotent never-overwriting workspace contract (D-054); explicit proposal phase graph with a permanently closed COMPLETE and operator-only FAILED escape (D-055); fail-closed canonical hard-gate identifiers, no validators yet (D-056) |
 | D-057, D-058 | Proposal review runtime bridge (merged via PR #2, Session 013): canonical SHA-256 exact-bytes proposal fingerprint is the ONE `proposal_hash` algorithm (D-057); `proposal_runtime` is the ONLY execution-adapter package — pure `proposal` stays import-clean, Coding Mode never imports proposal packages, one-review executor enforces phase→role mapping before driver contact and a before/after MASTER_PROPOSAL immutability guard (D-058) |
 | D-059, D-060 | Three-reviewer cycle (branch `proposal-session-014`, Session 014): review aggregation is a PURE deterministic contract — verdict rule BLOCKED > NEEDS_REVISION > PASS, severity→reviewer→original finding order, exact-duplicate MARKING, no numeric score, integration brief as structured projection (D-059); durable review artifacts are the ONLY persistence — `04_REVIEWS/iteration_NNN/` + `06_VERSIONS/` freeze, deterministic atomic JSON, conflict-fail-closed never-clobber, file-based safe resume keyed on (iteration, role, hash), transcripts never persisted (D-060) |
-| D-061…D-064 | ORCHESTRATOR integration (branch `proposal-session-015`, Session 015): the ORCHESTRATOR is the SOLE integration authority — no second integrator role, INTEGRATION-phase-gated (D-061); the model returns content, the runtime owns the atomic MASTER_PROPOSAL write with pre-write mutation detection (D-062); a proposal changed by integration MUST be re-reviewed — the review-freshness gate + NEXT_ITERATION handoff (D-063); a truly clean PASS may use the zero-AI integration bypass (D-064) |
+| D-061…D-064 | ORCHESTRATOR integration (merged via PR #4, Session 015): the ORCHESTRATOR is the SOLE integration authority — no second integrator role, INTEGRATION-phase-gated (D-061); the model returns content, the runtime owns the atomic MASTER_PROPOSAL write with pre-write mutation detection (D-062); a proposal changed by integration MUST be re-reviewed — the review-freshness gate + NEXT_ITERATION handoff (D-063); a truly clean PASS may use the zero-AI integration bypass (D-064) |
+| D-065…D-068 | Deterministic hard gates (branch `proposal-session-016`, Session 016): hard gates are DETERMINISTIC and EVIDENCE-BOUND — no model/network call ever decides a gate (D-065); missing/invalid/stale evidence never becomes PASS or NOT_APPLICABLE (D-066); COMPLETE requires ALL 14 canonical gates PASS or explicitly justified N/A, with WARN blocking (D-067); proposal-content failures (REVISION_REQUIRED + HARD_GATE_FEEDBACK.json) and evidence failures (BLOCKED) have DIFFERENT lifecycle outcomes (D-068) |
 
 ---
 
