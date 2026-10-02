@@ -13,6 +13,12 @@ Covers the mandated BASE CONTRACT and per-validator matrix sections
 
 All tests are OFFLINE and deterministic: real files in ``tmp_path`` only,
 zero model calls, zero network.
+
+Session 016A additions: CLAIM_LEDGER claims carry the CANONICAL
+``claim_id`` only (legacy ``id`` never substitutes), and every
+:class:`HardGateEvaluation` is status/failure-class coherent so an
+inconsistent evaluation can never launder a FAIL into COMPLETE
+(constructor + engine-level defense in depth).
 """
 
 from __future__ import annotations
@@ -959,3 +965,286 @@ def test_deterministic_evaluations_across_fresh_workspaces(tmp_path):
     result_a = evaluate(tmp_path / "a")
     result_b = evaluate(tmp_path / "b")
     assert result_a.to_dict() == result_b.to_dict()
+
+
+# ---------------------------------------------------------------------------
+# Session 016A — canonical claim_id + evaluation coherence invariants
+# ---------------------------------------------------------------------------
+def evaluate_with_ledger(tmp_path: Path, claims: list) -> HardGateRunResult:
+    """Evaluate with ONE ``CLAIM_LEDGER.json`` claims array replaced."""
+    ws, ws_hash = build_workspace(tmp_path)
+    (ws / "02_EVIDENCE" / "CLAIM_LEDGER.json").write_text(
+        json.dumps({"claims": claims}), encoding="utf-8"
+    )
+    return evaluate_hard_gates(
+        evidence=load_hard_gate_evidence(
+            ws / "05_CONTROL" / "HARD_GATE_EVIDENCE.json",
+            expected_iteration_number=ITERATION,
+            expected_proposal_hash=ws_hash,
+        ),
+        master_proposal_text=GOOD_TEXT,
+        workspace=ws,
+    )
+
+
+class TestCanonicalClaimId:
+    """CLAIM_LEDGER claims use the CANONICAL ``claim_id`` field ONLY."""
+
+    def test_canonical_claim_id_passes(self, tmp_path):
+        result = evaluate_with_ledger(
+            tmp_path, [{"claim_id": "CL-1", "source_ref": "SRC-1"}]
+        )
+        assert (
+            gate(result, "SOURCE_OF_TRUTH_INTEGRITY").status
+            is ProposalHardGateStatus.PASS
+        )
+
+    def test_legacy_id_without_claim_id_is_evidence_invalid(self, tmp_path):
+        result = evaluate_with_ledger(
+            tmp_path, [{"id": "CL-1", "source_ref": "SRC-1"}]
+        )
+        entry = gate(result, "SOURCE_OF_TRUTH_INTEGRITY")
+        assert entry.status is ProposalHardGateStatus.FAIL
+        assert entry.failure_class is HardGateFailureClass.EVIDENCE_INVALID
+        assert "claim_id" in entry.message
+
+    def test_duplicate_claim_id_rejected(self, tmp_path):
+        result = evaluate_with_ledger(
+            tmp_path,
+            [
+                {"claim_id": "CL-1", "source_ref": "SRC-1"},
+                {"claim_id": "CL-1", "source_ref": "SRC-1"},
+            ],
+        )
+        entry = gate(result, "SOURCE_OF_TRUTH_INTEGRITY")
+        assert entry.failure_class is HardGateFailureClass.EVIDENCE_INVALID
+        assert "duplicate" in entry.message
+
+    def test_both_claim_gates_use_the_same_canonical_claim_id(
+        self, tmp_path
+    ):
+        # The canonical id is accepted by SOURCE_OF_TRUTH_INTEGRITY AND the
+        # citation gate keys its verdict on the SAME field value.
+        result = evaluate_with_ledger(
+            tmp_path,
+            [
+                {
+                    "claim_id": "CL-9",
+                    "source_ref": "SRC-1",
+                    "requires_citation": True,
+                    "citation_verified": False,
+                    "source_refs": ["SRC-1"],
+                }
+            ],
+        )
+        assert (
+            gate(result, "SOURCE_OF_TRUTH_INTEGRITY").status
+            is ProposalHardGateStatus.PASS
+        )
+        citation = gate(result, "CITATION_VERIFICATION")
+        assert citation.status is ProposalHardGateStatus.FAIL
+        assert "CL-9" in citation.message
+        # The legacy `id` shape is refused by BOTH gates: one canonical
+        # field, no fallback, no migration guessing.
+        result2 = evaluate_with_ledger(
+            tmp_path / "legacy",
+            [
+                {
+                    "id": "CL-9",
+                    "source_ref": "SRC-1",
+                    "requires_citation": True,
+                    "citation_verified": True,
+                    "source_refs": ["SRC-1"],
+                }
+            ],
+        )
+        legacy_source = gate(result2, "SOURCE_OF_TRUTH_INTEGRITY")
+        assert legacy_source.status is ProposalHardGateStatus.FAIL
+        assert legacy_source.failure_class is HardGateFailureClass.EVIDENCE_INVALID
+        legacy_citation = gate(result2, "CITATION_VERIFICATION")
+        assert legacy_citation.status is ProposalHardGateStatus.FAIL
+        assert legacy_citation.failure_class is HardGateFailureClass.EVIDENCE_INVALID
+
+
+class TestEvaluationCoherence:
+    """Session 016A: status/failure-class coherence protects COMPLETE.
+
+    A FAIL always names why (never ``NONE``); PASS/NOT_APPLICABLE/WARN never
+    carry a failure class.  Inconsistent pairs are refused at construction,
+    and the disposition rule independently refuses COMPLETE unless every
+    status is PASS or NOT_APPLICABLE.
+    """
+
+    GATE = HARD_GATE_IDS_TUPLE[3]
+    NA_GATE = "SUBCONTRACTING_CORE_TASKS"
+
+    def _run(self, evaluations) -> HardGateRunResult:
+        return HardGateRunResult.from_evaluations(
+            iteration_number=ITERATION,
+            proposal_hash="a" * 64,
+            evaluations=evaluations,
+        )
+
+    def _all_pass(self) -> list[HardGateEvaluation]:
+        return [
+            HardGateEvaluation(gate_id=g, status=ProposalHardGateStatus.PASS)
+            for g in HARD_GATE_IDS_TUPLE
+        ]
+
+    # -- inconsistent pairs are refused at CONSTRUCTION ---------------------
+    def test_fail_with_none_failure_class_cannot_construct(self):
+        with pytest.raises(ValueError):
+            HardGateEvaluation(
+                gate_id=self.GATE,
+                status=ProposalHardGateStatus.FAIL,
+                failure_class=HardGateFailureClass.NONE,
+            )
+        # The deserialization path is equally refused.
+        with pytest.raises(ValueError):
+            HardGateEvaluation.from_dict(
+                {
+                    "gate_id": self.GATE,
+                    "status": "FAIL",
+                    "failure_class": "NONE",
+                }
+            )
+
+    def test_pass_with_proposal_issue_cannot_construct(self):
+        with pytest.raises(ValueError):
+            HardGateEvaluation(
+                gate_id=self.GATE,
+                status=ProposalHardGateStatus.PASS,
+                failure_class=HardGateFailureClass.PROPOSAL_ISSUE,
+            )
+
+    def test_not_applicable_with_evidence_failure_cannot_construct(self):
+        for failure_class in (
+            HardGateFailureClass.EVIDENCE_MISSING,
+            HardGateFailureClass.EVIDENCE_INVALID,
+        ):
+            with pytest.raises(ValueError):
+                HardGateEvaluation(
+                    gate_id=self.GATE,
+                    status=ProposalHardGateStatus.NOT_APPLICABLE,
+                    failure_class=failure_class,
+                )
+
+    def test_warn_with_non_none_failure_class_cannot_construct(self):
+        for failure_class in (
+            HardGateFailureClass.PROPOSAL_ISSUE,
+            HardGateFailureClass.EVIDENCE_MISSING,
+            HardGateFailureClass.EVIDENCE_INVALID,
+        ):
+            with pytest.raises(ValueError):
+                HardGateEvaluation(
+                    gate_id=self.GATE,
+                    status=ProposalHardGateStatus.WARN,
+                    failure_class=failure_class,
+                )
+
+    # -- coherent pairs construct -------------------------------------------
+    def test_warn_with_none_is_valid(self):
+        evaluation = HardGateEvaluation(
+            gate_id=self.GATE,
+            status=ProposalHardGateStatus.WARN,
+            failure_class=HardGateFailureClass.NONE,
+        )
+        assert evaluation.failure_class is HardGateFailureClass.NONE
+
+    def test_pass_with_none_is_valid(self):
+        evaluation = HardGateEvaluation(
+            gate_id=self.GATE,
+            status=ProposalHardGateStatus.PASS,
+            failure_class=HardGateFailureClass.NONE,
+        )
+        assert evaluation.status is ProposalHardGateStatus.PASS
+
+    def test_fail_with_proposal_issue_is_valid(self):
+        evaluation = HardGateEvaluation(
+            gate_id=self.GATE,
+            status=ProposalHardGateStatus.FAIL,
+            failure_class=HardGateFailureClass.PROPOSAL_ISSUE,
+        )
+        assert evaluation.failure_class is HardGateFailureClass.PROPOSAL_ISSUE
+
+    def test_fail_with_evidence_missing_is_valid(self):
+        evaluation = HardGateEvaluation(
+            gate_id=self.GATE,
+            status=ProposalHardGateStatus.FAIL,
+            failure_class=HardGateFailureClass.EVIDENCE_MISSING,
+        )
+        assert evaluation.failure_class is HardGateFailureClass.EVIDENCE_MISSING
+
+    # -- engine-level defense in depth ---------------------------------------
+    def test_inconsistent_non_pass_status_cannot_complete(self):
+        evaluations = self._all_pass()
+        # Laundering attempt: a FAIL status appears WITHOUT a failure class
+        # (post-construction mutation / future refactor).  The failure-class
+        # routing finds nothing, so the engine-level guard must refuse.
+        evaluations[3].status = ProposalHardGateStatus.FAIL
+        with pytest.raises(HardGateEngineError):
+            self._run(evaluations)
+        # A stray WARN can never launder into COMPLETE either: it stays
+        # INCOMPLETE.
+        evaluations[3].status = ProposalHardGateStatus.WARN
+        assert self._run(evaluations).disposition is (
+            HardGateDisposition.INCOMPLETE
+        )
+
+    # -- the disposition rule itself -----------------------------------------
+    def test_fourteen_pass_produces_complete(self):
+        result = self._run(self._all_pass())
+        assert result.disposition is HardGateDisposition.COMPLETE
+
+    def test_pass_plus_justified_na_produces_complete(self):
+        evaluations = self._all_pass()
+        evaluations[HARD_GATE_IDS_TUPLE.index(self.NA_GATE)] = (
+            HardGateEvaluation(
+                gate_id=self.NA_GATE,
+                status=ProposalHardGateStatus.NOT_APPLICABLE,
+                message="no subcontracting exists in this programme",
+                evidence="applicability.explicit_not_applicable",
+                failure_class=HardGateFailureClass.NONE,
+            )
+        )
+        result = self._run(evaluations)
+        assert result.disposition is HardGateDisposition.COMPLETE
+
+    def test_one_warn_remains_incomplete(self):
+        evaluations = self._all_pass()
+        evaluations[HARD_GATE_IDS_TUPLE.index("PAGE_LIMIT")] = (
+            HardGateEvaluation(
+                gate_id="PAGE_LIMIT",
+                status=ProposalHardGateStatus.WARN,
+                message="estimate",
+                failure_class=HardGateFailureClass.NONE,
+            )
+        )
+        result = self._run(evaluations)
+        assert result.disposition is HardGateDisposition.INCOMPLETE
+
+    def test_one_proposal_fail_is_revision_required(self):
+        evaluations = self._all_pass()
+        evaluations[HARD_GATE_IDS_TUPLE.index("MANDATORY_SECTIONS")] = (
+            HardGateEvaluation(
+                gate_id="MANDATORY_SECTIONS",
+                status=ProposalHardGateStatus.FAIL,
+                message="missing heading",
+                failure_class=HardGateFailureClass.PROPOSAL_ISSUE,
+            )
+        )
+        result = self._run(evaluations)
+        assert result.disposition is HardGateDisposition.REVISION_REQUIRED
+
+    def test_one_evidence_fail_is_blocked(self):
+        evaluations = self._all_pass()
+        evaluations[HARD_GATE_IDS_TUPLE.index("PAGE_LIMIT")] = (
+            HardGateEvaluation(
+                gate_id="PAGE_LIMIT",
+                status=ProposalHardGateStatus.FAIL,
+                message="PAGE_BUDGET.json is missing.",
+                failure_class=HardGateFailureClass.EVIDENCE_MISSING,
+            )
+        )
+        result = self._run(evaluations)
+        assert result.disposition is HardGateDisposition.BLOCKED

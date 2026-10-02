@@ -130,6 +130,37 @@ POST:  python -m pytest   → 1003 passed, 0 failed   (937 + 66 new)
 git diff --check          → clean
 ```
 
+> **Session 016A corrective note:** two hard-gate invariants are
+> TIGHTENED on the same branch (no version bump, stays 1.2.0; full suite
+> 1003 → **1021 passed, 0 failed**; zero Coding Mode changes, zero model
+> calls, zero network):
+>
+> 1. **CLAIM_LEDGER claims carry the canonical `claim_id` ONLY.**
+>    `SOURCE_OF_TRUTH_INTEGRITY` accepted a legacy fallback
+>    (`claim.get("claim_id", claim.get("id"))`) that created schema drift
+>    against `CITATION_VERIFICATION` (which always demanded `claim_id`).
+>    The fallback is removed: the claim must be an object with a non-empty
+>    string `claim_id`; a legacy-only `id` is FAIL/EVIDENCE_INVALID — no
+>    migration, no guessing. Both claim gates now key on the SAME canonical
+>    field, and the minimal-schema help text reads
+>    `claims[{claim_id, source_ref, ...}]`.
+> 2. **`COMPLETE` is protected by status AND failure-class coherence
+>    invariants.** `HardGateEvaluation.__post_init__` now enforces the full
+>    coherence matrix: PASS / NOT_APPLICABLE / WARN must carry
+>    `failure_class=NONE`, and FAIL MUST carry a concrete class — so
+>    `FAIL+NONE`, `PASS+PROPOSAL_ISSUE`, `WARN+EVIDENCE_*` and
+>    `N/A+EVIDENCE_*` cannot be CONSTRUCTED (the `from_dict` path is
+>    equally refused). Defense in depth at the engine level:
+>    `HardGateRunResult.from_evaluations()` verifies before assigning
+>    `COMPLETE` that EVERY status is PASS or NOT_APPLICABLE; any remaining
+>    FAIL/WARN that was not already routed raises `HardGateEngineError`
+>    instead of being silently coerced — an inconsistent evaluation can
+>    never launder a FAIL into COMPLETE.
+>
+> 18 new offline regression tests (4 canonical-claim_id + 14
+> coherence/disposition, in `test_proposal_hard_gate_contracts.py`);
+> all 1003 pre-existing tests stay green unchanged.
+
 ## 7. Failure semantics (implemented exactly)
 
 Wrong state ⇒ RUN_FAILED, machine untouched, no transition. Stale

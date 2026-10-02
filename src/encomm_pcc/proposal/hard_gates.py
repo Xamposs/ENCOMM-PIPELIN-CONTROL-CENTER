@@ -25,6 +25,11 @@ HARD RULES (ADRs D-065/D-066/D-067):
   (``applicable=false`` + non-empty reason).  Missing evidence never
   becomes PASS and never becomes NOT_APPLICABLE.
 * ``WARN`` never permits COMPLETE.
+* ``COMPLETE`` is protected TWICE (Session 016A): every
+  :class:`HardGateEvaluation` is constructed status/failure-class
+  coherent (a ``FAIL`` always names why; PASS/N-A/WARN never carry
+  a failure class), and the disposition assigns ``COMPLETE`` ONLY
+  when every status is PASS or NOT_APPLICABLE.
 """
 
 from __future__ import annotations
@@ -144,6 +149,11 @@ class HardGateEvaluation:
     Carries the :class:`ProposalHardGateResult` fields (``gate_id``,
     ``status``, ``message``, ``evidence``) plus the internal
     :class:`HardGateFailureClass` that drives the lifecycle outcome.
+
+    Coherence invariants (Session 016A): ``PASS``/``NOT_APPLICABLE``/
+    ``WARN`` always carry ``failure_class=NONE``; ``FAIL`` always
+    carries a concrete failure class.  Inconsistent pairs are
+    refused at construction — they can never reach the disposition.
     """
 
     gate_id: str
@@ -163,14 +173,35 @@ class HardGateEvaluation:
             self.status = ProposalHardGateStatus(str(self.status))
         if not isinstance(self.failure_class, HardGateFailureClass):
             self.failure_class = HardGateFailureClass(str(self.failure_class))
-        # A passing/applicable gate can never carry a failure class.
+        # Status/failure-class coherence matrix (Session 016A): the pair
+        # MUST be internally consistent, and an inconsistent evaluation
+        # fails at CONSTRUCTION — it can never reach the disposition
+        # rule and launder a FAIL into COMPLETE.
+        #
+        #   PASS / NOT_APPLICABLE / WARN  ⇒ failure_class MUST be NONE
+        #   FAIL                          ⇒ failure_class MUST NOT be NONE
         if (
-            self.status in (ProposalHardGateStatus.PASS, ProposalHardGateStatus.NOT_APPLICABLE)
+            self.status
+            in (
+                ProposalHardGateStatus.PASS,
+                ProposalHardGateStatus.NOT_APPLICABLE,
+                ProposalHardGateStatus.WARN,
+            )
             and self.failure_class is not HardGateFailureClass.NONE
         ):
             raise ValueError(
                 f"gate {self.gate_id}: status {self.status.value} cannot "
                 f"carry failure_class {self.failure_class.value}."
+            )
+        if (
+            self.status is ProposalHardGateStatus.FAIL
+            and self.failure_class is HardGateFailureClass.NONE
+        ):
+            raise ValueError(
+                f"gate {self.gate_id}: status FAIL requires a failure "
+                "class (PROPOSAL_ISSUE, EVIDENCE_MISSING or "
+                "EVIDENCE_INVALID); a FAIL without a class can never "
+                "be disposed."
             )
 
     def to_dict(self) -> dict[str, Any]:
@@ -266,6 +297,11 @@ class HardGateRunResult:
         2. any ``EVIDENCE_MISSING``/``INVALID``    → ``BLOCKED``
         3. any ``WARN``                            → ``INCOMPLETE``
         4. otherwise (PASS / explicit N/A only)    → ``COMPLETE``
+
+        Defense in depth (Session 016A): step 4 verifies EVERY status
+        is ``PASS`` or ``NOT_APPLICABLE`` before COMPLETE is assigned;
+        any remaining FAIL/WARN raises :class:`HardGateEngineError` —
+        an inconsistent evaluation is never silently coerced.
         """
         ids = [e.gate_id for e in evaluations]
         if tuple(ids) != HARD_GATE_IDS_TUPLE:
@@ -284,6 +320,25 @@ class HardGateRunResult:
         elif any(e.status is ProposalHardGateStatus.WARN for e in evaluations):
             disposition = HardGateDisposition.INCOMPLETE
         else:
+            # COMPLETE is legal ONLY when every canonical status is
+            # PASS or NOT_APPLICABLE (Session 016A defense in depth):
+            # a FAIL/WARN status that reached this point un-routed is
+            # an engine invariant breach — raise, never coerce.
+            unrouteable = [
+                (e.gate_id, e.status.value)
+                for e in evaluations
+                if e.status
+                not in (
+                    ProposalHardGateStatus.PASS,
+                    ProposalHardGateStatus.NOT_APPLICABLE,
+                )
+            ]
+            if unrouteable:
+                raise HardGateEngineError(
+                    "inconsistent hard-gate evaluation set: COMPLETE "
+                    "requires every gate status to be PASS or "
+                    f"NOT_APPLICABLE; offending gates: {unrouteable!r}."
+                )
             disposition = HardGateDisposition.COMPLETE
         return cls(
             iteration_number=int(iteration_number),

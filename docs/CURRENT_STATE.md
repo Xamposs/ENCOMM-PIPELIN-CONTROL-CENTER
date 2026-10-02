@@ -43,9 +43,14 @@ gate is PASS or explicitly justified NOT_APPLICABLE; proposal failures →
 `HARD_GATE_FEEDBACK.json` + REVISION_REQUIRED; evidence failures →
 BLOCKED), and the durable per-iteration
 `04_REVIEWS/iteration_NNN/hard_gates.json` audit record plus the
-`05_CONTROL/HARD_GATES.json` latest-state snapshot. The test suite is
-**1003 passed, 0 failed** (937 at the Session 015+015A merge). Reference:
-`docs/reports/SESSION_016_HARD_GATE_ENGINE.md`.
+`05_CONTROL/HARD_GATES.json` latest-state snapshot. Session 016A
+(corrective, same branch): CLAIM_LEDGER claims carry the canonical
+`claim_id` only (no legacy `id` fallback), and status/failure-class
+coherence invariants plus an engine-level guard make it impossible for
+an inconsistent evaluation to reach COMPLETE. The test suite is
+**1021 passed, 0 failed** (1003 after Session 016; 937 at the Session
+015+015A merge). Reference:
+`docs/reports/SESSION_016_HARD_GATE_ENGINE.md` (Session 016A note).
 
 `1.1.0` — ORCHESTRATOR integration + deterministic revision handoff
 (Session 015). Proposal Mode gains the REAL INTEGRATION phase: the

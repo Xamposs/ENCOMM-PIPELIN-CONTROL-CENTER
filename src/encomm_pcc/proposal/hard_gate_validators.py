@@ -343,7 +343,8 @@ def _validate_source_of_truth(ctx: HardGateContext) -> HardGateEvaluation:
             gate_id,
             HardGateFailureClass.EVIDENCE_INVALID,
             "expected 'sources' and 'claims' arrays (minimal supported "
-            "schema: sources[{id,...}], claims[{id,source_ref,...}]).",
+            "schema: sources[{id,...}], "
+            "claims[{claim_id, source_ref, ...}]).",
         )
     source_ids: set[str] = set()
     for index, source in enumerate(sources):
@@ -363,24 +364,30 @@ def _validate_source_of_truth(ctx: HardGateContext) -> HardGateEvaluation:
         source_ids.add(sid)
     claim_ids: set[str] = set()
     for index, claim in enumerate(claims):
-        cid = (
-            claim.get("claim_id", claim.get("id"))
-            if isinstance(claim, dict)
-            else None
-        )
-        if not isinstance(cid, str) or not cid.strip():
+        if not isinstance(claim, dict):
             return _fail(
                 gate_id,
                 HardGateFailureClass.EVIDENCE_INVALID,
                 f"claims[{index}] must be an object with a non-empty "
                 "'claim_id'.",
             )
-        cid = cid.strip()
+        # Canonical identifier ONLY (Session 016A): the legacy `id`
+        # field never substitutes for `claim_id` — no fallback, no
+        # schema drift, no migration guessing.
+        cid_raw = claim.get("claim_id")
+        if not isinstance(cid_raw, str) or not cid_raw.strip():
+            return _fail(
+                gate_id,
+                HardGateFailureClass.EVIDENCE_INVALID,
+                f"claims[{index}].claim_id must be a non-empty string "
+                "(minimal schema: claims[{claim_id, source_ref, ...}]).",
+            )
+        cid = cid_raw.strip()
         if cid in claim_ids:
             return _fail(
                 gate_id,
                 HardGateFailureClass.EVIDENCE_INVALID,
-                f"duplicate claim id {cid!r}.",
+                f"duplicate claim_id {cid!r}.",
             )
         claim_ids.add(cid)
         source_ref = claim.get("source_ref")
