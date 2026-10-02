@@ -1808,3 +1808,44 @@ snapshot updated atomically under the documented current-state policy
 **Consequence.** The next iteration consumes precise, machine-readable
 revision demands; the operator sees exactly which input is missing;
 neither state can be mistaken for the other (test-pinned).
+## D-069 — Proposal Mode's operator surface is a THIRD mode-stack index over a file-scoped config and a dedicated worker thread
+
+**Context.** Sessions 012–016 proved the Proposal backend with NO operator
+surface. Session 017 had to expose it without regressing the released
+Coding Simple Mode (stack index 0, the production default) or the Advanced
+debug surface (index 1), without a persistence migration, and without ever
+blocking the UI thread on a proposal AI call.
+
+**Decision.**
+
+1. Proposal Mode is `mode_stack` INDEX 2. Existing indices and semantics
+   are frozen; startup still lands on index 0. Simple Mode's ONLY change is
+   the `PROPOSAL MODE` navigation affordance (`request_proposal`), and
+   Proposal's only way back is `BACK TO CODING MODE`.
+2. Proposal role configuration is FILE-scoped:
+   `05_CONTROL/PROPOSAL_CONFIG.json` (schema `encomm-pcc.proposal-config/v1`,
+   deterministic atomic writes). It NEVER reuses or overwrites Coding Mode
+   role config, and NO SQLite migration exists. The file lives only inside
+   a chosen proposal workspace — never the process working directory.
+3. Engine dropdowns are populated from the SAME real `DriverRegistry` the
+   controller carries (`driver_ids()`); no parallel registry exists, and no
+   provider/model name appears in panel source (test-pinned). A session id
+   is kept only when the engine's capabilities report session support.
+4. Proposal AI operations run on a DEDICATED worker module
+   (`ui/proposal_worker.py`) with TWO bounded actions (`RUN_ITERATION`,
+   `RUN_HARD_GATES`) — it calls the existing executors and duplicates
+   nothing. There is no unbounded loop by construction. The worker QObject
+   must be constructed WITHOUT a Qt parent: a parented QObject cannot
+   `moveToThread`, and the move silently fails, pinning the "background"
+   work to the UI thread (found by the thread-identity test; pinned).
+5. Recovery is a READ-ONLY artifact reader (`workspace_status.py`). It
+   reports only what durable artifacts prove; ambiguous states surface
+   "Recovery requires operator confirmation" and never auto-run AI. The UI
+   is a renderer: gate results are loaded from artifacts, never recomputed;
+   the UI-only `NOT_RUN` never enters a domain artifact.
+
+**Consequence.** Coding Mode's production behaviour is unchanged
+(contract-snapshot tests pin exactly which UI files may reference the
+proposal domain), the proposal backend stays the only place proposal logic
+lives, and a packaged build gains the operator surface with zero schema
+risk.

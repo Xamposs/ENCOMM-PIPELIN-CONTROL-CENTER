@@ -598,8 +598,11 @@ class TestIsolation:
     def test_35_coding_mode_never_imports_proposal_runtime(self) -> None:
         code = (
             "import sys;"
+            # Session 017 (by design): encomm_pcc.ui hosts the Proposal Mode
+            # operator surface, so the UI package is no longer part of this
+            # import-clean probe — the CODING pipeline modules are.
             "import encomm_pcc.app, encomm_pcc.core, encomm_pcc.drivers, "
-            "encomm_pcc.persistence, encomm_pcc.ui, encomm_pcc.domain;"
+            "encomm_pcc.persistence, encomm_pcc.domain;"
             "leaked = [m for m in sys.modules if m.startswith("
             "('encomm_pcc.proposal',))];"
             "assert not leaked, f'coding mode imports proposal packages: {leaked}';"

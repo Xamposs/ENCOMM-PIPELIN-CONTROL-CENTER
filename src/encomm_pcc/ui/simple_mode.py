@@ -133,6 +133,8 @@ class SimpleModePanel(QWidget):
         self.request_pause: Any = None
         self.request_stop: Any = None
         self.request_advanced: Any = None
+        #: Session 017: wired by MainWindow — show Proposal Mode (index 2).
+        self.request_proposal: Any = None
         #: Set by MainWindow while a Continuous Run worker is active (§19).
         self.continuous_active = False
 
@@ -231,6 +233,13 @@ class SimpleModePanel(QWidget):
             advanced = QPushButton("Advanced / Details")
             advanced.clicked.connect(self._on_advanced)
             layout.addWidget(advanced)
+
+        # Session 017 (§2): the ONE Proposal Mode navigation affordance.
+        # No Coding Mode execution/config behaviour changes — the button only
+        # flips the window's mode stack to the Proposal surface.
+        proposal = QPushButton("PROPOSAL MODE")
+        proposal.clicked.connect(self._on_proposal)
+        layout.addWidget(proposal)
 
         # -- Coder recovery override (Session 010, §14/§15) --------------------
         # One-shot: applies ONLY to the current interrupted task/fix, then the
@@ -768,6 +777,10 @@ class SimpleModePanel(QWidget):
     def _on_advanced(self) -> None:
         if self.request_advanced is not None:
             self.request_advanced()
+
+    def _on_proposal(self) -> None:
+        if self.request_proposal is not None:
+            self.request_proposal()
 
     # -- goal/brief ---------------------------------------------------------
     def goal_text(self) -> str:

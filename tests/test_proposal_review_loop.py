@@ -982,8 +982,11 @@ class TestIsolation:
     def test_43_coding_mode_never_imports_proposal(self):
         code = (
             "import sys;"
+            # Session 017 (by design): encomm_pcc.ui hosts the Proposal Mode
+            # operator surface, so the UI package is no longer part of this
+            # import-clean probe — the CODING pipeline modules are.
             "import encomm_pcc.app, encomm_pcc.core, encomm_pcc.drivers, "
-            "encomm_pcc.persistence, encomm_pcc.ui, encomm_pcc.domain;"
+            "encomm_pcc.persistence, encomm_pcc.domain;"
             "leaked = [m for m in sys.modules if m.startswith("
             "('encomm_pcc.proposal',))];"
             "assert not leaked, f'coding mode imports proposal packages: {leaked}';"
@@ -1000,13 +1003,28 @@ class TestIsolation:
         assert "ok" in result.stdout
 
     def test_44_no_coding_mode_production_file_changed(self):
-        """Structural pin: the coding pipeline carries no proposal imports."""
+        """Structural pin: the coding pipeline carries no proposal imports.
+
+        Session 017 (by design): the UI package hosts the Proposal Mode
+        operator surface (proposal_mode.py + proposal_worker.py) — those two
+        modules are the ONLY proposal-referencing files allowed under ui/.
+        """
         coding_roots = ["app.py", "core", "domain", "drivers", "persistence", "ui"]
+        proposal_ui_modules = {
+            SRC_ROOT / "encomm_pcc" / "ui" / "proposal_mode.py",
+            SRC_ROOT / "encomm_pcc" / "ui" / "proposal_worker.py",
+            # Session 017 wiring: the mode-stack surface + the Simple Mode
+            # navigation affordance (brief §2: changes limited to it).
+            SRC_ROOT / "encomm_pcc" / "ui" / "main_window.py",
+            SRC_ROOT / "encomm_pcc" / "ui" / "simple_mode.py",
+        }
         offending: list[str] = []
         for root in coding_roots:
             base = SRC_ROOT / "encomm_pcc" / root
             paths = [base] if base.is_file() else sorted(base.rglob("*.py"))
             for path in paths:
+                if path in proposal_ui_modules:
+                    continue
                 text = path.read_text(encoding="utf-8")
                 if "proposal" in text:
                     offending.append(str(path))

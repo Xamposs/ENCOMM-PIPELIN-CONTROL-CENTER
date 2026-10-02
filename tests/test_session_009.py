@@ -425,7 +425,9 @@ class TestSimpleModeDefault:
             # Continuous checkbox exists and is OFF by default (explicit opt-in).
             assert window.simple_panel.continuous_check.isChecked() is False
             # The advanced surface kept its proven panels.
-            assert window.mode_stack.count() == 2
+            # Session 017 (by design): index 2 = Proposal Mode panel.
+            assert window.mode_stack.count() == 3
+            assert window.mode_stack.widget(2) is window.proposal_panel
             assert window.batch_panel is not None
             assert window.task_panel is not None
             assert window.history_panel is not None
