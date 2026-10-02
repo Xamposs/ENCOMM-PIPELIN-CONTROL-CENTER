@@ -21,6 +21,22 @@ from .fingerprint import (
     ProposalFingerprintError,
     proposal_fingerprint,
 )
+from .integration_models import (
+    INTEGRATION_ITEM_ACTIONS,
+    ProposalIntegrationItem,
+    ProposalIntegrationResult,
+)
+from .integration_packet import (
+    PROPOSAL_INTEGRATION_ENVELOPE_END,
+    PROPOSAL_INTEGRATION_ENVELOPE_START,
+    ProposalIntegrationInputs,
+    ProposalIntegrationPacket,
+    build_integration_packet,
+)
+from .integration_parser import (
+    ProposalIntegrationParseError,
+    parse_proposal_integration,
+)
 from .models import (
     ProposalAgentConfig,
     ProposalFinding,
@@ -76,9 +92,12 @@ __all__ = [
     "HARD_GATE_IDS_TUPLE",
     "HARD_GATE_STATUS_VALUES",
     "INTEGRATION_BRIEF_SCHEMA",
+    "INTEGRATION_ITEM_ACTIONS",
     "InvalidProposalTransitionError",
     "MASTER_PROPOSAL_RELPATH",
     "PROPOSAL_HASH_ALGORITHM",
+    "PROPOSAL_INTEGRATION_ENVELOPE_END",
+    "PROPOSAL_INTEGRATION_ENVELOPE_START",
     "PROPOSAL_REVIEW_ENVELOPE_END",
     "PROPOSAL_REVIEW_ENVELOPE_START",
     "PROPOSAL_REVIEW_VERDICTS",
@@ -91,6 +110,11 @@ __all__ = [
     "ProposalFingerprintError",
     "ProposalHardGateResult",
     "ProposalHardGateStatus",
+    "ProposalIntegrationInputs",
+    "ProposalIntegrationItem",
+    "ProposalIntegrationPacket",
+    "ProposalIntegrationParseError",
+    "ProposalIntegrationResult",
     "ProposalIterationRecord",
     "ProposalPatch",
     "ProposalPhase",
@@ -108,9 +132,11 @@ __all__ = [
     "SEVERITY_ORDER",
     "SourceSnapshotError",
     "aggregate_reviews",
+    "build_integration_packet",
     "build_integration_brief",
     "build_review_packet",
     "load_review_snapshot",
+    "parse_proposal_integration",
     "parse_proposal_review",
     "proposal_fingerprint",
     "validate_proposal_graph",

@@ -26,7 +26,7 @@ def _module_names() -> list[str]:
 
 
 def test_package_has_version() -> None:
-    assert encomm_pcc.__version__ == "1.0.2"
+    assert encomm_pcc.__version__ == "1.1.0"
 
 
 def test_every_module_imports() -> None:

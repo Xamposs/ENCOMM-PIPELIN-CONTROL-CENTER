@@ -70,7 +70,10 @@ from ..proposal.source_snapshot import (
     ReviewSourceSnapshot,
     load_review_snapshot,
 )
-from ..proposal.state_machine import ProposalStateMachine
+from ..proposal.state_machine import (
+    REVIEW_ITERATION_ENTRY,
+    ProposalStateMachine,
+)
 from ..proposal.workspace import MASTER_PROPOSAL_RELPATH
 from .review_artifacts import (
     ArtifactConflictError,
@@ -335,9 +338,15 @@ def run_review_cycle(
         ProposalPhase.SCIENTIFIC_REVIEW,
         ProposalPhase.IMPLEMENTATION_REVIEW,
         ProposalPhase.RED_TEAM_REVIEW,
+        # A fresh review iteration after integration: REVISION_REQUIRED walks
+        # its explicit D-055 edge to SCIENTIFIC_REVIEW (REVIEW_ITERATION_ENTRY)
+        # before the same-revision validation below.
+        ProposalPhase.REVISION_REQUIRED,
     )
     if state_before is ProposalPhase.IDLE:
         state_machine.transition_to(ProposalPhase.SOURCE_VALIDATION)
+    elif state_before is ProposalPhase.REVISION_REQUIRED:
+        state_machine.transition_to(REVIEW_ITERATION_ENTRY)
     elif state_before not in RESUME_ENTRY_PHASES:
         report.outcome = ProposalReviewCycleOutcome.REVIEW_FAILED
         report.error = (

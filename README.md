@@ -8,7 +8,7 @@ engine CLIs (Hermes, Codex, or any compatible command-line agent), with
 SQLite persistence, restart recovery, and strict fail-closed parsing of every
 model answer.
 
-**Current version: 1.0.2 — Session 014: deterministic three-reviewer proposal review cycle (source validation → SCIENTIFIC_REVIEWER → PROPOSAL_ENGINEER → RED_TEAM_REVIEWER → aggregation → integration brief), durable 04_REVIEWS/ + 06_VERSIONS/ artifacts, safe resume, 1.0.1's production UI unchanged.**
+**Current version: 1.1.0 — Session 015: the REAL ORCHESTRATOR integration executor (strict envelope → fail-closed parse → mutation guard → runtime-owned atomic MASTER_PROPOSAL write), post-integration version freeze, durable integration_result.json, zero-AI clean-PASS bypass, review-freshness gate, NEXT_ITERATION.json revision handoff and one-iteration composition; Sessions 012–014 review infrastructure unchanged; 1.0.1's production UI unchanged.**
 
 - **Works today:** Simple Mode (default, production surface) — enter the goal, pick an
  engine for Architect / Coder / Auditor, configure the Hermes profile (Coder and

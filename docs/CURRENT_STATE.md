@@ -29,18 +29,29 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`1.0.2` — Deterministic three-reviewer proposal review cycle (Session 014).
-Proposal Mode gains the REAL review loop: source validation, version
-freeze, three strictly-sequential reviewers over ONE frozen revision,
-deterministic aggregation, the integration brief, and durable
-`04_REVIEWS/` + `06_VERSIONS/` artifacts with file-based safe resume — all
-fail-closed, zero model calls in the suite. Coding Mode is unchanged: the
-1.0.1 production surface (Simple Mode default, `same_as_orchestrator`
-shared-Architect-thread continuity, Advanced/Details behind `--debug-ui`)
-is fully subsumed. The test suite is **822 passed, 0 failed** (759 at the
-Session 013 merge). References:
-`docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`,
-`docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`.
+`1.1.0` — ORCHESTRATOR integration + deterministic revision handoff
+(Session 015). Proposal Mode gains the REAL INTEGRATION phase: the
+strict-envelope ORCHESTRATOR integration packet and fail-closed parser
+(PURE), the runtime integration executor (guards → zero-AI clean-PASS
+bypass or packet→driver→parse→mutation-guard→RUNTIME-OWNED atomic
+MASTER_PROPOSAL write → post-integration version freeze → durable
+`integration_result.json`), the review-freshness gate (a changed proposal
+can never COMPLETE), the `05_CONTROL/NEXT_ITERATION.json` revision handoff
+and the one-iteration composition helper `run_iteration()`. The
+REVISION_REQUIRED → SCIENTIFIC_REVIEW iteration edge is now walked by the
+review loop. Coding Mode is unchanged: the 1.0.1 production surface is
+fully subsumed. The test suite is **920 passed, 0 failed** (824 at the
+Session 014 merge). References:
+`docs/reports/SESSION_015_ORCHESTRATOR_INTEGRATION.md`,
+`docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`.
+
+**Session 014 + 014A (the deterministic three-reviewer cycle) are MERGED
+into `main` via PR #3** — merge commit
+`b9bba1cb3870b6922279949380b484b75feffde7`; Session 014 feature commit
+`8b78ebb61d4c0c2f13113253ec553a93bae6fd41`; Session 014A corrective commit
+`8c3c7965d9bcd0adbeaa66aa0c894527208d6f7a`. Post-merge baseline on main:
+**824 passed, 0 failed**. Session 015 develops on branch
+`proposal-session-015`.
 
 **Proposal Mode foundation (Session 012) is MERGED into `main`** via
 **PR #1** (merge commit `c82d688fadc3a47324efb25b163a22acd2cd3190`, feature
@@ -77,8 +88,9 @@ never left; COMPLETE stays reserved). All 86 new tests are offline
 the Session 013 boundary NO autonomous multi-review loop existed
 (D-054…D-058; `docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`).
 
-**Deterministic three-reviewer cycle (Session 014 — branch
-`proposal-session-014`, NOT merged to `main`).** The review loop is REAL and
+**Deterministic three-reviewer cycle (Session 014 + 014A — MERGED to
+`main` via PR #3, merge commit
+`b9bba1cb3870b6922279949380b484b75feffde7`).** The review loop is REAL and
 fail-closed: `run_review_cycle()` walks IDLE → SOURCE_VALIDATION (workspace
 exists, MASTER_PROPOSAL non-empty/readable, fingerprint computes, bounded
 snapshot matches the fingerprinted bytes, iteration number valid — all
@@ -95,10 +107,38 @@ conflict-fail-closed, transcripts never persisted). Safe resume: completed
 review phases reuse their durable artifacts when identity matches
 (iteration + role + hash); anything inconsistent fails closed
 (ARTIFACT_CONFLICT/STALE_PROPOSAL/REVIEW_FAILED/SOURCE_VALIDATION_FAILED).
-63 new offline tests; full suite **822 passed, 0 failed** (v1.0.2).
+63 new offline tests (824 total after the 014A corrections).
 No proposal UI, no INTEGRATION executor, no hard-gate validators, no score,
 no parallel reviewers yet (D-054…D-060;
 `docs/reports/SESSION_014_THREE_REVIEWER_CYCLE.md`).
+
+**ORCHESTRATOR integration + revision handoff (Session 015 — branch
+`proposal-session-015`).** The INTEGRATION phase is REAL and fail-closed:
+`run_integration()` consumes the authoritative
+`04_REVIEWS/iteration_NNN/integration_brief.json` (iteration + hash
+verified against the live master BEFORE any driver contact), takes the
+deterministic zero-AI clean-PASS bypass when the brief says
+`integration_required=false` (truly clean PASS verified; otherwise fail
+closed), otherwise builds the ORCHESTRATOR packet over the frozen inputs
+and drives the injected `BaseDriver` — no engine hardcoded — parses the
+answer with the strict envelope parser (role/iteration/input-hash/revised
+contract), re-fingerprints BEFORE the write (a mid-call mutation refuses
+the output and never overwrites the externally modified file), and only
+then atomically replaces MASTER_PROPOSAL.md through the ONE legitimate
+writer (`master_writer.py`, usable ONLY at INTEGRATION). Post-write:
+`06_VERSIONS/iteration_NNN_post_integration.md` + sidecar freeze the exact
+written bytes; `04_REVIEWS/iteration_NNN/integration_result.json` records
+the structured dispositions (applied/rejected/unresolved with reasons) —
+no transcript, no raw envelope, no duplicate of the proposal bytes. The
+review-freshness gate sends a CHANGED proposal to REVISION_REQUIRED with a
+structured `05_CONTROL/NEXT_ITERATION.json` (never COMPLETE); an
+identical-output or zero-AI integration stays review-current toward the
+(future) hard gates. `run_iteration()` composes review cycle →
+integration → freshness → handoff: ONE call = ONE controlled iteration, no
+loop. 96 new offline tests; full suite **920 passed, 0 failed** (v1.1.0).
+No UI, no hard-gate validators beyond the freshness invariant, no
+scorecard, no parallel reviewers, no real-model acceptance (D-061…D-064;
+`docs/reports/SESSION_015_ORCHESTRATOR_INTEGRATION.md`).
 
 ---
 
@@ -261,6 +301,7 @@ without a new ADR:
 | D-054…D-056 | Proposal Mode FOUNDATION (merged via PR #1, Session 012): fully isolated parallel domain + idempotent never-overwriting workspace contract (D-054); explicit proposal phase graph with a permanently closed COMPLETE and operator-only FAILED escape (D-055); fail-closed canonical hard-gate identifiers, no validators yet (D-056) |
 | D-057, D-058 | Proposal review runtime bridge (merged via PR #2, Session 013): canonical SHA-256 exact-bytes proposal fingerprint is the ONE `proposal_hash` algorithm (D-057); `proposal_runtime` is the ONLY execution-adapter package — pure `proposal` stays import-clean, Coding Mode never imports proposal packages, one-review executor enforces phase→role mapping before driver contact and a before/after MASTER_PROPOSAL immutability guard (D-058) |
 | D-059, D-060 | Three-reviewer cycle (branch `proposal-session-014`, Session 014): review aggregation is a PURE deterministic contract — verdict rule BLOCKED > NEEDS_REVISION > PASS, severity→reviewer→original finding order, exact-duplicate MARKING, no numeric score, integration brief as structured projection (D-059); durable review artifacts are the ONLY persistence — `04_REVIEWS/iteration_NNN/` + `06_VERSIONS/` freeze, deterministic atomic JSON, conflict-fail-closed never-clobber, file-based safe resume keyed on (iteration, role, hash), transcripts never persisted (D-060) |
+| D-061…D-064 | ORCHESTRATOR integration (branch `proposal-session-015`, Session 015): the ORCHESTRATOR is the SOLE integration authority — no second integrator role, INTEGRATION-phase-gated (D-061); the model returns content, the runtime owns the atomic MASTER_PROPOSAL write with pre-write mutation detection (D-062); a proposal changed by integration MUST be re-reviewed — the review-freshness gate + NEXT_ITERATION handoff (D-063); a truly clean PASS may use the zero-AI integration bypass (D-064) |
 
 ---
 
