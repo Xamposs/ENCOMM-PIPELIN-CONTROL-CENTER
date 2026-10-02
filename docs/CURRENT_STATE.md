@@ -184,7 +184,7 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   ├── session_008_acceptance.py       real mixed-engine acceptance
 │   └── session_008_config_roundtrip.py config export/import round trip
 ├── src/encomm_pcc/
-│   ├── __init__.py             __version__ = "0.9.0"
+│   ├── __init__.py             __version__ = "1.0.2"
 │   ├── app.py                  run(), run_smoke_test(), build_controller(),
 │   │                           restore_state(), discover_hermes_profiles()
 │   ├── domain/                 enums, models, audit, batch_plan, final_audit,

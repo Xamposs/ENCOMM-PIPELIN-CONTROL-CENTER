@@ -14,6 +14,11 @@ Covers the mandated matrix sections:
   demands integration.
 * BLOCKED (19-22): each reviewer position stops the sequence exactly there;
   state is BLOCKED; a red-team BLOCKED never produces an integration bundle.
+* BLOCKED ARTIFACT CONFLICT (Session 014A): a conflicting artifact that
+  appears AFTER the loop's initial lookup but BEFORE the BLOCKED result is
+  persisted (the race window inside the reviewer call) fails closed as
+  ARTIFACT_CONFLICT — never swallowed, no later reviewer, conflicting
+  evidence untouched; the machine legitimately stays at BLOCKED.
 * OPERATIONAL FAILURES (23-25): parser/driver failures stop immediately;
   no invalid partial aggregate is ever produced.
 * REVISION INTEGRITY (26-31): a proposal change between reviewers (or after
@@ -477,6 +482,116 @@ class TestBlocked:
         assert (iter_dir / "red_team_review.json").exists()
         assert not (iter_dir / "review_bundle.json").exists()
         assert not (iter_dir / "integration_brief.json").exists()
+
+    def test_014a_blocked_conflict_mid_review_fails_closed(
+        self, tmp_path, monkeypatch
+    ):
+        """Race window (Session 014A): a conflicting scientific_review.json
+        appears AFTER the loop's initial artifact lookup but BEFORE the
+        BLOCKED result is persisted.  The conflict MUST fail closed:
+        ARTIFACT_CONFLICT with the real error, no later reviewer launched,
+        conflicting evidence byte-identical, machine honestly at BLOCKED
+        (the D-055 edge was taken before persistence — it is not reversed)."""
+        build_workspace(tmp_path)
+        machine = ProposalStateMachine()
+        drivers = default_drivers(
+            {pp.ProposalRole.SCIENTIFIC_REVIEWER: "BLOCKED"}
+        )
+
+        conflict_result = review_payload(
+            role=pp.ProposalRole.SCIENTIFIC_REVIEWER,
+            verdict="BLOCKED",
+            summary="CONFLICTING pre-existing evidence (different result).",
+        )
+
+        def _write_conflicting_artifact() -> bytes:
+            target = (
+                tmp_path / "04_REVIEWS" / "iteration_001"
+                / "scientific_review.json"
+            )
+            assert not target.exists()  # race precondition: it was absent at lookup
+            target.parent.mkdir(parents=True, exist_ok=True)
+            raw = json.dumps({
+                "schema": "encomm-pcc.review-artifact/v1",
+                "iteration_number": 1,
+                "proposal_revision": REVISION,
+                "proposal_hash": report_hash_holder["hash"],
+                "reviewer_role": "SCIENTIFIC_REVIEWER",
+                "result": conflict_result,
+                "reused": False,
+                "runtime": {"outcome": "COMPLETED"},
+            }, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+            target.write_bytes(raw)
+            return raw
+
+        conflict_bytes: list[bytes] = []
+
+        report_hash_holder: dict = {"hash": ""}
+
+        class ConflictingDriver(ScriptedDriver):
+            def wait_for_completion(self, handle, timeout_s=None):  # noqa: ANN001
+                report_hash_holder["hash"] = current_cycle_hash["value"]
+                conflict_bytes.append(_write_conflicting_artifact())
+                return super().wait_for_completion(handle, timeout_s)
+
+        current_cycle_hash: dict = {"value": ""}
+
+        real_fingerprint = pp.proposal_fingerprint
+
+        def spy_fingerprint(path):  # noqa: ANN001
+            value = real_fingerprint(path)
+            current_cycle_hash["value"] = value
+            return value
+
+        monkeypatch.setattr(
+            "encomm_pcc.proposal_runtime.review_loop.proposal_fingerprint",
+            spy_fingerprint,
+        )
+
+        sci = ConflictingDriver(
+            answer_for(pp.ProposalRole.SCIENTIFIC_REVIEWER, "BLOCKED")
+        )
+        drivers[pp.ProposalRole.SCIENTIFIC_REVIEWER] = sci
+        report = run_cycle(tmp_path, machine=machine, drivers=drivers)
+
+        assert report.outcome is prt.ProposalReviewCycleOutcome.ARTIFACT_CONFLICT
+        assert "artifact_content_conflict" in report.error
+        assert report.failed_role == "SCIENTIFIC_REVIEWER"
+        assert machine.phase is pp.ProposalPhase.BLOCKED
+        assert report.state_after is pp.ProposalPhase.BLOCKED
+        assert sci.started == 1
+        assert drivers[pp.ProposalRole.PROPOSAL_ENGINEER].started == 0
+        assert drivers[pp.ProposalRole.RED_TEAM_REVIEWER].started == 0
+        assert report.completed_roles == []
+        assert report.aggregate_bundle is None
+        assert report.integration_brief_path == ""
+        iter_dir = tmp_path / "04_REVIEWS" / "iteration_001"
+        assert not (iter_dir / "review_bundle.json").exists()
+        assert not (iter_dir / "integration_brief.json").exists()
+        assert not (iter_dir / "implementation_review.json").exists()
+        conflicting = iter_dir / "scientific_review.json"
+        # Byte-for-byte untouched: the cycle never overwrote/repaired it.
+        assert conflicting.read_bytes() == conflict_bytes[0]
+        data = json.loads(conflicting.read_text(encoding="utf-8"))
+        assert data["result"]["summary"].startswith("CONFLICTING")
+        assert data["result"]["verdict"] == "BLOCKED"
+
+    def test_014a_blocked_without_conflict_still_persists(self, tmp_path):
+        build_workspace(tmp_path)
+        drivers = default_drivers({pp.ProposalRole.SCIENTIFIC_REVIEWER: "BLOCKED"})
+        machine = ProposalStateMachine()
+        report = run_cycle(tmp_path, machine=machine, drivers=drivers)
+        assert report.outcome is prt.ProposalReviewCycleOutcome.BLOCKED
+        assert machine.phase is pp.ProposalPhase.BLOCKED
+        assert report.completed_roles == ["SCIENTIFIC_REVIEWER"]
+        artifact = (
+            tmp_path / "04_REVIEWS" / "iteration_001" / "scientific_review.json"
+        )
+        assert artifact.exists()
+        data = json.loads(artifact.read_text(encoding="utf-8"))
+        assert data["result"]["verdict"] == "BLOCKED"
+        assert data["reviewer_role"] == "SCIENTIFIC_REVIEWER"
+        assert not (tmp_path / "04_REVIEWS" / "iteration_001" / "review_bundle.json").exists()
 
 
 # ---------------------------------------------------------------------------

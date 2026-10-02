@@ -123,6 +123,19 @@ and that the next driver's call count stays 0.
 
 ## 8. Test evidence (63 new, all offline/deterministic)
 
+> **Session 014A corrective note:** BLOCKED-review artifact conflicts are
+> now FAIL-CLOSED and test-pinned. The BLOCKED persistence path inside
+> `run_review_cycle()` previously swallowed `ArtifactConflictError`
+> (`except: pass`); it now reports `ARTIFACT_CONFLICT` with the real error
+> and `failed_role`, launches no later reviewer, and never touches the
+> conflicting evidence — the machine legitimately stays at BLOCKED (the
+> D-055 edge is taken before persistence and is not reversed). A regression
+> test pins the race window (conflicting artifact appears after the loop's
+> initial lookup, during the reviewer call) and the conflict-free BLOCKED
+> path is pinned as still persisting valid evidence. Full-suite count
+> becomes 824 with this commit; an audit confirmed no silent
+> `ArtifactConflictError` swallowing remains anywhere in the runtime.
+
 | Brief area | Tests |
 |---|---|
 | Source validation (1–5 + extras) | 9 — IDLE→SOURCE_VALIDATION entry, explicit SOURCE_VALIDATION entry, per-phase call observation, missing/empty master before drivers, oversized-SOT honesty, snapshot hash mismatch, invalid iteration, missing driver role, bad entry phase |

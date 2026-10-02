@@ -532,13 +532,25 @@ def run_review_cycle(
         if result.verdict is ProposalReviewVerdict.BLOCKED:
             # A VALID review that stops the cycle: the executor already took
             # the explicit BLOCKED edge; INTEGRATION is never reached.  The
-            # completed review's artifact is still persisted as evidence.
+            # completed review's artifact is still persisted as evidence —
+            # and a conflict while persisting it is FAIL-CLOSED (014A): it
+            # is never swallowed, the cycle reports ARTIFACT_CONFLICT with
+            # the real error, launches no later reviewer, and never
+            # overwrites/repairs the conflicting artifact.  The machine
+            # legitimately stays at BLOCKED (run_review took the D-055 edge
+            # BEFORE persistence; that transition is not reversed) — the
+            # report carries both facts.
             try:
                 writer.write_review_artifact(
                     role, result=result, execution=execution
                 )
-            except ArtifactConflictError:
-                pass  # evidence already on disk — never clobber
+            except ArtifactConflictError as exc:
+                _fail_closed(
+                    report, state_machine, exc,
+                    ProposalReviewCycleOutcome.ARTIFACT_CONFLICT,
+                    failed_role=role.value,
+                )
+                return _finish(report, state_machine, started)
             results[role] = result
             report.completed_roles.append(role.value)
             report.outcome = ProposalReviewCycleOutcome.BLOCKED
