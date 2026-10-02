@@ -103,9 +103,13 @@ cannot drift.
 
 * bounded input BEFORE parsing (`oversized_payload`); `json.loads` only —
   no eval/exec/YAML; non-object root → `unexpected_type`.
-* EXACTLY one START and one END marker: duplicates → `multiple_envelopes`;
-  unterminated → `unterminated_envelope`; zero markers → balanced-brace
-  rescue scan (prose-wrapped models), else `no_json_object`.
+* EXACTLY one START and one END marker — the envelope is MANDATORY
+  (corrected in Session 013A; the original balanced-brace rescue scan was
+  REMOVED): duplicates → `multiple_envelopes`; unterminated →
+  `unterminated_envelope`; zero markers → `missing_envelope` (even when the
+  text carries a syntactically perfect bare JSON object — there is NO
+  balanced-brace rescue and NO bare-JSON fallback). `no_json_object` now
+  only covers an envelope pair present with an empty payload.
 * `verdict` ∈ {PASS, NEEDS_REVISION, BLOCKED} (`invalid_verdict`).
 * `reviewer_role` ∈ the three reviewer roles (`invalid_reviewer_role`) AND
   must equal the expected role (`reviewer_role_mismatch`); ORCHESTRATOR can
@@ -166,7 +170,7 @@ persisted; the runtime package contains no persistence machinery at all
 |---|---|
 | Review packet (1–5 + extras) | 16 — determinism, role focus, read-only rules, SOT protection, honest official-requirements absence, ORCHESTRATOR refusal, input validation, envelope-in-prompt |
 | Fingerprint (6–8 + extras) | 7 — identical bytes, lowercase hex, one-byte change, no newline normalisation, missing/not-a-file/oversized failures, stable algorithm id |
-| Parser valid (9–11 + extras) | 7 — PASS/NEEDS_REVISION/BLOCKED, prose rescue, case handling, full-field round-trip |
+| Parser valid (9–11 + extras) | 7 — PASS/NEEDS_REVISION/BLOCKED, prose around a correct envelope, case handling, full-field round-trip |
 | Parser fail-closed (12–22 + extras) | 24 — every rule in §6, including duplicate/unterminated envelope, quoted iteration, both/none patch channels, oversized payload/list/string, never-coerce-to-PASS |
 | Runtime (23–33 + extras) | 13 — phase mapping, pre-driver rejection, advance-exactly-once, INTEGRATION-never-passed, malformed/driver-failure no-advance, BLOCKED edge, hash before, mutation detection ×3 phases, bounded excerpt, no-persistence structure, report JSON, policy/timeout forwarding |
 | Isolation (34–36 + extras) | 4 — subprocess proof ×3, distinct types |
@@ -222,6 +226,17 @@ foundation it describes is now merged to `main` via PR #1).
 
 Explicitly NOT yet: UI, hard gates, scorecards, citation verification,
 DOCX/PDF generation, database migrations.
+
+## 12. Session 013A addendum — strict review envelope (corrective follow-up)
+
+Follow-up commit on this branch, `fix(proposal): require strict review
+envelope (Session 013A)`: the parser's balanced-brace rescue / bare-JSON
+fallback was REMOVED — the envelope is mandatory.  Zero envelope markers now
+reject with `missing_envelope` even when the text carries a syntactically
+perfect bare JSON object; `no_json_object` only covers an envelope present
+with an empty payload.  Prose around a CORRECT envelope stays accepted.
+Regression pins: `tests/test_proposal_review_contracts.py::TestEnvelopeStrictness`.
+Pushed to `origin/proposal-session-013`; still NOT merged to `main`.
 
 ## GIT_STATUS
 

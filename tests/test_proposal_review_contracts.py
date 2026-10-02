@@ -313,9 +313,10 @@ class TestParserValid:
         )
         assert parse(envelope(json.dumps(body))).verdict is pp.ProposalReviewVerdict.BLOCKED
 
-    def test_prose_wrapped_json_is_rescued(self) -> None:
-        # Same convention as the Coding Mode verdict parser (D-019): a model
-        # wrapping the object in prose is rescued by the balanced-brace scan.
+    def test_3_prose_around_correct_envelope_is_accepted(self) -> None:
+        # Session 013A: prose before/after a CORRECT envelope stays tolerated
+        # — the one exact envelope is the authoritative payload.  This is NOT
+        # a brace rescue: nothing outside the envelope is ever scanned.
         raw = (
             "Here is my review:\n\n"
             + envelope(json.dumps(payload(verdict="PASS")))
@@ -370,15 +371,18 @@ class TestParserFailClosed:
             parse(envelope("{not json}"))
         assert excinfo.value.reason == "malformed_json"
 
-    def test_13_missing_envelope_and_no_json_rejected(self) -> None:
+    def test_13_prose_without_envelope_rejected(self) -> None:
+        # Session 013A: plain prose with zero envelope markers is
+        # `missing_envelope` — there is no balanced-brace rescue anymore.
         with pytest.raises(pp.ProposalReviewParseError) as excinfo:
             parse("I reviewed the proposal and it looks great, PASS!")
-        assert excinfo.value.reason == "no_json_object"
+        assert excinfo.value.reason == "missing_envelope"
 
     def test_empty_output_rejected(self) -> None:
+        # An empty answer carries no envelope → missing_envelope.
         with pytest.raises(pp.ProposalReviewParseError) as excinfo:
             parse("")
-        assert excinfo.value.reason == "no_json_object"
+        assert excinfo.value.reason == "missing_envelope"
 
     def test_non_object_root_rejected(self) -> None:
         with pytest.raises(pp.ProposalReviewParseError) as excinfo:
@@ -601,6 +605,56 @@ class TestParserFailClosed:
         # any valid JSON must be a typed failure, never a PASS result.
         with pytest.raises(pp.ProposalReviewParseError):
             parse("All good — verdict: PASS, no findings, ship it.")
+
+
+# ---------------------------------------------------------------------------
+# Session 013A — the envelope is MANDATORY (no balanced-brace rescue)
+# ---------------------------------------------------------------------------
+class TestEnvelopeStrictness:
+    """Regression pins for the strict-envelope correction (Session 013A).
+
+    The core regression: a syntactically PERFECT review JSON object without
+    the envelope must be REJECTED with ``missing_envelope`` — never rescued
+    out of bare braces, never accepted from prose.
+    """
+
+    def test_1_bare_valid_json_without_envelope_rejected(self) -> None:
+        body = json.dumps(payload(verdict="PASS"))
+        assert json.loads(body)  # the payload itself IS valid JSON
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse(body)
+        assert excinfo.value.reason == "missing_envelope"
+
+    def test_2_prose_wrapped_bare_valid_json_rejected(self) -> None:
+        body = json.dumps(payload(verdict="PASS"))
+        raw = f"Here is my review:\n\n{body}\n\nThanks — looks great."
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse(raw)
+        assert excinfo.value.reason == "missing_envelope"
+
+    def test_bare_valid_json_in_markdown_fence_rejected(self) -> None:
+        body = json.dumps(payload(verdict="PASS"))
+        raw = f"```json\n{body}\n```"
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse(raw)
+        assert excinfo.value.reason == "missing_envelope"
+
+    def test_4_plain_prose_without_envelope_rejected(self) -> None:
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse("All good — verdict: PASS, no findings, ship it.")
+        assert excinfo.value.reason == "missing_envelope"
+
+    def test_bare_valid_json_of_the_other_verdict_rejected(self) -> None:
+        body = json.dumps(payload(verdict="NEEDS_REVISION", findings=[finding()]))
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse(body)
+        assert excinfo.value.reason == "missing_envelope"
+
+    def test_envelope_pair_present_but_empty_reports_no_json_object(self) -> None:
+        raw = f"{pp.PROPOSAL_REVIEW_ENVELOPE_START}\n{pp.PROPOSAL_REVIEW_ENVELOPE_END}"
+        with pytest.raises(pp.ProposalReviewParseError) as excinfo:
+            parse(raw)
+        assert excinfo.value.reason == "no_json_object"
 
 
 # ---------------------------------------------------------------------------

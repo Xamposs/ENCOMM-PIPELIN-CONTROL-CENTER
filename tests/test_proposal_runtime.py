@@ -299,7 +299,7 @@ class TestReviewExecutor:
             master_proposal_path=root / "03_PROPOSAL" / "MASTER_PROPOSAL.md",
         )
         assert report.outcome is prt.ProposalReviewOutcome.PARSE_FAILED
-        assert report.parse_reason == "no_json_object"
+        assert report.parse_reason == "missing_envelope"
         assert machine.phase is pp.ProposalPhase.SCIENTIFIC_REVIEW
         assert report.state_advanced is False
 

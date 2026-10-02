@@ -12,9 +12,13 @@ Envelope.  The reviewer prompt requires exactly one delimited JSON object::
     <<<ENCOMM_PROPOSAL_REVIEW_END>>>
 
 The markers are IMPORTED from ``proposal.review_packet`` — prompt and parser
-share one definition and cannot drift.  As a fallback, the first balanced
-``{...}`` region is accepted (models occasionally wrap the object in prose);
-surrounding Markdown is never trusted.
+share one definition and cannot drift.  The envelope is MANDATORY (Session
+013A): exactly one START marker and exactly one END marker, and the payload
+between them is the ONLY thing this module ever parses.  There is NO
+balanced-brace rescue and NO bare-JSON fallback — a syntactically perfect
+review object without the envelope is rejected as ``missing_envelope``.
+Prose AROUND a correct envelope is tolerated (the exact envelope remains
+the authoritative payload); prose without one never parses.
 
 Hard rules (mirroring the Coding Mode verdict parser, D-019 conventions):
 
@@ -113,21 +117,23 @@ class ProposalReviewParseError(ValueError):
 
 
 # --------------------------------------------------------------------------
-# envelope extraction (same shape as the Coding Mode verdict parser)
+# envelope extraction (STRICT — the envelope is mandatory, Session 013A)
 # --------------------------------------------------------------------------
 def _candidate_objects(raw: str) -> Iterable[str]:
-    """Yield the marker-delimited payload, or balanced ``{...}`` regions.
+    """Yield the payload of the ONE mandatory review envelope.
 
-    Envelope discipline (fail closed, Session 013): the reviewer prompt
-    requires EXACTLY ONE ``START`` marker and EXACTLY ONE ``END`` marker.
+    Envelope discipline (fail closed, Session 013, STRICT since 013A): the
+    reviewer prompt requires EXACTLY ONE ``START`` marker and EXACTLY ONE
+    ``END`` marker, and this parser NEVER infers a review object from braces
+    outside that envelope.
 
-    * zero markers on either side → no envelope at all; the balanced-brace
-      scan rescues a prose-wrapped model (same convention as Coding Mode);
+    * zero START and zero END → ``missing_envelope`` — even when the text
+      contains a syntactically perfect bare JSON object (NO balanced-brace
+      rescue, NO bare-JSON fallback);
     * more than one START or more than one END → ``multiple_envelopes``;
-    * exactly one START but no END (or the reverse) → unterminated envelope.
-
-    When a well-formed envelope IS present, its payload is the ONLY
-    candidate — surrounding content is never additionally scanned.
+    * exactly one of the two (either side missing) → ``unterminated_envelope``;
+    * exactly one of each → the payload between the markers is the ONLY
+      candidate; surrounding content is never additionally scanned.
     """
     starts = raw.count(PROPOSAL_REVIEW_ENVELOPE_START)
     ends = raw.count(PROPOSAL_REVIEW_ENVELOPE_END)
@@ -137,37 +143,29 @@ def _candidate_objects(raw: str) -> Iterable[str]:
             f"exactly one review envelope is allowed (found {starts} START / "
             f"{ends} END markers); refusing to guess which answer counts.",
         )
-    if starts == 1 and ends == 1:
-        inner = raw.split(PROPOSAL_REVIEW_ENVELOPE_START, 1)[1].split(
-            PROPOSAL_REVIEW_ENVELOPE_END, 1
-        )[0]
-        inner = inner.strip()
-        if inner.startswith("```"):
-            inner = inner.strip("`").strip()
-            if inner.lower().startswith("json"):
-                inner = inner[4:].strip()
-        if inner:
-            yield inner
-        return
-    if starts == 1 or ends == 1:
+    if starts == 0 and ends == 0:
+        raise ProposalReviewParseError(
+            "missing_envelope",
+            "no review envelope found: exactly one "
+            f"'{PROPOSAL_REVIEW_ENVELOPE_START}' ... '{PROPOSAL_REVIEW_ENVELOPE_END}' "
+            "pair is required; bare JSON or prose is never accepted.",
+        )
+    if starts != 1 or ends != 1:
         raise ProposalReviewParseError(
             "unterminated_envelope",
             f"malformed review envelope ({starts} START / {ends} END markers); "
             "exactly one of each is required.",
         )
-
-    depth = 0
-    start = -1
-    for index, char in enumerate(raw):
-        if char == "{":
-            if depth == 0:
-                start = index
-            depth += 1
-        elif char == "}":
-            depth -= 1
-            if depth == 0 and start >= 0:
-                yield raw[start : index + 1]
-                start = -1
+    inner = raw.split(PROPOSAL_REVIEW_ENVELOPE_START, 1)[1].split(
+        PROPOSAL_REVIEW_ENVELOPE_END, 1
+    )[0]
+    inner = inner.strip()
+    if inner.startswith("```"):
+        inner = inner.strip("`").strip()
+        if inner.lower().startswith("json"):
+            inner = inner[4:].strip()
+    if inner:
+        yield inner
 
 
 # --------------------------------------------------------------------------
@@ -529,34 +527,28 @@ def parse_proposal_review(
             "refusing to parse.",
         )
 
-    last_error: ProposalReviewParseError | None = None
+    # At most ONE candidate exists: the payload of the one mandatory
+    # envelope.  Envelope errors (missing_envelope / unterminated_envelope /
+    # multiple_envelopes) raise directly from _candidate_objects.
     for candidate in _candidate_objects(raw):
         try:
             parsed = json.loads(candidate)
         except json.JSONDecodeError as exc:
-            last_error = ProposalReviewParseError(
+            raise ProposalReviewParseError(
                 "malformed_json", f"unparseable JSON object: {exc.msg}"
-            )
-            continue
+            ) from exc
         if not isinstance(parsed, Mapping):
             raise ProposalReviewParseError(
                 "unexpected_type",
                 f"the JSON payload must be an object, got {type(parsed).__name__}",
             )
-        try:
-            return _validate(
-                parsed,
-                expected_role=expected_role,
-                expected_iteration=expected_iteration,
-            )
-        except ProposalReviewParseError as exc:
-            last_error = exc
-            # A dict that failed schema validation might be prose chatter;
-            # the next candidate (if any) gets a chance, otherwise fail closed.
-
-    if last_error is not None:
-        raise last_error
+        return _validate(
+            parsed,
+            expected_role=expected_role,
+            expected_iteration=expected_iteration,
+        )
+    # The envelope was present but carried no JSON payload at all.
     raise ProposalReviewParseError(
         "no_json_object",
-        "No valid JSON object was found in the reviewer output.",
+        "the review envelope contained no JSON object.",
     )
