@@ -1604,3 +1604,102 @@ audit; Session 015's ORCHESTRATOR integration executor consumes
 `integration_brief.json` as the authoritative handoff and becomes the ONLY
 future writer of `MASTER_PROPOSAL.md` — during INTEGRATION, exactly as
 D-054 reserves.
+
+## D-061 — The ORCHESTRATOR is the sole integration authority; integration is a phase-gated runtime operation
+
+**Date:** Session 015
+**Status:** Accepted
+
+**Context.** Session 014 ended the review cycle AT INTEGRATION with no
+executor behind it.  Integration needs a decision-maker (which reviewer
+items to apply) and a writer (who replaces the master proposal).  A second
+"inTEGRATOR agent" role would dilute accountability, and letting any
+reviewer apply its own patches would break the read-only reviewer contract
+(D-054).
+
+**Decision.** There is NO second integrator: `ProposalRole.ORCHESTRATOR`
+is the ONLY integration authority, exercised exclusively during the
+INTEGRATION phase through `proposal_runtime.run_integration()`.  The
+executor's state guard refuses any other phase; the packet addresses the
+model as the ORCHESTRATOR and embeds the authority rules (reviewer patches
+are RECOMMENDATIONS, never commands; every actionable brief item must be
+dispositioned applied/rejected/unresolved with a reason).
+
+**Consequence.** One role, one phase, one writer — accountability is
+structural; a future UI can only trigger integration the executor already
+guards.
+
+## D-062 — The model returns content; the runtime owns the atomic filesystem write
+
+**Date:** Session 015
+**Status:** Accepted
+
+**Context.** Letting the ORCHESTRATOR model edit MASTER_PROPOSAL.md through
+a tool-using driver would merge AI decision authority with filesystem
+authority: a hallucinating or prompt-injected driver could corrupt the
+operator's proposal, and a mid-call file change would be indistinguishable
+from an approved edit.
+
+**Decision.** The driver NEVER touches the file.  The ORCHESTRATOR returns
+the ONE complete revised proposal inside the strict integration envelope;
+the runtime parses it fail-closed, re-fingerprints MASTER_PROPOSAL.md
+BEFORE any write (a changed hash ⇒ MUTATION_DETECTED, output refused, the
+externally modified file never overwritten), and only then performs the
+atomic replacement (`proposal_runtime/master_writer.py`: same-directory
+temp + fsync + `os.replace`, one documented canonical EOF policy — a
+missing trailing newline is appended, nothing else is altered).
+
+**Consequence.** AI decision authority and deterministic filesystem
+authority are cleanly separated; a mid-call mutation is detected and
+surfaced instead of silently accepted (test-pinned); the master write is
+atomic and hash-verified on both sides.
+
+## D-063 — A proposal changed by integration MUST be re-reviewed (review freshness)
+
+**Date:** Session 015
+**Status:** Accepted
+
+**Context.** After a changed integration the master proposal is NEW bytes
+that no reviewer has seen.  If HARD_GATE_VALIDATION could complete on
+freshness-agnostic criteria, an edited proposal would become COMPLETE
+without review of its exact edited bytes — the exact failure the iteration
+design exists to prevent.
+
+**Decision.** `proposal_runtime/review_freshness.py` holds the ONE
+Session 015 hard-gate lifecycle check: the current master hash must equal
+the `proposal_hash` in the LATEST `review_bundle.json`.  A changed
+proposal (`run_iteration`) walks HARD_GATE_VALIDATION → REVISION_REQUIRED
+with a structured `05_CONTROL/NEXT_ITERATION.json` handoff (next/previous
+iteration, reviewed hash, revised hash, previous findings, unresolved
+items); only an output hash equal to the latest reviewed hash may proceed
+toward COMPLETE.  This is a lifecycle invariant, NOT a fake evaluation
+result — no other gate validator exists and none may claim page/citation/
+budget compliance until Session 016 implements real validators.
+
+**Consequence.** An edited proposal can never be considered
+reviewer-approved (test-pinned end to end: changed iteration 1 →
+REVISION_REQUIRED → iteration 2 reviews the NEW hash).
+
+## D-064 — A clean-PASS iteration may use the zero-AI integration bypass
+
+**Date:** Session 015
+**Status:** Accepted
+
+**Context.** When all three reviewers returned PASS with zero findings,
+patches and unverified claims, the D-059 brief sets
+`integration_required=false`.  Spending an ORCHESTRATOR model call to
+"integrate" nothing would waste tokens and add a hallucination surface to
+a path that needs no intelligence.
+
+**Decision.** The integration executor verifies the brief belongs to the
+current exact hash AND that the aggregate verdict is a truly clean PASS
+(no findings, no proposed patches, no unverified claims); it then makes
+ZERO driver calls, leaves MASTER_PROPOSAL byte-identical (output hash ==
+input hash), records a no-op `integration_result.json` and walks
+INTEGRATION → HARD_GATE_VALIDATION.  Any `integration_required=false`
+brief that nevertheless carries actionable items fails closed
+(ARTIFACT_CONFLICT) before the bypass.
+
+**Consequence.** The clean path costs zero model operations (test-pinned:
+zero driver calls); an inconsistent brief can never launder actionable
+findings through the bypass.

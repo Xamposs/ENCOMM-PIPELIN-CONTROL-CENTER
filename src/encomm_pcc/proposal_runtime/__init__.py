@@ -13,8 +13,36 @@ names, no CLI logic and no registry: it feeds a rendered
 ``BaseDriver`` contract, parses the answer fail-closed, guards the master
 proposal's immutability, and advances the proposal state machine only when
 everything held.
+
+Session 015 adds the REAL INTEGRATION: the ORCHESTRATOR integration
+executor (packet -> driver -> strict parse -> mutation guard -> runtime-
+owned atomic MASTER_PROPOSAL write), the post-integration version freeze,
+the durable integration artifact, the review-freshness gate, the
+``NEXT_ITERATION.json`` revision handoff and the one-iteration composition
+helper.
 """
 
+from .integration_artifacts import (
+    INTEGRATION_RESULT_FILENAME,
+    INTEGRATION_RESULT_SCHEMA,
+    write_integration_result,
+)
+from .integration_executor import (
+    ProposalIntegrationExecutionReport,
+    ProposalIntegrationOutcome,
+    run_integration,
+)
+from .master_writer import (
+    MASTER_PROPOSAL_FILENAME,
+    MasterProposalWriteError,
+    MasterProposalWriteReport,
+    replace_master_proposal,
+)
+from .proposal_iteration import (
+    ProposalIterationOutcome,
+    ProposalIterationReport,
+    run_iteration,
+)
 from .review_artifacts import (
     ArtifactConflictError,
     ReviewArtifactWriter,
@@ -30,6 +58,12 @@ from .review_executor import (
     REVIEW_PHASES,
     run_review,
 )
+from .review_freshness import (
+    REVIEW_FRESHNESS_GATE_ID,
+    ReviewFreshness,
+    ReviewFreshnessError,
+    evaluate_review_freshness,
+)
 from .review_loop import (
     REVIEW_SEQUENCE,
     ArtifactResumeError,
@@ -38,6 +72,13 @@ from .review_loop import (
     SourceValidationError,
     run_review_cycle,
 )
+from .revision_handoff import (
+    NEXT_ITERATION_FILENAME,
+    REVISION_HANDOFF_SCHEMA,
+    NextIterationHandoffError,
+    build_next_iteration_payload,
+    write_next_iteration_handoff,
+)
 from .version_freeze import (
     VERSION_FREEZE_MD_SUFFIX,
     VERSION_FREEZE_SIDECAR_SUFFIX,
@@ -45,28 +86,58 @@ from .version_freeze import (
     format_iteration_name,
     freeze_pre_review_version,
 )
+from .version_freeze_post import (
+    POST_INTEGRATION_MD_SUFFIX,
+    POST_INTEGRATION_SIDECAR_SUFFIX,
+    freeze_post_integration_version,
+)
 
 __all__ = [
+    "INTEGRATION_RESULT_FILENAME",
+    "INTEGRATION_RESULT_SCHEMA",
+    "MASTER_PROPOSAL_FILENAME",
     "MAX_EXCERPT_CHARS",
+    "NEXT_ITERATION_FILENAME",
     "NEXT_REVIEW_PHASE",
     "PHASE_FOR_REVIEWER",
+    "POST_INTEGRATION_MD_SUFFIX",
+    "POST_INTEGRATION_SIDECAR_SUFFIX",
+    "REVIEW_FRESHNESS_GATE_ID",
     "REVIEW_SEQUENCE",
     "REVIEW_PHASES",
+    "REVISION_HANDOFF_SCHEMA",
     "VERSION_FREEZE_MD_SUFFIX",
     "VERSION_FREEZE_SIDECAR_SUFFIX",
     "ArtifactConflictError",
     "ArtifactResumeError",
+    "MasterProposalWriteError",
+    "MasterProposalWriteReport",
+    "NextIterationHandoffError",
+    "ProposalIntegrationExecutionReport",
+    "ProposalIntegrationOutcome",
+    "ProposalIterationOutcome",
+    "ProposalIterationReport",
     "ProposalReviewCycleOutcome",
     "ProposalReviewCycleReport",
     "ProposalReviewExecutionReport",
     "ProposalReviewGuardError",
     "ProposalReviewOutcome",
     "ReviewArtifactWriter",
+    "ReviewFreshness",
+    "ReviewFreshnessError",
     "SourceValidationError",
     "VersionFreezeError",
+    "build_next_iteration_payload",
+    "evaluate_review_freshness",
     "format_iteration_name",
+    "freeze_post_integration_version",
     "freeze_pre_review_version",
     "persist_cycle_artifacts",
+    "replace_master_proposal",
+    "run_integration",
+    "run_iteration",
     "run_review",
     "run_review_cycle",
+    "write_integration_result",
+    "write_next_iteration_handoff",
 ]
