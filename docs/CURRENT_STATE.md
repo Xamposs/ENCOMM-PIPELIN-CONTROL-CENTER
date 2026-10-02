@@ -42,16 +42,37 @@ live acceptance PASSED 2026-09-27) is fully subsumed.
 References: `docs/reports/SESSION_011_PRODUCTION_UI_SESSION_CONTROL_V1.md`,
 `docs/reports/SESSION_010_SIMPLE_CONTINUOUS_V1.md`.
 
-**Proposal Mode foundation (Session 012 — branch `proposal-mode`, NOT merged
-to `main`).** The isolated parallel domain `src/encomm_pcc/proposal/` now
-exists beside Coding Mode: enums (`ProposalRole`, `ProposalPhase`, verdicts,
-severities, hard-gate statuses), strict JSON-friendly models, an explicit
-deterministic phase state machine and the idempotent proposal workspace
-contract — plus 47 foundation tests. Full suite on that branch: **667
-passed, 0 failed** (620 baseline + 47 new). Coding Mode packages are
-untouched and provably not imported by the proposal package
-(D-054…D-056; `docs/reports/SESSION_012_PROPOSAL_MODE_FOUNDATION.md`).
-No proposal UI, execution, persistence or hard-gate validators exist yet.
+**Proposal Mode foundation (Session 012) is MERGED into `main`** via
+**PR #1** (merge commit `c82d688fadc3a47324efb25b163a22acd2cd3190`, feature
+commit `6742c3987b31fa18519e434acbdbbf530356fca7`). The isolated parallel
+domain `src/encomm_pcc/proposal/` exists beside Coding Mode: enums
+(`ProposalRole`, `ProposalPhase`, verdicts, severities, hard-gate statuses),
+strict JSON-friendly models, an explicit deterministic phase state machine
+and the idempotent proposal workspace contract — 47 foundation tests.
+Post-merge baseline on `main`: **667 passed, 0 failed** (620 + 47). At the
+Session 012 boundary no proposal UI, execution, persistence or hard-gate
+validators existed (D-054…D-056;
+`docs/reports/SESSION_012_PROPOSAL_MODE_FOUNDATION.md`).
+
+**Proposal review runtime bridge (Session 013 — branch
+`proposal-session-013`, NOT merged to `main`).** ONE-reviewer execution
+infrastructure, still UI-free: the canonical SHA-256 proposal fingerprint
+(`proposal_fingerprint`, exact bytes, D-057), the deterministic reviewer
+prompt packet with non-negotiable read-only rules, the fail-closed review
+parser (strict envelope + JSON contract, typed rejections), the bounded
+read-only workspace snapshot loader, and the SMALL execution adapter package
+`src/encomm_pcc/proposal_runtime/` (D-058) that drives an injected
+`BaseDriver` through the packet→driver→parser→guarded-result flow with a
+before/after MASTER_PROPOSAL immutability guard. Phase→role mapping
+(SCIENTIFIC_REVIEW→SCIENTIFIC_REVIEWER, IMPLEMENTATION_REVIEW→
+PROPOSAL_ENGINEER, RED_TEAM_REVIEW→RED_TEAM_REVIEWER) is enforced BEFORE any
+driver call; only a fully valid execution advances the phase graph (BLOCKED
+verdicts take the explicit D-055 BLOCKED edge; INTEGRATION is reached but
+never left; COMPLETE stays reserved). All 86 new tests are offline
+(scripted driver, zero model calls). Full suite: **753 passed, 0 failed**.
+No proposal UI, loop orchestration, persistence or hard-gate validators
+exist yet (D-054…D-058;
+`docs/reports/SESSION_013_PROPOSAL_REVIEW_RUNTIME.md`).
 
 ---
 
@@ -142,10 +163,19 @@ ENCOMM PIPELINE CONTROL CENTER/
 │   │                           restore_state(), discover_hermes_profiles()
 │   ├── domain/                 enums, models, audit, batch_plan, final_audit,
 │   │                           state_machine
-│   ├── proposal/               (Session 012, branch proposal-mode) ISOLATED
-│   │                           parallel domain: enums, models, state_machine,
-│   │                           workspace — imports nothing from the packages
-│   │                           below; coding pipeline untouched
+│   ├── proposal/               ISOLATED parallel domain (Sessions 012–013):
+│   │                           enums, models, state_machine, workspace,
+│   │                           fingerprint (canonical proposal_hash),
+│   │                           review_packet, review_parser,
+│   │                           source_snapshot — imports nothing from the
+│   │                           packages below nor from proposal_runtime;
+│   │                           coding pipeline untouched
+│   ├── proposal_runtime/       (Session 013) SMALL execution-adapter
+│   │                           package: review_executor run_review()
+│   │                           (packet → injected BaseDriver → fail-closed
+│   │                           parse → guarded result + MASTER_PROPOSAL
+│   │                           immutability); imports ONLY proposal +
+│   │                           drivers.base/domain.enums generics
 │   ├── drivers/                base, process, hermes(+hermes_cli),
 │   │                           codex(+codex_cli, codex_discovery),
 │   │                           generic_cli(+generic_cli_config),
@@ -202,7 +232,8 @@ without a new ADR:
 | D-048 | Simple Mode is the default operator surface; its controls write the SAME durable role configs (Session 009) |
 | D-049 | Continuous execution is owned by the core `ContinuousRunner`, invoked through the worker actions `continuous`/`continuous_resume`; the UI never re-implements the loop (Session 010) |
 | D-050 | The Coder recovery override is ONE-SHOT: armed explicitly with a real session id, consumed by exactly one Builder operation; `always_new` itself is never changed (Session 010) |
-| D-054…D-056 | Proposal Mode FOUNDATION (branch `proposal-mode`, Session 012): fully isolated parallel domain + idempotent never-overwriting workspace contract (D-054); explicit proposal phase graph with a permanently closed COMPLETE and operator-only FAILED escape (D-055); fail-closed canonical hard-gate identifiers, no validators yet (D-056) |
+| D-054…D-056 | Proposal Mode FOUNDATION (merged via PR #1, Session 012): fully isolated parallel domain + idempotent never-overwriting workspace contract (D-054); explicit proposal phase graph with a permanently closed COMPLETE and operator-only FAILED escape (D-055); fail-closed canonical hard-gate identifiers, no validators yet (D-056) |
+| D-057, D-058 | Proposal review runtime bridge (branch `proposal-session-013`, Session 013): canonical SHA-256 exact-bytes proposal fingerprint is the ONE `proposal_hash` algorithm (D-057); `proposal_runtime` is the ONLY execution-adapter package — pure `proposal` stays import-clean, Coding Mode never imports proposal packages, one-review executor enforces phase→role mapping before driver contact and a before/after MASTER_PROPOSAL immutability guard (D-058) |
 
 ---
 

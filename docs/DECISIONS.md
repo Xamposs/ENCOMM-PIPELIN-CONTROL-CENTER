@@ -1467,3 +1467,66 @@ be synthesised by anything but a future real validator.
 
 **Consequence.** Identifiers cannot drift or be typo'd into results;
 nothing can look compliant before a real check exists.
+
+## D-057 — The canonical proposal fingerprint is SHA-256 over the EXACT file bytes
+
+**Date:** Session 013
+**Status:** Accepted
+
+**Context.** D-054/Session 012 defined the `proposal_hash` *field* but
+deliberately left the hash function undefined. Every future consumer (review
+execution, iteration records, immutability guards, version freezes) needs
+ONE deterministic, unambiguous algorithm; "hash of the text" is ambiguous
+(newline handling, encoding, normalisation).
+
+**Decision.** `proposal/fingerprint.proposal_fingerprint(path)` is the
+canonical algorithm: SHA-256 over the EXACT file bytes of
+`03_PROPOSAL/MASTER_PROPOSAL.md` (`read_bytes`; no newline normalisation, no
+text rewriting, no transcoding), returned as a lowercase hexadecimal digest.
+A missing/unreadable path raises `ProposalFingerprintError` explicitly
+(there is no hash-of-nothing); files above `MAX_PROPOSAL_BYTES` (20 MB) are
+refused rather than read unbounded. The algorithm is identified by the
+stable constant `PROPOSAL_HASH_ALGORITHM = "sha256-exact-bytes-v1"` so a
+future change must be a new, explicitly named algorithm — never a silent
+redefinition.
+
+**Consequence.** Identical bytes always produce the identical digest and a
+one-byte change always changes it (both test-pinned, including the CRLF/LF
+distinction); the runtime review executor fingerprints before AND after every
+reviewer execution, and any digest change is a write-authority violation that
+fails the execution closed.
+
+## D-058 — proposal_runtime is the ONLY Proposal Mode execution-adapter package
+
+**Date:** Session 013
+**Status:** Accepted
+
+**Context.** Proposal Mode must execute real reviewer operations through
+actual engines WITHOUT violating D-054's purity rule
+(`encomm_pcc.proposal` imports nothing from core/domain/drivers/
+persistence/ui) and without letting execution concerns leak into the pure
+contract package.
+
+**Decision.** A separate package `encomm_pcc.proposal_runtime` owns ALL
+execution adapters. Dependency direction is one-way:
+`proposal_runtime → proposal + generic existing driver infrastructure`
+(`drivers.base` contract types, `domain.enums` generic values). The pure
+package MUST NOT import `proposal_runtime`, Coding Mode packages MUST NOT
+import either proposal package, and `proposal_runtime` imports no registry,
+no provider code, no UI and no persistence. Execution is the injected-driver
+flow `run_review()`: phase→role guard BEFORE driver contact
+(SCIENTIFIC_REVIEW→SCIENTIFIC_REVIEWER, IMPLEMENTATION_REVIEW→
+PROPOSAL_ENGINEER, RED_TEAM_REVIEW→RED_TEAM_REVIEWER), fingerprint before,
+strict fail-closed parse, fingerprint after (a MASTER_PROPOSAL digest change
+is a refused write-authority violation — MUTATION_DETECTED — even when the
+parsed verdict was PASS), and a single state advance exactly at the end
+(BLOCKED verdicts take the explicit D-055 BLOCKED edge; the RED_TEAM success
+edge lands ON INTEGRATION and nothing advances past it — COMPLETE stays
+reserved for future hard-gate validation). Reports carry bounded evidence
+only (≤4 000-char raw excerpt, no full transcripts, no persistence).
+
+**Consequence.** Proposal Mode gains real, testable execution (offline via
+injected scripted drivers; zero model calls in the suite) while the pure
+contract layer stays verifiably clean (subprocess import-isolation tests pin
+all three boundaries); the future loop orchestrator, UI and persistence
+sessions extend `proposal_runtime`/`proposal` along this same seam.
