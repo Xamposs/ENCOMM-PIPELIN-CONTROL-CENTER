@@ -226,6 +226,39 @@ def run_smoke_test() -> int:
             window = MainWindow(controller, profiles=(), profile_method="")
             window.show()
             app.processEvents()
+            # Session 018: prove the packaged global product selector —
+            # exactly TWO production tabs (CODING / PROPOSAL), startup on
+            # CODING MODE with the mode stack at index 0, PROPOSAL MODE on
+            # stack index 2, and Advanced (index 1) present but tabless.
+            # Zero model calls — construction only.
+            tabs = [window.mode_tabs.tabText(i) for i in range(window.mode_tabs.count())]
+            if tabs != ["CODING MODE", "PROPOSAL MODE"]:
+                raise AssertionError(f"unexpected product tabs: {tabs!r}")
+            if window.mode_tabs.currentIndex() != 0:
+                raise AssertionError("startup product tab is not CODING MODE")
+            if window.mode_stack.currentIndex() != 0:
+                raise AssertionError("startup mode_stack index is not 0")
+            window.mode_tabs.setCurrentIndex(1)
+            app.processEvents()
+            if window.mode_stack.currentIndex() != 2:
+                raise AssertionError("PROPOSAL MODE tab did not select stack index 2")
+            if window.mode_stack.widget(2) is not window.proposal_panel:
+                raise AssertionError("stack index 2 is not the proposal panel")
+            if window.mode_stack.widget(1) is not window.advanced_view:
+                raise AssertionError("stack index 1 is not the advanced view")
+            window.mode_tabs.setCurrentIndex(0)
+            app.processEvents()
+            if window.mode_stack.currentIndex() != 0:
+                raise AssertionError("CODING MODE tab did not select stack index 0")
+            window.mode_stack.setCurrentWidget(window.proposal_panel)
+            window._show_simple_mode()
+            app.processEvents()
+            if (
+                window.mode_stack.currentIndex() != 0
+                or window.mode_tabs.currentIndex() != 0
+            ):
+                raise AssertionError("internal navigation desynced the product tabs")
+            steps.append("mode_tabs=2(coding,proposal)")
             steps.append("main_window_constructed")
             window.close()
             app.processEvents()

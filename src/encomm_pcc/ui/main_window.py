@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSplitter,
     QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
@@ -173,7 +174,27 @@ class MainWindow(QMainWindow):
         self.mode_stack.addWidget(self.simple_panel)  # index 0 — default
         self.mode_stack.addWidget(self.advanced_view)  # index 1
         self.mode_stack.addWidget(self.proposal_panel)  # index 2 — Session 017
-        self.setCentralWidget(self.mode_stack)
+
+        # Session 018: ONE persistent top-level product selector — the two
+        # production surfaces are OBVIOUS tabs.  Product tab 0 = CODING MODE
+        # (mode_stack index 0), product tab 1 = PROPOSAL MODE (mode_stack
+        # index 2).  Advanced / Details (index 1) stays a --debug-only
+        # surface and deliberately has NO product tab.
+        self.mode_tabs = QTabBar()
+        self.mode_tabs.addTab("CODING MODE")
+        self.mode_tabs.addTab("PROPOSAL MODE")
+        self.mode_tabs.setExpanding(False)
+        self.mode_tabs.setDocumentMode(True)
+        self.mode_tabs.setCurrentIndex(0)
+        self.mode_tabs.currentChanged.connect(self._on_mode_tab_changed)
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self.mode_tabs)
+        central_layout.addWidget(self.mode_stack)
+        self.setCentralWidget(central)
 
         self.statusBar().showMessage(self._idle_status())
 
@@ -431,15 +452,44 @@ class MainWindow(QMainWindow):
 
     # -- Simple / Advanced mode switching (Session 009 §7) -----------------
     def _show_advanced_mode(self) -> None:
+        """Session 011 (§17): debug-only surface — reachable behind
+        --debug-ui (or via tests); it deliberately has NO product tab, so
+        the selector keeps its current product selection."""
         self.mode_stack.setCurrentWidget(self.advanced_view)
+
+    def _on_mode_tab_changed(self, index: int) -> None:
+        """Session 018: the global product tabs drive the mode stack.
+
+        Product tab 0 -> CODING MODE (mode_stack index 0); product tab
+        1 -> PROPOSAL MODE (mode_stack index 2).  Advanced (index 1) is a
+        hidden debug surface with no product tab.
+        """
+        if index == 1:
+            self._show_proposal_mode()
+        else:
+            self._show_simple_mode()
+
+    def _set_mode_tab(self, index: int) -> None:
+        """Align the global product selector with a mode-stack change.
+
+        ``setCurrentIndex`` is a no-op when the tab is already selected, so
+        programmatic navigation never re-enters ``_on_mode_tab_changed``.
+        """
+        if self.mode_tabs.currentIndex() != index:
+            self.mode_tabs.setCurrentIndex(index)
 
     def _show_simple_mode(self) -> None:
         self.simple_panel.refresh()
         self.mode_stack.setCurrentWidget(self.simple_panel)
+        # Session 018: internal navigation and the global product tabs are
+        # ONE navigation state — never conflicting.
+        self._set_mode_tab(0)
 
     def _show_proposal_mode(self) -> None:
-        """Session 017 (§14): show Proposal Mode (index 2); Coding untouched."""
+        """Session 017 (§14): show Proposal Mode (index 2); Coding untouched.
+        Session 018: the global selector moves to PROPOSAL MODE with it."""
         self.mode_stack.setCurrentWidget(self.proposal_panel)
+        self._set_mode_tab(1)
 
     def _on_simple_start(self, brief: str, size: int, continuous: bool) -> None:
         """SIMPLE START: one brief, one size, optional continuous run."""

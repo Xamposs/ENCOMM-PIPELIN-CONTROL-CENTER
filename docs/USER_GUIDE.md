@@ -5,7 +5,7 @@ This guide is written for the **operator** who runs real AI coding batches
 Mode**, Session 017). Everything below refers to actual controls in the
 desktop application. **Coding Simple Mode is the default production
 surface** — start there (§A). **Proposal Mode** is the second production
-surface, reached with the `PROPOSAL MODE` button (§A7, Part P). Advanced
+surface, selected from the top `CODING MODE | PROPOSAL MODE` tabs (Part P). Advanced
 Mode (the full panel grid, formerly the whole app) is the development/debug
 surface: launch with `python main.py --debug-ui` to see the "Advanced /
 Details…" button, then §B onwards covers it.
@@ -111,9 +111,11 @@ zero AI calls; the completed batch stays in HISTORY.
 
 # Part P — Proposal Mode (Session 017)
 
-Press **PROPOSAL MODE** at the bottom of Coding Simple Mode; press **BACK
-TO CODING MODE** to return. Coding Mode is never modified by Proposal Mode
-(separate configuration, separate workspace).
+Select **PROPOSAL MODE** from the top tab bar — or the **PROPOSAL MODE**
+button inside Coding Simple Mode (both drive the same navigation state).
+Press **BACK TO CODING MODE**, or the **CODING MODE** tab, to return.
+Coding Mode is never modified by Proposal Mode (separate configuration,
+separate workspace).
 
 ## P1. The proposal flow
 

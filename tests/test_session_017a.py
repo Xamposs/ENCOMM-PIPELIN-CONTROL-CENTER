@@ -47,11 +47,7 @@ from encomm_pcc.proposal_runtime.revision_handoff import (  # noqa: E402
     REVISION_HANDOFF_SCHEMA,
 )
 from encomm_pcc.ui.main_window import MainWindow  # noqa: E402
-from encomm_pcc.ui.proposal_worker import (  # noqa: E402
-    ProposalRunSpec,
-    ProposalWorkerAction,
-    start_proposal_worker,
-)
+
 
 from conftest import qapp  # noqa: F401,E402  (offscreen QApplication fixture)
 
@@ -346,6 +342,23 @@ class TestWorkerConfigPropagation:
         worker_thread.wait()
         QCoreApplication.processEvents()
 
+    def _pump_panel(self, panel, timeout_s: float = 30.0):
+        """Drain the panel's OWN worker started by the production click
+        path, park it inside the test, and return the report.  Relies on
+        the panel's own finished-slot (connected before thread.start()),
+        so the report can never be missed by a late test-side connect."""
+        import time
+
+        thread = panel._thread
+        deadline = time.monotonic() + timeout_s
+        while (
+            thread is not None and thread.isRunning() or panel._last_report is None
+        ) and (time.monotonic() < deadline):
+            QCoreApplication.processEvents()
+        assert panel._last_report is not None, "panel worker never finished"
+        self._finish_thread(thread)
+        return panel._last_report
+
     def test_worker_forwards_panel_configs_into_session_requests(
         self, qapp, tmp_path
     ):
@@ -388,14 +401,16 @@ class TestWorkerConfigPropagation:
         assert (
             spec.orchestrator_agent_config.model == "orch-model"
         )
-        # ...and the worker forwards them into run_iteration.
-        cap: dict = {"report": None}
-        thread, worker = start_proposal_worker(spec)
-        worker.finished.connect(lambda report: cap.__setitem__("report", report))
-        thread.start()
-        self._pump(thread, cap)
-        self._finish_thread(thread)
-        assert cap["report"]["outcome"] == "READY_FOR_NEXT_ITERATION"
+        # ...and the worker forwards them into run_iteration.  The worker
+        # started by the PRODUCTION click path (panel._start_worker) is the
+        # one that runs the iteration — never start a SECOND worker over
+        # the same workspace: two concurrent cycles on one workspace race
+        # the durable review artifacts and the loser fail-closes with
+        # ARTIFACT_CONFLICT (by design).  Drain the panel's own worker and
+        # read the panel's report.
+        self._pump_panel(panel)
+        assert panel._last_report is not None
+        assert panel._last_report["outcome"] == "READY_FOR_NEXT_ITERATION"
         sci = reviewers[ProposalRole.SCIENTIFIC_REVIEWER].requests[0]
         assert sci.model == "science-model"
         assert sci.project_profile == "science-profile"
