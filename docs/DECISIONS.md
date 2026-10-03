@@ -1849,3 +1849,38 @@ blocking the UI thread on a proposal AI call.
 proposal domain), the proposal backend stays the only place proposal logic
 lives, and a packaged build gains the operator surface with zero schema
 risk.
+
+## D-070 — ONE application, ONE persistent top-level product tab bar: CODING MODE | PROPOSAL MODE
+
+**Date:** 2026-10-03 (Session 018) · **Status:** Accepted · **Supersedes:** nothing (refines D-069's mode-stack layout; the stack indices are UNCHANGED)
+
+**Context.** Through Session 017 the two production surfaces lived behind
+different affordances: Coding Simple Mode was the startup default and
+Proposal Mode was reachable only from a button INSIDE Coding Simple Mode —
+the dual-mode product shape was not obvious from the first glance, and the
+navigation affordances were asymmetric (Proposal exposed a return path,
+Coding exposed none of its own).
+
+**Decision.** MainWindow mounts a persistent top-level `QTabBar` product
+selector with EXACTLY TWO tabs — `CODING MODE` and `PROPOSAL MODE` — above
+the mode stack, inside one central container. Product tab 0 drives
+mode_stack index 0 (Coding Simple), product tab 1 drives index 2 (Proposal
+Mode). Internal navigation (`_show_simple_mode`, `_show_proposal_mode`,
+Simple Mode's PROPOSAL MODE button, Proposal's BACK TO CODING MODE) and the
+tabs are ONE navigation state: every internal path calls `_set_mode_tab`,
+whose `setCurrentIndex` is a no-op when already selected (no signal
+re-entry, no conflicting states). Advanced / Details remains mode_stack
+index 1, reachable only behind `--debug-ui`, and deliberately has NO
+product tab — a product tab would re-promote a development surface to
+production. `app.run_smoke_test` proves the selector in every packaged
+build (exactly 2 tabs, startup CODING/stack 0, proposal tab → stack 2 →
+`proposal_panel`, stack 1 stays `advanced_view`, internal navigation sync)
+with zero model calls.
+
+**Consequence.** One shipped executable (`ENCOMM-PCC.exe`) presents both
+product modes without a mode-selection hidden state; the frozen stack
+contract (D-069: 0 = Coding, 1 = Advanced, 2 = Proposal) is untouched, so
+every Session 017/017A test and recovery path keeps its exact semantics;
+the structural isolation scan (`test_44`) exempts `app.py` as the bootstrap
+wiring site while explicitly banning proposal-package imports there, so the
+exemption cannot launder a domain leak.

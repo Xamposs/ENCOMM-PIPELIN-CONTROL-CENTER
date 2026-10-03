@@ -1008,9 +1008,16 @@ class TestIsolation:
         Session 017 (by design): the UI package hosts the Proposal Mode
         operator surface (proposal_mode.py + proposal_worker.py) — those two
         modules are the ONLY proposal-referencing files allowed under ui/.
+        Session 018: ``app.py`` joins the exemption set as the bootstrap /
+        packaged-smoke WIRING site (its smoke proof constructs the real
+        MainWindow and names the mounted proposal panel) — but it must
+        still never IMPORT a proposal package; that import ban is asserted
+        explicitly below so the exemption cannot hide a domain leak.
         """
         coding_roots = ["app.py", "core", "domain", "drivers", "persistence", "ui"]
         proposal_ui_modules = {
+            # Session 018 bootstrap wiring + packaged-smoke proof site.
+            SRC_ROOT / "encomm_pcc" / "app.py",
             SRC_ROOT / "encomm_pcc" / "ui" / "proposal_mode.py",
             SRC_ROOT / "encomm_pcc" / "ui" / "proposal_worker.py",
             # Session 017 wiring: the mode-stack surface + the Simple Mode
@@ -1029,3 +1036,13 @@ class TestIsolation:
                 if "proposal" in text:
                     offending.append(str(path))
         assert offending == [], f"proposal references leaked into coding mode: {offending}"
+        # The app.py exemption is NAME-ONLY: the bootstrap must never import
+        # a proposal package (domain isolation survives the wiring site).
+        app_text = (SRC_ROOT / "encomm_pcc" / "app.py").read_text(encoding="utf-8")
+        for banned in (
+            "from .proposal",
+            "from ..proposal",
+            "import encomm_pcc.proposal",
+            "from encomm_pcc.proposal",
+        ):
+            assert banned not in app_text, f"app.py imported a proposal package: {banned}"

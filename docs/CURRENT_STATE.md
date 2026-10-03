@@ -29,6 +29,27 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
+`1.3.1` — Global dual-mode navigation + the Windows v1.3.1 release build
+(Session 018, branch `release-session-018`). ONE application
+(`ENCOMM-PCC.exe`) carries BOTH production surfaces behind a persistent
+top-level `QTabBar` product selector — `CODING MODE` (mode_stack index 0,
+still the default) and `PROPOSAL MODE` (index 2) — and every navigation
+path (the tabs themselves, Simple Mode's PROPOSAL affordance, Proposal's
+BACK TO CODING MODE, `_show_simple_mode`/`_show_proposal_mode`) drives
+ONE navigation state (a no-op-safe `_set_mode_tab` keeps them aligned).
+Advanced / Details stays mode_stack index 1, reachable only via
+`--debug-ui`, and deliberately has NO product tab. The packaged
+`--smoke-test` now proves the selector (exactly 2 production tabs,
+startup CODING, proposal tab → index 2, tab/stack sync) with zero model
+calls (`mode_tabs=2(coding,proposal)` in the smoke line), and the
+Windows release build was rebuilt from this exact source
+(`dist/ENCOMM-PCC/ENCOMM-PCC.exe`, packaged smoke green, exit 0). The
+Session 017A config-propagation TEST was repaired (no production change):
+it no longer double-books one proposal workspace with two concurrent
+worker cycles — the loser's `ARTIFACT_CONFLICT` was correct fail-closed
+behaviour. Suite: **1083 passed, 0 failed** (1070 baseline + 13 Session
+018). Reference: `docs/reports/SESSION_018_FINAL_RELEASE.md`.
+
 `1.3.0` — The FIRST production Proposal Mode operator surface (Session 017,
 branch `proposal-session-017`). Coding Simple Mode remains the default
 surface; the window's mode stack gains index 2 (`ProposalModePanel`) with a
