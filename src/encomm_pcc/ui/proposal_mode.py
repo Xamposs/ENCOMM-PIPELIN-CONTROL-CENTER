@@ -1,25 +1,33 @@
-"""Proposal Mode — the operator-facing production surface (Session 017).
+"""Proposal Mode — the operator-facing production surface (Sessions 017–020).
 
 A THIRD MainWindow surface (mode_stack index 2).  It composes the existing
 Proposal Mode backend (``encomm_pcc.proposal`` + ``encomm_pcc.proposal_runtime``)
-into operator controls; it implements NO orchestration logic of its own:
+into operator controls; it implements NO orchestration logic of its own.
 
-* WORKSPACE — path + Initialise/Refresh over the idempotent
-  :class:`~encomm_pcc.proposal.ProposalWorkspace` contract (never overwrites
-  MASTER_PROPOSAL.md or any existing file);
-* AGENTS — the four proposal roles, engine dropdowns fed from the REAL
-  DriverRegistry (no provider/model ever hardcoded), configs persisted to an
-  isolated ``05_CONTROL/PROPOSAL_CONFIG.json`` (atomic writes; Coding Mode
-  role config is never touched);
-* RUN — INITIALISE / RUN ITERATION / RUN HARD GATES / REFRESH, every AI
-  operation on a :class:`~encomm_pcc.ui.proposal_worker.ProposalWorker`
-  thread, conflicting buttons disabled while a worker runs;
-* CURRENT STATE — the real :class:`~encomm_pcc.proposal.ProposalPhase`;
-* REVIEW RESULTS / HARD GATES / EVIDENCE — renderers over durable artifacts
-  (``04_REVIEWS/iteration_NNN/``); the UI never recomputes gate logic.
+Session 020 layout (brief §3) — vertically scrollable sections, in order:
 
-Honesty rule: every status rendered traces to a real artifact; WARN renders
-INCOMPLETE, BLOCKED renders BLOCKED, nothing is ever faked green.
+A. PROJECT INPUTS  — workspace + the REAL ``source_import`` importers
+   (blueprint / template / official docs / existing proposal; explicit
+   replace confirmation; extraction warnings surfaced; source budget shown
+   BEFORE any AI action);
+B. AGENTS          — the four proposal roles with REAL Hermes selector
+   discovery (profiles / profile-derived provider+model / profile-scoped
+   sessions; combos stay EDITABLE — nothing is invented);
+C. PANEL / CAMPAIGN— GENERATE INITIAL PROPOSAL, RUN PANEL ITERATION (the
+   REAL panel-chair path, never the legacy sequential cycle), RUN HARD
+   GATES, and the bounded AUTONOMOUS PANEL CAMPAIGN with boundary-only
+   PAUSE / RESUME / STOP;
+D. CURRENT STATE & READINESS — phase, campaign status, iteration, hash,
+   model calls, elapsed time, the advisory INTERNAL READINESS (always
+   labelled ``INTERNAL READINESS — NOT AN EIC SCORE``) + history;
+E. PANEL RESULTS   — per-evaluator first-pass verdicts + the persisted
+   consensus matrix (disagreements, blocking flags, unresolved count);
+F. HARD GATES      — the 14-gate renderer (unchanged semantics);
+G. EVIDENCE        — the six operator-authored evidence surfaces.
+
+Honesty rule: every status rendered traces to a real durable artifact;
+WARN renders INCOMPLETE, BLOCKED renders BLOCKED, nothing is ever faked
+green.  Recovery is READ-ONLY: a restart never auto-runs AI.
 """
 
 from __future__ import annotations
@@ -27,12 +35,15 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
+    QDoubleSpinBox,
     QFileDialog,
     QGridLayout,
     QGroupBox,
@@ -41,6 +52,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -57,13 +69,44 @@ from ..proposal.enums import (
     ProposalRole,
 )
 from ..proposal.models import ProposalAgentConfig
+from ..proposal.source_budget import (
+    DEFAULT_SOURCE_BUDGET_CHARS,
+    SourceBudget,
+    SourceBudgetExceededError,
+    check_source_budget,
+)
+from ..proposal.source_import import (
+    SourceImportError,
+    blueprint_status,
+    import_proposal,
+    import_source,
+)
 from ..proposal.state_machine import ProposalStateMachine
 from ..proposal.workspace import ProposalWorkspace
 from ..proposal_runtime import (
     HARD_GATES_SNAPSHOT_FILENAME,
     load_workspace_status,
 )
-from .proposal_worker import ProposalRunSpec, ProposalWorkerAction, start_proposal_worker
+from ..proposal_runtime.campaign import (
+    CAMPAIGN_STATE_FILENAME,
+    CampaignConfig,
+    CampaignStatus,
+    load_campaign_state,
+)
+from ..proposal_runtime.hermes_selector_discovery import (
+    HERMES_DISCOVERY_SOURCE_CONFIG,
+    discover_hermes_profile_names,
+    discover_hermes_provider_model,
+    discover_hermes_sessions,
+)
+from ..proposal.panel_matrix import PanelConsensusMatrix
+from .proposal_worker import (
+    CampaignControl,
+    ProposalRunSpec,
+    ProposalWorkerAction,
+    start_proposal_worker,
+)
+from .readiness_disclaimer import READINESS_DISCLAIMER_LABEL
 
 __all__ = ["ProposalModePanel", "PROPOSAL_CONFIG_FILENAME"]
 
@@ -88,12 +131,19 @@ _REVIEW_FILES: tuple[tuple[str, str], ...] = (
 
 _BUNDLE_FILE = "review_bundle.json"
 _HARD_GATES_FILE = "hard_gates.json"
+_PANEL_CONSENSUS_FILE = "panel_consensus.json"
+_READINESS_FILE = "readiness.json"
 
-#: Phases from which RUN ITERATION may start (Session 017A §10): the EXACT
-#: entry phases ``run_review_cycle()`` accepts (IDLE, SOURCE_VALIDATION, a
-#: review phase with consistent artifacts, or REVISION_REQUIRED after a
-#: revision handoff).  INTEGRATION / HARD_GATE_VALIDATION / BLOCKED / FAILED
-#: / COMPLETE never enable it.
+#: Phases from which the production V2 PANEL iteration may start: the EXACT
+#: entry phases ``run_parallel_panel_review_cycle()`` accepts (IDLE fresh or
+#: REVISION_REQUIRED next-iteration).  Partial-phase resume belongs to the
+#: legacy sequential RUN ITERATION button (unchanged).
+_PANEL_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
+    {ProposalPhase.IDLE, ProposalPhase.REVISION_REQUIRED}
+)
+
+#: Phases from which RUN ITERATION (legacy sequential) may start (Session
+#: 017A §10 — the exact entry phases ``run_review_cycle()`` accepts).
 _ITERATION_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
     {
         ProposalPhase.IDLE,
@@ -103,6 +153,41 @@ _ITERATION_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
         ProposalPhase.RED_TEAM_REVIEW,
         ProposalPhase.REVISION_REQUIRED,
     }
+)
+
+#: Hermes engine id (selectors only apply to it; other engines keep the
+#: plain editable fields).
+_HERMES_ENGINE_ID = "hermes"
+
+#: Operator-facing role labels (brief §7 — ASTRA is the panel chair label).
+_ROLE_LABELS: dict[ProposalRole, str] = {
+    ProposalRole.ORCHESTRATOR: "ASTRA / ORCHESTRATOR — PANEL CHAIR",
+    ProposalRole.SCIENTIFIC_REVIEWER: "SCIENTIFIC EVALUATOR",
+    ProposalRole.PROPOSAL_ENGINEER: "PROPOSAL / IMPLEMENTATION EVALUATOR",
+    ProposalRole.RED_TEAM_REVIEWER: "RED TEAM EVALUATOR",
+}
+
+_SESSION_MODE_NEW = "NEW SESSION"
+_SESSION_MODE_RESUME = "RESUME SELECTED SESSION"
+
+#: Campaign control-boundary UX text (brief §13) — never instant STOPPED.
+_PAUSE_REQUEST_TEXT = (
+    "Pause requested — current model call/stage will finish first."
+)
+_STOP_REQUEST_TEXT = (
+    "Stop requested — stopping at next safe boundary."
+)
+
+#: WAITING_FOR_OPERATOR explanation (brief §21).
+_WAITING_FOR_OPERATOR_TEXT = (
+    "Campaign paused because deterministic hard gates require operator "
+    "evidence. No further model calls will be made until the evidence "
+    "issue is resolved."
+)
+
+_IMPORT_SUFFIX_FILTER = (
+    "Importable sources (*.md *.txt *.pdf *.docx *.rtf);;"
+    "Markdown (*.md);;Text (*.txt);;PDF (*.pdf);;Word (*.docx);;RTF (*.rtf)"
 )
 
 
@@ -122,6 +207,20 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     except OSError:
         tmp_path.unlink(missing_ok=True)
         raise
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return None
+    if not raw.strip():
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 class ProposalModePanel(QWidget):
@@ -155,8 +254,27 @@ class ProposalModePanel(QWidget):
         self._worker = None
         self._running_action: str = ""
         self._init_note: str = ""
+        #: Session 020: the live campaign boundary control surface (armed
+        #: while a campaign worker runs; consumed by run_campaign at safe
+        #: stage boundaries only).
+        self._campaign_control: CampaignControl | None = None
+        self._campaign_running: bool = False
+        #: One-shot action feedback the renderer prefixes (never overwritten
+        #: by refresh — the S017 lesson: route feedback through panel state).
+        self._action_note: str = ""
 
-        layout = QVBoxLayout(self)
+        # -- scrollable production layout (Session 020 §23) ----------------
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        outer.addWidget(scroll)
+        content = QWidget()
+        scroll.setWidget(content)
+        #: Test seam (§25): the panel is vertically scrollable.
+        self._scroll_area = scroll
+        layout = QVBoxLayout(content)
 
         # -- navigation ------------------------------------------------------
         nav_row = QHBoxLayout()
@@ -166,61 +284,105 @@ class ProposalModePanel(QWidget):
         nav_row.addStretch(1)
         layout.addLayout(nav_row)
 
-        # -- PROPOSAL WORKSPACE (§4) ------------------------------------------
-        ws_box = QGroupBox("PROPOSAL WORKSPACE")
-        ws_form = QGridLayout(ws_box)
+        # -- A. PROJECT INPUTS (Session 020 §4) -------------------------------
+        inputs_box = QGroupBox("PROJECT INPUTS")
+        inputs_form = QGridLayout(inputs_box)
         self.ws_edit = QLineEdit()
         if self.workspace_root is not None:
             self.ws_edit.setText(str(self.workspace_root))
         self.ws_edit.setPlaceholderText(r"C:\proposals\my-proposal-workspace")
-        browse = QPushButton("Browse")
+        browse = QPushButton("BROWSE")
         browse.clicked.connect(self._on_browse)
-        self.init_button = QPushButton("INITIALIZE WORKSPACE")
+        self.init_button = QPushButton("INITIALIZE")
         self.init_button.clicked.connect(self._on_initialize)
         self.refresh_button = QPushButton("REFRESH")
         self.refresh_button.clicked.connect(self._on_refresh)
-        ws_form.addWidget(QLabel("Path:"), 0, 0)
-        ws_form.addWidget(self.ws_edit, 0, 1)
-        ws_form.addWidget(browse, 0, 2)
-        ws_form.addWidget(self.init_button, 0, 3)
-        ws_form.addWidget(self.refresh_button, 0, 4)
-        self.iteration_spin = QSpinBox()
-        self.iteration_spin.setRange(1, 999)
-        self.iteration_spin.setValue(1)
-        ws_form.addWidget(QLabel("Current iteration:"), 1, 0)
-        ws_form.addWidget(self.iteration_spin, 1, 1)
-        self.revision_edit = QLineEdit("rev-1")
-        ws_form.addWidget(QLabel("Proposal revision:"), 2, 0)
-        ws_form.addWidget(self.revision_edit, 2, 1)
-        self.hash_label = QLabel("MASTER_PROPOSAL hash: —")
-        self.hash_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
+        inputs_form.addWidget(QLabel("Workspace:"), 0, 0)
+        inputs_form.addWidget(self.ws_edit, 0, 1)
+        inputs_form.addWidget(browse, 0, 2)
+        inputs_form.addWidget(self.init_button, 0, 3)
+        inputs_form.addWidget(self.refresh_button, 0, 4)
+
+        self.blueprint_label = QLabel("MASTER BLUEPRINT: MISSING")
+        self.import_blueprint_button = QPushButton("IMPORT BLUEPRINT")
+        self.import_blueprint_button.clicked.connect(self._on_import_blueprint)
+        inputs_form.addWidget(self.blueprint_label, 1, 0, 1, 2)
+        inputs_form.addWidget(self.import_blueprint_button, 1, 2, 1, 3)
+
+        self.template_label = QLabel("OFFICIAL TEMPLATE: MISSING")
+        self.import_template_button = QPushButton("IMPORT TEMPLATE")
+        self.import_template_button.clicked.connect(self._on_import_template)
+        inputs_form.addWidget(self.template_label, 2, 0, 1, 2)
+        inputs_form.addWidget(self.import_template_button, 2, 2, 1, 3)
+
+        self.official_docs_label = QLabel("OFFICIAL DOCUMENTS: 0 files loaded")
+        self.import_docs_button = QPushButton("ADD OFFICIAL DOCS")
+        self.import_docs_button.clicked.connect(self._on_import_official_docs)
+        self.open_imports_button = QPushButton("OPEN FOLDER")
+        self.open_imports_button.clicked.connect(self._on_open_official_folder)
+        inputs_form.addWidget(self.official_docs_label, 3, 0, 1, 2)
+        inputs_form.addWidget(self.import_docs_button, 3, 2)
+        inputs_form.addWidget(self.open_imports_button, 3, 3, 1, 2)
+
+        self.existing_proposal_label = QLabel("EXISTING PROPOSAL: EMPTY")
+        self.import_proposal_button = QPushButton("IMPORT PROPOSAL")
+        self.import_proposal_button.clicked.connect(self._on_import_existing_proposal)
+        inputs_form.addWidget(self.existing_proposal_label, 4, 0, 1, 2)
+        inputs_form.addWidget(self.import_proposal_button, 4, 2, 1, 3)
+
+        self.master_label = QLabel("MASTER PROPOSAL: EMPTY")
+        self.open_master_button = QPushButton("OPEN FOLDER")
+        self.open_master_button.clicked.connect(self._on_open_master_folder)
+        inputs_form.addWidget(self.master_label, 5, 0, 1, 2)
+        inputs_form.addWidget(self.open_master_button, 5, 2, 1, 3)
+
+        self.source_budget_label = QLabel(
+            f"Source pack: 0 / {DEFAULT_SOURCE_BUDGET_CHARS} chars"
         )
-        ws_form.addWidget(self.hash_label, 3, 0, 1, 3)
+        self.source_budget_label.setWordWrap(True)
+        inputs_form.addWidget(self.source_budget_label, 6, 0, 1, 5)
         self.ws_status_label = QLabel("Workspace not initialised.")
         self.ws_status_label.setWordWrap(True)
-        ws_form.addWidget(self.ws_status_label, 4, 0, 1, 5)
-        layout.addWidget(ws_box)
+        inputs_form.addWidget(self.ws_status_label, 7, 0, 1, 5)
+        layout.addWidget(inputs_box)
 
-        # -- AGENTS (§5) --------------------------------------------------------
+        # -- B. AGENTS (Session 020 §7/§8) -------------------------------------
         agents_box = QGroupBox("AGENTS")
         agents_form = QGridLayout(agents_box)
         engine_ids = self.registry.driver_ids()
         self._role_rows: dict[ProposalRole, dict[str, Any]] = {}
         for row, role in enumerate(ProposalRole):
-            label = QLabel(role.value)
+            label = QLabel(_ROLE_LABELS[role])
             engine = QComboBox()
             engine.addItem("(select engine)", "")
             for driver_id in engine_ids:
                 engine.addItem(driver_id, driver_id)
-            profile = QLineEdit()
-            profile.setPlaceholderText("profile (optional)")
-            provider = QLineEdit()
-            provider.setPlaceholderText("provider (optional)")
-            model = QLineEdit()
-            model.setPlaceholderText("model (optional)")
-            session = QLineEdit()
-            session.setPlaceholderText("session id (when supported)")
+            profile = QComboBox()
+            profile.setEditable(True)
+            profile.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            profile.setToolTip("Real Hermes profiles (discovered; never invented)")
+            provider = QComboBox()
+            provider.setEditable(True)
+            provider.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            provider.setToolTip("Profile-derived provider (editable)")
+            model = QComboBox()
+            model.setEditable(True)
+            model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            model.setToolTip("Profile-derived model (editable)")
+            session_mode = QComboBox()
+            session_mode.addItem(_SESSION_MODE_NEW, "NEW_SESSION")
+            session_mode.addItem(_SESSION_MODE_RESUME, "RESUME_SELECTED_SESSION")
+            session = QComboBox()
+            session.setEditable(False)
+            session.addItem("NEW SESSION", "")
+            session.setToolTip("Profile-scoped discovered Hermes sessions")
+            # S017 seam: the legacy test drives the session field through
+            # setText(); expose the editable mirror used by that contract.
+            session.setText = session.setEditText  # type: ignore[method-assign]
+            refresh = QPushButton("REFRESH")
+            refresh.clicked.connect(
+                lambda _=False, r=role: self._on_refresh_hermes_selectors(r)
+            )
             agents_form.addWidget(label, row, 0)
             agents_form.addWidget(QLabel("Engine:"), row, 1)
             agents_form.addWidget(engine, row, 2)
@@ -230,49 +392,164 @@ class ProposalModePanel(QWidget):
             agents_form.addWidget(provider, row, 6)
             agents_form.addWidget(QLabel("Model:"), row, 7)
             agents_form.addWidget(model, row, 8)
-            agents_form.addWidget(QLabel("Session:"), row, 9)
-            agents_form.addWidget(session, row, 10)
+            agents_form.addWidget(QLabel("Session Mode:"), row, 9)
+            agents_form.addWidget(session_mode, row, 10)
+            agents_form.addWidget(QLabel("Session:"), row, 11)
+            agents_form.addWidget(session, row, 12)
+            agents_form.addWidget(refresh, row, 13)
             engine.activated.connect(
-                lambda _idx, r=role: self._on_role_changed(r)
+                lambda _idx, r=role: self._on_role_engine_changed(r)
             )
-            profile.editingFinished.connect(lambda r=role: self._on_role_changed(r))
-            provider.editingFinished.connect(lambda r=role: self._on_role_changed(r))
-            model.editingFinished.connect(lambda r=role: self._on_role_changed(r))
-            session.editingFinished.connect(lambda r=role: self._on_role_changed(r))
+            profile.activated.connect(
+                lambda _idx, r=role: self._on_role_profile_changed(r)
+            )
+            provider.editTextChanged.connect(
+                lambda _t, r=role: self._on_role_config_text_changed(r)
+            )
+            model.editTextChanged.connect(
+                lambda _t, r=role: self._on_role_config_text_changed(r)
+            )
+            session_mode.activated.connect(
+                lambda _idx, r=role: self._on_role_session_mode_changed(r)
+            )
+            session.activated.connect(
+                lambda _idx, r=role: self._on_role_session_changed(r)
+            )
             self._role_rows[role] = {
                 "engine": engine,
                 "profile": profile,
                 "provider": provider,
                 "model": model,
+                "session_mode": session_mode,
                 "session": session,
+                "refresh": refresh,
             }
         layout.addWidget(agents_box)
 
-        # -- RUN (§8) ------------------------------------------------------------
-        run_box = QGroupBox("RUN")
-        run_form = QHBoxLayout(run_box)
+        # -- C. PANEL / CAMPAIGN (Session 020 §10) -------------------------------
+        run_box = QGroupBox("PANEL / CAMPAIGN")
+        run_form = QVBoxLayout(run_box)
+        actions_row = QHBoxLayout()
+        self.generate_button = QPushButton("GENERATE INITIAL PROPOSAL")
+        self.generate_button.clicked.connect(self._on_generate_initial)
+        self.run_panel_button = QPushButton("RUN PANEL ITERATION")
+        self.run_panel_button.clicked.connect(self._on_run_panel)
         self.run_iteration_button = QPushButton("RUN ITERATION")
         self.run_iteration_button.clicked.connect(self._on_run_iteration)
         self.run_gates_button = QPushButton("RUN HARD GATES")
         self.run_gates_button.clicked.connect(self._on_run_hard_gates)
-        run_form.addWidget(self.run_iteration_button)
-        run_form.addWidget(self.run_gates_button)
+        for btn in (
+            self.generate_button,
+            self.run_panel_button,
+            self.run_iteration_button,
+            self.run_gates_button,
+        ):
+            actions_row.addWidget(btn)
+        run_form.addLayout(actions_row)
+
+        campaign_box = QGroupBox("AUTONOMOUS PANEL CAMPAIGN")
+        campaign_form = QGridLayout(campaign_box)
+        self.campaign_hours = QDoubleSpinBox()
+        self.campaign_hours.setRange(1.0, 120.0)
+        self.campaign_hours.setValue(24.0)
+        self.campaign_iterations = QSpinBox()
+        self.campaign_iterations.setRange(1, 50)
+        self.campaign_iterations.setValue(10)
+        self.campaign_target_readiness = QDoubleSpinBox()
+        self.campaign_target_readiness.setRange(0.0, 100.0)
+        self.campaign_target_readiness.setValue(92.0)
+        self.campaign_max_model_calls = QSpinBox()
+        self.campaign_max_model_calls.setRange(1, 100000)
+        self.campaign_max_model_calls.setValue(1000)
+        self.campaign_no_improvement = QSpinBox()
+        self.campaign_no_improvement.setRange(1, 10)
+        self.campaign_no_improvement.setValue(3)
+        campaign_form.addWidget(QLabel("Max hours:"), 0, 0)
+        campaign_form.addWidget(self.campaign_hours, 0, 1)
+        campaign_form.addWidget(QLabel("Max iterations:"), 0, 2)
+        campaign_form.addWidget(self.campaign_iterations, 0, 3)
+        campaign_form.addWidget(QLabel("Target readiness:"), 1, 0)
+        campaign_form.addWidget(self.campaign_target_readiness, 1, 1)
+        campaign_form.addWidget(QLabel("Max model calls:"), 1, 2)
+        campaign_form.addWidget(self.campaign_max_model_calls, 1, 3)
+        campaign_form.addWidget(QLabel("No-improvement limit:"), 2, 0)
+        campaign_form.addWidget(self.campaign_no_improvement, 2, 1)
+        controls_row = QHBoxLayout()
+        self.start_campaign_button = QPushButton("START CAMPAIGN")
+        self.start_campaign_button.clicked.connect(self._on_start_campaign)
+        self.pause_campaign_button = QPushButton("PAUSE")
+        self.pause_campaign_button.clicked.connect(self._on_pause_campaign)
+        self.resume_campaign_button = QPushButton("RESUME")
+        self.resume_campaign_button.clicked.connect(self._on_resume_campaign)
+        self.stop_campaign_button = QPushButton("STOP")
+        self.stop_campaign_button.clicked.connect(self._on_stop_campaign)
+        for btn in (
+            self.start_campaign_button,
+            self.pause_campaign_button,
+            self.resume_campaign_button,
+            self.stop_campaign_button,
+        ):
+            controls_row.addWidget(btn)
+        campaign_form.addLayout(controls_row, 3, 0, 1, 4)
+        self.campaign_note_label = QLabel("")
+        self.campaign_note_label.setWordWrap(True)
+        campaign_form.addWidget(self.campaign_note_label, 4, 0, 1, 4)
+        run_form.addWidget(campaign_box)
         layout.addWidget(run_box)
 
-        # -- CURRENT STATE (§9) ----------------------------------------------------
-        state_box = QGroupBox("CURRENT STATE")
+        # -- D. CURRENT STATE & READINESS (Session 020 §14) ----------------------
+        state_box = QGroupBox("CURRENT STATE & READINESS")
         state_layout = QVBoxLayout(state_box)
+        self.campaign_status_label = QLabel("Campaign: NOT STARTED")
+        self.campaign_status_label.setWordWrap(True)
         self.state_label = QLabel("Phase: IDLE")
         self.state_label.setWordWrap(True)
+        self.iteration_label = QLabel("Iteration: 0")
+        self.hash_label = QLabel("Proposal hash: —")
+        self.hash_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.model_calls_label = QLabel("Model calls used: —")
+        self.elapsed_label = QLabel("Elapsed campaign time: —")
+        self.readiness_label = QLabel("Internal readiness: —")
+        self.readiness_label.setWordWrap(True)
+        #: The disclaimer is ALWAYS displayed directly under the readiness
+        #: (brief §14 — never omitted).
+        self.readiness_disclaimer_label = QLabel(READINESS_DISCLAIMER_LABEL)
+        self.readiness_disclaimer_label.setWordWrap(True)
+        self.readiness_history_table = QTableWidget(0, 2)
+        self.readiness_history_table.setHorizontalHeaderLabels(
+            ["Iteration", "Internal readiness"]
+        )
+        self.readiness_history_table.verticalHeader().setVisible(False)
+        self.readiness_history_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        self.readiness_history_table.setMaximumHeight(160)
+        # Session 017A spinner seam: the durable iteration the NEXT
+        # operation legitimately uses (kept as a spin control so the
+        # S017A recovery contract keeps its attribute + value()).
+        self.iteration_spin = QSpinBox()
+        self.iteration_spin.setRange(1, 999)
+        self.iteration_spin.setVisible(False)
+        state_layout.addWidget(self.iteration_spin)
         self.detail_label = QLabel("")
         self.detail_label.setWordWrap(True)
+        state_layout.addWidget(self.campaign_status_label)
         state_layout.addWidget(self.state_label)
+        state_layout.addWidget(self.iteration_label)
+        state_layout.addWidget(self.hash_label)
+        state_layout.addWidget(self.model_calls_label)
+        state_layout.addWidget(self.elapsed_label)
+        state_layout.addWidget(self.readiness_label)
+        state_layout.addWidget(self.readiness_disclaimer_label)
+        state_layout.addWidget(self.readiness_history_table)
         state_layout.addWidget(self.detail_label)
         layout.addWidget(state_box)
 
-        # -- REVIEW RESULTS (§10) ----------------------------------------------------
-        reviews_box = QGroupBox("REVIEW RESULTS")
-        reviews_layout = QVBoxLayout(reviews_box)
+        # -- E. PANEL RESULTS (Session 020 §15/§16) ------------------------------
+        results_box = QGroupBox("PANEL RESULTS")
+        results_layout = QVBoxLayout(results_box)
         self.review_table = QTableWidget(0, 4)
         self.review_table.setHorizontalHeaderLabels(
             ["Reviewer", "Verdict", "Proposal hash", "Findings / claims"]
@@ -281,10 +558,30 @@ class ProposalModePanel(QWidget):
         self.review_table.setEditTriggers(
             QTableWidget.EditTrigger.NoEditTriggers
         )
-        reviews_layout.addWidget(self.review_table)
-        layout.addWidget(reviews_box)
+        results_layout.addWidget(self.review_table)
+        self.consensus_table = QTableWidget(0, 7)
+        self.consensus_table.setHorizontalHeaderLabels(
+            [
+                "ID",
+                "Section / target",
+                "Agreement",
+                "Disagreement",
+                "Insufficient evidence",
+                "Blocking?",
+                "Status",
+            ]
+        )
+        self.consensus_table.verticalHeader().setVisible(False)
+        self.consensus_table.setEditTriggers(
+            QTableWidget.EditTrigger.NoEditTriggers
+        )
+        results_layout.addWidget(self.consensus_table)
+        self.consensus_summary_label = QLabel("Unresolved disagreements: —")
+        self.consensus_summary_label.setWordWrap(True)
+        results_layout.addWidget(self.consensus_summary_label)
+        layout.addWidget(results_box)
 
-        # -- HARD GATES (§11) -----------------------------------------------------------
+        # -- F. HARD GATES (§11) ---------------------------------------------------
         gates_box = QGroupBox("HARD GATES")
         gates_layout = QVBoxLayout(gates_box)
         self.gate_table = QTableWidget(0, 3)
@@ -294,7 +591,7 @@ class ProposalModePanel(QWidget):
         gates_layout.addWidget(self.gate_table)
         layout.addWidget(gates_box)
 
-        # -- EVIDENCE (§12) -----------------------------------------------------------------
+        # -- G. EVIDENCE (§12) -------------------------------------------------------
         evidence_box = QGroupBox("EVIDENCE")
         evidence_layout = QVBoxLayout(evidence_box)
         self.evidence_table = QTableWidget(0, 3)
@@ -312,6 +609,13 @@ class ProposalModePanel(QWidget):
         layout.addWidget(evidence_box)
 
         layout.addStretch(1)
+        # The 14-gate table structure exists from construction (NOT_RUN
+        # rows); a workspace refresh overwrites with real artifact values.
+        self.gate_table.setRowCount(len(HARD_GATE_IDS_TUPLE))
+        for r, gate_id in enumerate(HARD_GATE_IDS_TUPLE):
+            self.gate_table.setItem(r, 0, QTableWidgetItem(gate_id))
+            self.gate_table.setItem(r, 1, QTableWidgetItem("NOT_RUN"))
+            self.gate_table.setItem(r, 2, QTableWidgetItem(""))
         self._set_running(False)
         self.refresh_status()
 
@@ -346,8 +650,265 @@ class ProposalModePanel(QWidget):
     def _on_refresh(self) -> None:
         self.refresh_status()
 
-    # -- role config (file-scoped, §5) ---------------------------------------------
-    def _on_role_changed(self, role: ProposalRole) -> None:
+    # -- PROJECT INPUTS importers (Session 020 §4/§5/§6) ---------------------------
+    def _import_paths_dialog(self, title: str, multi: bool) -> list[str]:
+        if multi:
+            chosen, _ = QFileDialog.getOpenFileNames(
+                self, title, "", _IMPORT_SUFFIX_FILTER
+            )
+            return list(chosen)
+        chosen, _ = QFileDialog.getOpenFileName(
+            self, title, "", _IMPORT_SUFFIX_FILTER
+        )
+        return [chosen] if chosen else []
+
+    def _confirm_replace(self, canonical_desc: str) -> bool:
+        """Explicit operator confirmation before ANY canonical replace."""
+        answer = QMessageBox.question(
+            self,
+            "Replace existing source?",
+            f"{canonical_desc} already holds content.\n\n"
+            "Replace it? The existing canonical text will be backed up "
+            "first (backend backup-before-replace), and the replacement "
+            "is recorded in the import manifest.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
+
+    def _run_import(
+        self, source_paths: list[str], import_role: str, canonical_desc: str
+    ) -> None:
+        """Import through the REAL source_import implementation — one path."""
+        ws = self._workspace()
+        if ws is None:
+            self._action_note = "Choose a workspace path first."
+            self.refresh_status()
+            return
+        replace = False
+        for path_text in source_paths:
+            try:
+                record = import_source(
+                    ws,
+                    Path(path_text),
+                    import_role=import_role,
+                    replace=replace,
+                )
+            except SourceImportError as exc:
+                if exc.reason == "canonical_exists" and not replace:
+                    if self._confirm_replace(canonical_desc):
+                        replace = True
+                        try:
+                            record = import_source(
+                                ws,
+                                Path(path_text),
+                                import_role=import_role,
+                                replace=True,
+                            )
+                        except SourceImportError as exc2:
+                            self._action_note = f"IMPORT FAILED: {exc2}"
+                            self.refresh_status()
+                            return
+                    else:
+                        self._action_note = (
+                            "IMPORT CANCELLED — existing source untouched."
+                        )
+                        self.refresh_status()
+                        return
+                else:
+                    self._action_note = f"IMPORT FAILED: {exc}"
+                    self.refresh_status()
+                    return
+            if record.extraction_warning:
+                self._action_note = (
+                    f"IMPORTED {record.original_filename} "
+                    f"(warning: {record.extraction_warning})"
+                )
+            else:
+                self._action_note = (
+                    f"IMPORTED {record.original_filename} → "
+                    f"{record.normalized_path}"
+                )
+        self.refresh_status()
+
+    def _on_import_blueprint(self) -> None:
+        paths = self._import_paths_dialog("Import MASTER BLUEPRINT", multi=False)
+        if paths:
+            self._run_import(paths, "master_blueprint", "MASTER_BLUEPRINT.md")
+
+    def _on_import_template(self) -> None:
+        paths = self._import_paths_dialog("Import OFFICIAL TEMPLATE", multi=False)
+        if paths:
+            self._run_import(
+                paths, "application_template", "APPLICATION_TEMPLATE.md"
+            )
+
+    def _on_import_official_docs(self) -> None:
+        paths = self._import_paths_dialog(
+            "Add OFFICIAL DOCUMENTS (multiple allowed)", multi=True
+        )
+        if paths:
+            self._run_import(
+                paths, "official_document", "official documents"
+            )
+
+    def _on_import_existing_proposal(self) -> None:
+        ws = self._workspace()
+        if ws is None:
+            self._action_note = "Choose a workspace path first."
+            self.refresh_status()
+            return
+        paths = self._import_paths_dialog("Import EXISTING PROPOSAL", multi=False)
+        if not paths:
+            return
+        try:
+            record = import_proposal(ws, Path(paths[0]))
+        except SourceImportError as exc:
+            if exc.reason == "master_not_empty":
+                if not self._confirm_replace("MASTER_PROPOSAL.md"):
+                    self._action_note = (
+                        "IMPORT CANCELLED — existing master untouched."
+                    )
+                    self.refresh_status()
+                    return
+                try:
+                    record = import_source(
+                        ws,
+                        Path(paths[0]),
+                        import_role="existing_proposal",
+                        replace=True,
+                    )
+                except SourceImportError as exc2:
+                    self._action_note = f"IMPORT FAILED: {exc2}"
+                    self.refresh_status()
+                    return
+            else:
+                self._action_note = f"IMPORT FAILED: {exc}"
+                self.refresh_status()
+                return
+        self._action_note = (
+            f"IMPORTED {record.original_filename} → {record.normalized_path}"
+        )
+        self.refresh_status()
+
+    def _on_open_official_folder(self) -> None:
+        ws = self._workspace()
+        if ws is not None:
+            QFileDialog.getOpenFileNames(
+                self, "01_OFFICIAL/NORMALIZED", str(ws / "01_OFFICIAL")
+            )
+
+    def _on_open_master_folder(self) -> None:
+        ws = self._workspace()
+        if ws is not None:
+            QFileDialog.getOpenFileNames(
+                self, "03_PROPOSAL", str(ws / "03_PROPOSAL")
+            )
+
+    # -- Hermes selector discovery (Session 020 §8) ---------------------------------
+    def _on_refresh_hermes_selectors(self, role: ProposalRole) -> None:
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        if engine != _HERMES_ENGINE_ID:
+            self._action_note = "Hermes discovery applies to the hermes engine."
+            self.refresh_status()
+            return
+        profiles = discover_hermes_profile_names()
+        profile_combo = row["profile"]
+        current = profile_combo.currentText().strip()
+        profile_combo.clear()
+        if profiles.ok and profiles.profiles:
+            for name in profiles.profiles:
+                profile_combo.addItem(name, name)
+            if current:
+                idx = profile_combo.findText(current)
+                if idx >= 0:
+                    profile_combo.setCurrentIndex(idx)
+        # An honest empty result stays empty — never a fabricated list.
+        selected_profile = profile_combo.currentText().strip()
+        if selected_profile:
+            self._populate_provider_model(role, selected_profile)
+            self._populate_sessions(role, selected_profile)
+        self._on_role_config_text_changed(role)
+        self._action_note = (
+            f"Hermes discovery: {len(profiles.profiles)} profile(s) "
+            f"({profiles.source or profiles.error or 'unavailable'})."
+        )
+        self.refresh_status()
+
+    def _populate_provider_model(self, role: ProposalRole, profile: str) -> None:
+        row = self._role_rows[role]
+        options = discover_hermes_provider_model(profile)
+        provider_combo = row["provider"]
+        model_combo = row["model"]
+        provider_combo.clear()
+        model_combo.clear()
+        if options.available:
+            if options.current_provider:
+                provider_combo.addItem(options.current_provider)
+            for name in options.known_providers:
+                if provider_combo.findText(name) < 0:
+                    provider_combo.addItem(name)
+            if options.current_model:
+                model_combo.addItem(options.current_model)
+        # Honest source label; combos remain EDITABLE either way.
+
+    def _populate_sessions(self, role: ProposalRole, profile: str) -> None:
+        row = self._role_rows[role]
+        session_combo = row["session"]
+        session_combo.clear()
+        session_combo.addItem("NEW SESSION", "")
+        options = discover_hermes_sessions(profile=profile)
+        for session_id in options.session_ids:
+            session_combo.addItem(session_id, session_id)
+        # An honest empty/unavailable result leaves only NEW SESSION.
+
+    def _on_role_engine_changed(self, role: ProposalRole) -> None:
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        is_hermes = engine == _HERMES_ENGINE_ID
+        for key in ("profile", "session_mode", "session", "refresh"):
+            widget = row[key]
+            widget.setEnabled(is_hermes)
+        if not is_hermes:
+            # Engine away from Hermes: clear the incompatible Hermes session
+            # binding AND the resume mode (a RESUME mode with no id would be
+            # an unconstructable config — fail-closed, same class as the
+            # profile-switch reset).
+            row["session"].setCurrentIndex(0)
+            row["session_mode"].setCurrentIndex(0)
+            row["profile"].clear()
+        else:
+            self._on_refresh_hermes_selectors(role)
+            return
+        self._on_role_config_text_changed(role)
+
+    def _on_role_profile_changed(self, role: ProposalRole) -> None:
+        row = self._role_rows[role]
+        # A profile switch invalidates the old session selection: sessions
+        # are profile-scoped, so the previous profile's ids are gone.
+        self._populate_sessions(role, row["profile"].currentText().strip())
+        self._populate_provider_model(role, row["profile"].currentText().strip())
+        # The selection AND the mode RESET: sessions are profile-scoped, so
+        # the previous profile's resume binding is meaningless — leaving
+        # RESUME_SELECTED_SESSION armed with no id would be an unconstructable
+        # config (fail-closed). The operator re-picks mode + id explicitly
+        # from the rediscovered list (Session 019's resume contract).
+        row["session"].setCurrentIndex(0)
+        row["session_mode"].setCurrentIndex(0)
+        self._on_role_config_text_changed(role)
+
+    def _on_role_session_mode_changed(self, role: ProposalRole) -> None:
+        self._on_role_config_text_changed(role)
+
+    def _on_role_session_changed(self, role: ProposalRole) -> None:
+        self._on_role_config_text_changed(role)
+
+    def _on_role_config_text_changed(self, role: ProposalRole) -> None:
+        self._sync_role_config_from_widgets(role)
+        self._persist_config_if_workspace()
+
+    def _sync_role_config_from_widgets(self, role: ProposalRole) -> None:
         row = self._role_rows[role]
         engine = str(row["engine"].currentData() or "")
         supports_sessions = False
@@ -358,26 +919,39 @@ class ProposalModePanel(QWidget):
                 )
             except KeyError:
                 supports_sessions = False
-        session_text = row["session"].text().strip()
+        session_mode = str(row["session_mode"].currentData() or "NEW_SESSION")
+        session_text = ""
+        if engine == _HERMES_ENGINE_ID and session_mode == "RESUME_SELECTED_SESSION":
+            session_text = str(row["session"].currentData() or "")
         if not supports_sessions:
-            # Capability gate: a session id is kept ONLY when the engine
-            # actually supports sessions — never sent to a stateless driver.
+            session_mode = "NEW_SESSION"
             session_text = ""
-            row["session"].setText("")
         self._role_configs[role] = ProposalAgentConfig(
             role=role,
             engine=engine,
-            project_profile=row["profile"].text().strip(),
-            provider=row["provider"].text().strip(),
-            model=row["model"].text().strip(),
+            project_profile=row["profile"].currentText().strip(),
+            provider=row["provider"].currentText().strip(),
+            model=row["model"].currentText().strip(),
             session_policy="persistent_optional",
             session_id=session_text,
+            session_mode=session_mode,
         )
-        # Persist ONLY into a chosen proposal workspace — never into the
-        # process working directory (which may be the application repo).
+
+    def _persist_config_if_workspace(self) -> None:
         ws = self._workspace()
-        if ws is not None:
+        if ws is not None and ws.is_dir():
             self.save_role_config(ws)
+
+    # -- role config (file-scoped, §5) ---------------------------------------------
+    def _on_role_changed(self, role: ProposalRole) -> None:
+        """Legacy S017 seam: one refresh from a plain text edit.
+
+        The S020 combos carry the live widgets now, but the contract that
+        engine/profile/provider/model/session edits flow into
+        ``ProposalAgentConfig`` and persist is unchanged.
+        """
+        self._sync_role_config_from_widgets(role)
+        self._persist_config_if_workspace()
 
     def apply_role_configs(
         self, configs: dict[ProposalRole, ProposalAgentConfig]
@@ -388,10 +962,32 @@ class ProposalModePanel(QWidget):
             row = self._role_rows[role]
             index = row["engine"].findData(config.engine)
             row["engine"].setCurrentIndex(index if index >= 0 else 0)
-            row["profile"].setText(config.project_profile)
-            row["provider"].setText(config.provider)
-            row["model"].setText(config.model)
-            row["session"].setText(config.session_id)
+            self._set_editable_text(row["profile"], config.project_profile)
+            self._set_editable_text(row["provider"], config.provider)
+            self._set_editable_text(row["model"], config.model)
+            mode_index = (
+                1
+                if config.session_mode == "RESUME_SELECTED_SESSION"
+                else 0
+            )
+            row["session_mode"].setCurrentIndex(mode_index)
+            if config.session_id:
+                if row["session"].findData(config.session_id) < 0:
+                    row["session"].addItem(config.session_id, config.session_id)
+                row["session"].setCurrentIndex(
+                    row["session"].findData(config.session_id)
+                )
+            else:
+                row["session"].setCurrentIndex(0)
+
+    @staticmethod
+    def _set_editable_text(combo: QComboBox, text: str) -> None:
+        """Set an editable combo's line edit (or select a matching item)."""
+        idx = combo.findText(text)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        else:
+            combo.setEditText(text)
 
     def role_configs(self) -> dict[ProposalRole, ProposalAgentConfig]:
         return dict(self._role_configs)
@@ -432,18 +1028,127 @@ class ProposalModePanel(QWidget):
             if isinstance(entry, dict):
                 entry = dict(entry)
                 entry["role"] = role.value
-                loaded[role] = ProposalAgentConfig.from_dict(entry)
+                try:
+                    loaded[role] = ProposalAgentConfig.from_dict(entry)
+                except ValueError:
+                    return False
         if loaded:
             self.apply_role_configs(loaded)
         return True
 
-    # -- run controls (§8) ---------------------------------------------------------
+    # -- run controls -----------------------------------------------------------
     def _set_running(self, running: bool, action: str = "") -> None:
         self._running_action = action if running else ""
-        self.run_iteration_button.setEnabled(not running)
-        self.run_gates_button.setEnabled(not running)
-        self.init_button.setEnabled(not running)
-        self.back_button.setEnabled(not running)
+        if not running:
+            self._campaign_running = False
+            if self._campaign_control is not None:
+                # The worker finished; a fresh run gets a fresh control object.
+                self._campaign_control = None
+        self._apply_run_gating()
+
+    def _configs_valid(self) -> bool:
+        return all(
+            bool(config.engine)
+            and self.registry.is_registered(config.engine)
+            for config in self._role_configs.values()
+        )
+
+    def _source_budget_for(self) -> SourceBudget:
+        return SourceBudget(blueprint_max_chars=DEFAULT_SOURCE_BUDGET_CHARS)
+
+    def _master_state(self, ws: Path) -> tuple[bool, bool]:
+        """(exists, non-empty) for MASTER_PROPOSAL."""
+        master = ws / "03_PROPOSAL" / "MASTER_PROPOSAL.md"
+        if not master.is_file():
+            return False, False
+        try:
+            return True, bool(master.read_bytes().strip())
+        except OSError:
+            return True, False
+
+    def _apply_run_gating(self) -> None:
+        """Enable run buttons ONLY for states the runtime accepts.
+
+        GENERATE INITIAL PROPOSAL: workspace valid + blueprint READY +
+        template READY + master EMPTY + all agent configs valid + nothing
+        running.  RUN PANEL ITERATION: master non-empty + source budget
+        passes + configs valid + phase in the panel entry set + nothing
+        running.  RUN ITERATION / RUN HARD GATES: the S017A phase gates
+        (unchanged).  Campaign controls: RUNNING → PAUSE/STOP enabled;
+        PAUSED/recoverable → RESUME enabled.
+        """
+        running = bool(self._running_action)
+        ws = self._workspace()
+        ws_valid = ws is not None and ws.is_dir()
+
+        generate_ok = False
+        panel_ok = False
+        iteration_ok = False
+        gates_ok = False
+        start_ok = False
+        pause_ok = False
+        stop_ok = False
+        resume_ok = False
+
+        if not running and ws_valid and ws is not None:
+            bp_ready = blueprint_status(ws) == "READY"
+            tpl_ready = blueprint_status(ws) == "READY"  # replaced below
+            from ..proposal.source_import import template_status
+
+            tpl_ready = template_status(ws) == "READY"
+            master_exists, master_nonempty = self._master_state(ws)
+            configs_ok = self._configs_valid()
+            budget_ok = True
+            try:
+                check_source_budget(ws, self._source_budget_for())
+            except SourceBudgetExceededError:
+                budget_ok = False
+            generate_ok = (
+                bp_ready and tpl_ready and not master_nonempty and configs_ok
+            )
+            panel_ok = (
+                master_nonempty
+                and configs_ok
+                and budget_ok
+                and self._machine is not None
+                and self._machine.phase in _PANEL_RUN_PHASES
+            )
+            if self._machine is not None:
+                phase = self._machine.phase
+                iteration_ok = phase in _ITERATION_RUN_PHASES
+                gates_ok = phase is ProposalPhase.HARD_GATE_VALIDATION
+            start_ok = configs_ok and budget_ok
+
+        if running:
+            if self._campaign_running and self._campaign_control is not None:
+                pause_ok = True
+                stop_ok = True
+
+        if not running and ws_valid and ws is not None:
+            state = self._load_campaign_state_safe(ws)
+            if state is not None and state.status in (
+                CampaignStatus.PAUSED,
+                CampaignStatus.WAITING_FOR_OPERATOR,
+                CampaignStatus.STOPPED,
+                CampaignStatus.BOUND_REACHED,
+                CampaignStatus.CONVERGED,
+            ):
+                resume_ok = True
+
+        self.generate_button.setEnabled(generate_ok)
+        self.run_panel_button.setEnabled(panel_ok)
+        self.run_iteration_button.setEnabled(iteration_ok)
+        self.run_gates_button.setEnabled(gates_ok)
+        self.start_campaign_button.setEnabled(start_ok)
+        self.pause_campaign_button.setEnabled(pause_ok)
+        self.stop_campaign_button.setEnabled(stop_ok)
+        self.resume_campaign_button.setEnabled(resume_ok)
+
+    def _load_campaign_state_safe(self, ws: Path):
+        try:
+            return load_campaign_state(ws)
+        except (ValueError, OSError):
+            return None
 
     # -- state-machine recovery (Session 017A §6) ----------------------------
     def _recover_machine(self, ws: Path, status: Any) -> ProposalStateMachine | None:
@@ -478,7 +1183,8 @@ class ProposalModePanel(QWidget):
     def _require_ready(self) -> tuple[Path, ProposalStateMachine] | None:
         ws = self._workspace()
         if ws is None:
-            self.detail_label.setText("Choose a workspace path first.")
+            self._action_note = "Choose a workspace path first."
+            self.refresh_status()
             return None
         if self._running_action:
             return None
@@ -491,9 +1197,8 @@ class ProposalModePanel(QWidget):
             status = load_workspace_status(ws)
             machine = self._recover_machine(ws, status)
             if machine is None:
-                self.detail_label.setText(
-                    "Recovery requires operator confirmation"
-                )
+                self._action_note = "Recovery requires operator confirmation"
+                self.refresh_status()
                 return None
             self._machine = machine
         return ws, self._machine
@@ -522,6 +1227,115 @@ class ProposalModePanel(QWidget):
                 reviewers[role] = driver
         return reviewers, orchestrator
 
+    def _reviewer_configs(self) -> dict[ProposalRole, ProposalAgentConfig]:
+        return {
+            role: self._role_configs[role]
+            for role in (
+                ProposalRole.SCIENTIFIC_REVIEWER,
+                ProposalRole.PROPOSAL_ENGINEER,
+                ProposalRole.RED_TEAM_REVIEWER,
+            )
+        }
+
+    def _base_spec_kwargs(self, ws: Path, machine: ProposalStateMachine) -> dict[str, Any]:
+        return {
+            "workspace": ws,
+            "iteration_number": self._next_iteration_hint(ws),
+            "proposal_revision": self._revision_for(ws),
+            "reviewer_agent_configs": self._reviewer_configs(),
+            "orchestrator_agent_config": self._role_configs[
+                ProposalRole.ORCHESTRATOR
+            ],
+            "state_machine": machine,
+            "source_budget": self._source_budget_for(),
+        }
+
+    def _next_iteration_hint(self, ws: Path) -> int:
+        """The iteration number the NEXT operation legitimately uses."""
+        try:
+            status = load_workspace_status(ws)
+        except Exception:
+            return 1
+        next_n = status.detail.get("next_iteration_number")
+        if isinstance(next_n, int) and next_n >= 1:
+            return next_n
+        return max(1, status.latest_iteration)
+
+    def _revision_for(self, ws: Path) -> str:
+        return f"rev-{self._next_iteration_hint(ws)}"
+
+    # -- action handlers (Session 020 §10–§12) --------------------------------
+    def _on_generate_initial(self) -> None:
+        ready = self._require_ready()
+        if ready is None or self._running_action:
+            return
+        ws, machine = ready
+        master_exists, master_nonempty = self._master_state(ws)
+        if machine.phase is not ProposalPhase.IDLE or master_nonempty:
+            self._action_note = (
+                "GENERATE INITIAL PROPOSAL requires an EMPTY master at IDLE."
+            )
+            self.refresh_status()
+            return
+        try:
+            reviewers, orchestrator = self._build_drivers()
+        except ValueError as exc:
+            self._action_note = str(exc)
+            self.refresh_status()
+            return
+        if orchestrator is None:
+            self._action_note = "ASTRA / ORCHESTRATOR engine is not configured."
+            self.refresh_status()
+            return
+        base = self._base_spec_kwargs(ws, machine)
+        base.pop("proposal_revision", None)
+        spec = ProposalRunSpec(
+            action=ProposalWorkerAction.GENERATE_INITIAL,
+            iteration_number=base.pop("iteration_number", 1),
+            proposal_revision=f"initial-{self._next_iteration_hint(ws)}",
+            reviewer_drivers=reviewers,
+            orchestrator_driver=orchestrator,
+            **base,
+        )
+        self._start_worker(spec, "GENERATE INITIAL")
+
+    def _on_run_panel(self) -> None:
+        ready = self._require_ready()
+        if ready is None or self._running_action:
+            return
+        ws, machine = ready
+        if machine.phase not in _PANEL_RUN_PHASES:
+            self._action_note = (
+                "RUN PANEL ITERATION runs FULL panel iterations from IDLE "
+                f"(or REVISION_REQUIRED); the machine is at "
+                f"{machine.phase.value}. Use RUN ITERATION for partial-phase "
+                "resume."
+            )
+            self.refresh_status()
+            return
+        try:
+            reviewers, orchestrator = self._build_drivers()
+        except ValueError as exc:
+            self._action_note = str(exc)
+            self.refresh_status()
+            return
+        if orchestrator is None:
+            self._action_note = "ASTRA / ORCHESTRATOR engine is not configured."
+            self.refresh_status()
+            return
+        spec = ProposalRunSpec(
+            action=ProposalWorkerAction.RUN_PANEL,
+            reviewer_drivers=reviewers,
+            orchestrator_driver=orchestrator,
+            proposal_revision=self._revision_for(ws),
+            **{
+                k: v
+                for k, v in self._base_spec_kwargs(ws, machine).items()
+                if k not in {"proposal_revision"}
+            },
+        )
+        self._start_worker(spec, "RUN PANEL ITERATION")
+
     def _on_run_iteration(self) -> None:
         ready = self._require_ready()
         if ready is None or self._running_action:
@@ -530,25 +1344,17 @@ class ProposalModePanel(QWidget):
         try:
             reviewers, orchestrator = self._build_drivers()
         except ValueError as exc:
-            self.detail_label.setText(str(exc))
+            self._action_note = str(exc)
+            self.refresh_status()
             return
         # Session 017A: the FOUR current ProposalAgentConfig objects reach
         # the worker/runtime — the values the operator sees in AGENTS are
         # the exact values the drivers receive in their SessionRequest.
-        reviewer_configs = {
-            role: self._role_configs[role]
-            for role in (
-                ProposalRole.SCIENTIFIC_REVIEWER,
-                ProposalRole.PROPOSAL_ENGINEER,
-                ProposalRole.RED_TEAM_REVIEWER,
-            )
-        }
-        orchestrator_config = self._role_configs[ProposalRole.ORCHESTRATOR]
         spec = ProposalRunSpec(
             action=ProposalWorkerAction.RUN_ITERATION,
             workspace=ws,
-            iteration_number=self.iteration_spin.value(),
-            proposal_revision=self.revision_edit.text().strip() or "rev-1",
+            iteration_number=self._iteration_spin_value(),
+            proposal_revision=self._revision_for(ws),
             reviewer_drivers=reviewers,
             orchestrator_driver=orchestrator,
             reviewer_session_policies={
@@ -556,10 +1362,16 @@ class ProposalModePanel(QWidget):
             },
             orchestrator_session_policy=SessionPolicy.ALWAYS_NEW,
             state_machine=machine,
-            reviewer_agent_configs=reviewer_configs,
-            orchestrator_agent_config=orchestrator_config,
+            reviewer_agent_configs=self._reviewer_configs(),
+            orchestrator_agent_config=self._role_configs[
+                ProposalRole.ORCHESTRATOR
+            ],
         )
         self._start_worker(spec, "RUN ITERATION")
+
+    def _iteration_spin_value(self) -> int:
+        """Legacy S017 spinner seam (kept; synced from durable state)."""
+        return max(1, int(self._next_iteration_hint(self._workspace() or Path("."))))
 
     def _on_run_hard_gates(self) -> None:
         ready = self._require_ready()
@@ -569,24 +1381,142 @@ class ProposalModePanel(QWidget):
         if machine.phase is not ProposalPhase.HARD_GATE_VALIDATION:
             # Phase-aware gating (Session 017A §10): gates run ONLY from
             # HARD_GATE_VALIDATION — never from a fake IDLE after recovery.
-            self.detail_label.setText(
+            self._action_note = (
                 "RUN HARD GATES requires phase HARD_GATE_VALIDATION "
                 f"(current: {machine.phase.value})."
             )
+            self.refresh_status()
             return
         spec = ProposalRunSpec(
             action=ProposalWorkerAction.RUN_HARD_GATES,
             workspace=ws,
-            iteration_number=self.iteration_spin.value(),
-            proposal_revision=self.revision_edit.text().strip() or "rev-1",
+            iteration_number=self._iteration_spin_value(),
+            proposal_revision=self._revision_for(ws),
             state_machine=machine,
         )
         self._start_worker(spec, "RUN HARD GATES")
 
+    # -- campaign controls (Session 020 §10–§13) --------------------------------
+    def _campaign_config_from_ui(self) -> CampaignConfig:
+        return CampaignConfig(
+            max_hours=float(self.campaign_hours.value()),
+            max_iterations=int(self.campaign_iterations.value()),
+            target_readiness=float(self.campaign_target_readiness.value()),
+            max_model_calls=int(self.campaign_max_model_calls.value()),
+            no_improvement_limit=int(self.campaign_no_improvement.value()),
+        )
+
+    def _on_start_campaign(self) -> None:
+        ready = self._require_ready()
+        if ready is None or self._running_action:
+            return
+        ws, machine = ready
+        if self._load_campaign_state_safe(ws) is not None and (
+            self._load_campaign_state_safe(ws).status
+            in (CampaignStatus.RUNNING, CampaignStatus.PAUSED)
+        ):
+            self._action_note = (
+                "A campaign is already recorded for this workspace — use "
+                "RESUME."
+            )
+            self.refresh_status()
+            return
+        try:
+            reviewers, orchestrator = self._build_drivers()
+        except ValueError as exc:
+            self._action_note = str(exc)
+            self.refresh_status()
+            return
+        if orchestrator is None:
+            self._action_note = "ASTRA / ORCHESTRATOR engine is not configured."
+            self.refresh_status()
+            return
+        try:
+            config = self._campaign_config_from_ui()
+        except ValueError as exc:
+            self._action_note = f"Campaign bounds invalid: {exc}"
+            self.refresh_status()
+            return
+        self._campaign_control = CampaignControl()
+        base = self._base_spec_kwargs(ws, machine)
+        base.pop("proposal_revision", None)
+        spec = ProposalRunSpec(
+            action=ProposalWorkerAction.START_CAMPAIGN,
+            proposal_revision=f"campaign-{self._next_iteration_hint(ws)}",
+            reviewer_drivers=reviewers,
+            orchestrator_driver=orchestrator,
+            campaign_config=config,
+            campaign_control=self._campaign_control,
+            **base,
+        )
+        self._campaign_running = True
+        self._start_worker(spec, "START CAMPAIGN")
+
+    def _on_resume_campaign(self) -> None:
+        ws = self._workspace()
+        if ws is None or self._running_action:
+            return
+        state = self._load_campaign_state_safe(ws)
+        if state is None:
+            self._action_note = "No durable campaign state to resume."
+            self.refresh_status()
+            return
+        if state.status in (CampaignStatus.COMPLETE, CampaignStatus.FAILED):
+            self._action_note = (
+                f"Campaign is terminal ({state.status.value}); nothing to resume."
+            )
+            self.refresh_status()
+            return
+        ready = self._require_ready()
+        if ready is None:
+            return
+        ws2, machine = ready
+        try:
+            reviewers, orchestrator = self._build_drivers()
+        except ValueError as exc:
+            self._action_note = str(exc)
+            self.refresh_status()
+            return
+        if orchestrator is None:
+            self._action_note = "ASTRA / ORCHESTRATOR engine is not configured."
+            self.refresh_status()
+            return
+        config = self._campaign_config_from_ui()
+        self._campaign_control = CampaignControl()
+        base = self._base_spec_kwargs(ws2, machine)
+        base.pop("proposal_revision", None)
+        spec = ProposalRunSpec(
+            action=ProposalWorkerAction.RESUME_CAMPAIGN,
+            proposal_revision=f"campaign-{self._next_iteration_hint(ws2)}",
+            reviewer_drivers=reviewers,
+            orchestrator_driver=orchestrator,
+            campaign_config=config,
+            campaign_control=self._campaign_control,
+            resume_campaign=True,
+            **base,
+        )
+        self._campaign_running = True
+        self._start_worker(spec, "RESUME CAMPAIGN")
+
+    def _on_pause_campaign(self) -> None:
+        """Boundary-request semantics (brief §13): arm the flag; the
+        campaign honours it at the NEXT safe stage boundary."""
+        if not self._campaign_running or self._campaign_control is None:
+            return
+        self._campaign_control.pause_requested = True
+        self.campaign_note_label.setText(_PAUSE_REQUEST_TEXT)
+
+    def _on_stop_campaign(self) -> None:
+        if not self._campaign_running or self._campaign_control is None:
+            return
+        self._campaign_control.stop_requested = True
+        self.campaign_note_label.setText(_STOP_REQUEST_TEXT)
+
+    # -- worker lifecycle ---------------------------------------------------------
     def _start_worker(self, spec: ProposalRunSpec, label: str) -> None:
         self._set_running(True, label)
         self.detail_label.setText(f"Running… ({label})")
-        self.state_label.setText("Phase: RUNNING")
+        self._action_note = ""
         self._thread, self._worker = start_proposal_worker(spec, parent=self)
         self._worker.finished.connect(self._on_worker_finished)
         # Session 017A (found by the item-9 recovery test): the factory
@@ -604,57 +1534,28 @@ class ProposalModePanel(QWidget):
     #: Last worker report (test/diagnostic surface).
     _last_report: object = None
 
-    # -- phase-aware run controls (Session 017A §10) --------------------------
+    # -- phase-aware run controls (Session 017A §10; S020 superset) ------------
     def _apply_phase_gating(self, ws: Path | None) -> None:
-        """Enable the run buttons ONLY for phases the runtime accepts.
+        """The S017A contract entry point — now the full S020 gating."""
+        self._apply_run_gating()
 
-        RUN HARD GATES: only HARD_GATE_VALIDATION.  RUN ITERATION: only
-        IDLE / SOURCE_VALIDATION / SCIENTIFIC_REVIEW / IMPLEMENTATION_REVIEW
-        / RED_TEAM_REVIEW / REVISION_REQUIRED (the exact entry phases
-        ``run_review_cycle()`` genuinely accepts).  INTEGRATION disables
-        both (automatic integration-recovery is NOT implemented in this
-        MVP); BLOCKED / FAILED / COMPLETE / ambiguous recovery disable both.
-        A worker running disables both.  No workspace: both disabled.
-        """
-        if self._running_action:
-            self.run_iteration_button.setEnabled(False)
-            self.run_gates_button.setEnabled(False)
-            return
-        if ws is None or not ws.is_dir():
-            self.run_iteration_button.setEnabled(False)
-            self.run_gates_button.setEnabled(False)
-            return
-        if self._machine is None:
-            # Ambiguous recovery: no runnable machine, nothing may start.
-            self.run_iteration_button.setEnabled(False)
-            self.run_gates_button.setEnabled(False)
-            return
-        phase = self._machine.phase
-        iteration_ok = phase in _ITERATION_RUN_PHASES
-        gates_ok = phase is ProposalPhase.HARD_GATE_VALIDATION
-        self.run_iteration_button.setEnabled(iteration_ok)
-        self.run_gates_button.setEnabled(gates_ok)
-        if phase is ProposalPhase.INTEGRATION:
-            self.detail_label.setText(
-                "INTEGRATION recovery is not implemented in this MVP; "
-                "recovery requires operator confirmation."
-            )
-
-    # -- status rendering (§9/§10/§11/§12) --------------------------------------
+    # -- status rendering ---------------------------------------------------------
     def refresh_status(self) -> None:
         """Re-read durable artifacts; honest renderer, no recomputation.
 
-        Session 017A: this is also the DETERMINISTIC RECOVERY point — the
+        Session 020: this is also the DETERMINISTIC RECOVERY point — the
         in-memory machine is (re)bound to the selected workspace from the
-        workspace's durable status, the iteration spinner is synchronised
-        from durable state, and ``PROPOSAL_CONFIG.json`` auto-loads ONCE
-        per selected workspace.  While a worker runs, recovery and spinner
-        updates are suppressed (the operator's in-flight run owns them).
+        workspace's durable status, the campaign state is re-read from
+        ``CAMPAIGN_STATE.json`` (read-only; a recoverable campaign enables
+        RESUME — nothing auto-runs), and ``PROPOSAL_CONFIG.json``
+        auto-loads ONCE per selected workspace.  While a worker runs,
+        recovery updates are suppressed (the in-flight run owns them).
         """
         ws = self._workspace()
         if ws is None or not ws.is_dir():
             self.ws_status_label.setText("Workspace directory does not exist yet.")
             self.state_label.setText("Phase: IDLE")
+            self.campaign_status_label.setText("Campaign: NOT STARTED")
             self._apply_phase_gating(ws)
             return
         # -- §9: config auto-load, ONCE per selected workspace ----------------
@@ -673,12 +1574,6 @@ class ProposalModePanel(QWidget):
         status = load_workspace_status(ws)
         if not self._running_action:
             self._recover_machine(ws, status)
-            # -- §8: spinner sync -------------------------------------------------
-            next_n = status.detail.get("next_iteration_number")
-            if isinstance(next_n, int) and next_n >= 1:
-                self.iteration_spin.setValue(next_n)
-            elif status.latest_iteration >= 1:
-                self.iteration_spin.setValue(max(1, status.latest_iteration))
         phase = status.phase
         extra = ""
         if status.has_master_proposal:
@@ -686,46 +1581,204 @@ class ProposalModePanel(QWidget):
                 extra = " — MASTER_PROPOSAL.md is EMPTY"
             elif status.current_proposal_hash:
                 self.hash_label.setText(
-                    f"MASTER_PROPOSAL hash: {status.current_proposal_hash[:16]}…"
+                    f"Proposal hash: {status.current_proposal_hash[:16]}…"
                 )
         else:
             extra = " — MASTER_PROPOSAL.md is MISSING"
         if status.ambiguous:
             extra += " — Recovery requires operator confirmation"
         init_note = f"{self._init_note} " if self._init_note else ""
+        action_note = f"{self._action_note} " if self._action_note else ""
         self.ws_status_label.setText(
-            f"{init_note}{status.summary}{extra} "
+            f"{init_note}{action_note}{status.summary}{extra} "
             f"(latest iteration: {status.latest_iteration})"
         )
         self.state_label.setText(f"Phase: {phase.value}")
+        # -- Session 020 §14: readiness + campaign ---------------------------
+        self._render_campaign_and_readiness(ws, status)
+        # -- §6 spinner seam ---------------------------------------------------
+        next_n = status.detail.get("next_iteration_number")
+        if isinstance(next_n, int) and next_n >= 1:
+            self.iteration_label.setText(f"Iteration: {next_n}")
+            self.iteration_spin.setValue(next_n)
+        elif status.latest_iteration >= 1:
+            shown = max(1, status.latest_iteration)
+            self.iteration_label.setText(f"Iteration: {shown}")
+            self.iteration_spin.setValue(shown)
         report = self._last_report
         if isinstance(report, dict):
             outcome = str(
                 report.get("outcome") or report.get("worker_error") or ""
             )
-            self.detail_label.setText(f"Last run: {outcome or '—'}")
+            model_calls = report.get("model_calls_used")
+            calls_text = (
+                f" (model calls: {model_calls})"
+                if isinstance(model_calls, int)
+                else ""
+            )
+            base = f"Last run: {outcome or '—'}{calls_text}"
+            if self._running_action:
+                base = f"Running… ({self._running_action})"
+            self.detail_label.setText(base)
+        elif self._running_action:
+            self.detail_label.setText(f"Running… ({self._running_action})")
         else:
             self.detail_label.setText("")
         self._render_reviews(ws, status)
+        self._render_consensus(ws)
         self._render_gates(ws, status)
         self._render_evidence(ws)
+        self._render_project_inputs(ws)
         self._apply_phase_gating(ws)
 
-    def _sync_role_rows(self) -> None:
-        """Push ``self._role_configs`` into the AGENTS widgets (no signals)."""
-        for role in ProposalRole:
-            config = self._role_configs[role]
-            row = self._role_rows[role]
-            index = row["engine"].findData(config.engine)
-            row["engine"].setCurrentIndex(index if index >= 0 else 0)
-            row["profile"].setText(config.project_profile)
-            row["provider"].setText(config.provider)
-            row["model"].setText(config.model)
-            row["session"].setText(config.session_id)
+    def _render_project_inputs(self, ws: Path) -> None:
+        """Session 020 §6 — source statuses + budget, always rendered."""
+        bp = blueprint_status(ws)
+        from ..proposal.source_import import template_status
+
+        tpl = template_status(ws)
+        self.blueprint_label.setText(f"MASTER BLUEPRINT: {bp}")
+        self.template_label.setText(f"OFFICIAL TEMPLATE: {tpl}")
+        normalized = ws / "01_OFFICIAL" / "NORMALIZED"
+        doc_count = 0
+        if normalized.is_dir():
+            doc_count = sum(
+                1 for p in normalized.iterdir() if p.is_file() and p.suffix == ".md"
+            )
+        self.official_docs_label.setText(
+            f"OFFICIAL DOCUMENTS: {doc_count} files loaded"
+        )
+        master_exists, master_nonempty = self._master_state(ws)
+        if master_nonempty:
+            self.existing_proposal_label.setText("EXISTING PROPOSAL: LOADED")
+            self.master_label.setText("MASTER PROPOSAL: READY")
+        elif master_exists:
+            self.existing_proposal_label.setText("EXISTING PROPOSAL: EMPTY")
+            self.master_label.setText("MASTER PROPOSAL: EMPTY")
+        else:
+            self.existing_proposal_label.setText("EXISTING PROPOSAL: EMPTY")
+            self.master_label.setText("MASTER PROPOSAL: MISSING")
+        budget_text = f"Source pack: 0 / {DEFAULT_SOURCE_BUDGET_CHARS} chars"
+        try:
+            total = check_source_budget(ws, self._source_budget_for())
+            budget_text = (
+                f"Source pack: {total} / {DEFAULT_SOURCE_BUDGET_CHARS} chars"
+            )
+        except SourceBudgetExceededError as exc:
+            budget_text = (
+                f"SOURCE BUDGET EXCEEDED — {exc.total_chars} / "
+                f"{exc.budget_chars} chars. Raise the budget or split the "
+                "source before running."
+            )
+        except ValueError:
+            pass
+        self.source_budget_label.setText(budget_text)
+
+    def _render_campaign_and_readiness(self, ws: Path, status: Any) -> None:
+        state = self._load_campaign_state_safe(ws)
+        if state is None:
+            self.campaign_status_label.setText("Campaign: NOT STARTED")
+            self.model_calls_label.setText("Model calls used: —")
+            self.elapsed_label.setText("Elapsed campaign time: —")
+            self.readiness_label.setText("Internal readiness: —")
+            self.readiness_history_table.setRowCount(0)
+            return
+        self.campaign_status_label.setText(f"Campaign: {state.status.value}")
+        self.model_calls_label.setText(
+            f"Model calls used: {state.model_calls_used}"
+        )
+        self.elapsed_label.setText(
+            f"Elapsed campaign time: {state.accumulated_run_s / 3600.0:.2f} h"
+        )
+        if state.last_readiness is not None:
+            self.readiness_label.setText(
+                f"Internal readiness: {state.last_readiness:.1f}%"
+            )
+        else:
+            self.readiness_label.setText("Internal readiness: —")
+        rows = list(state.readiness_history)
+        self.readiness_history_table.setRowCount(len(rows))
+        for r, entry in enumerate(rows):
+            self.readiness_history_table.setItem(
+                r, 0, QTableWidgetItem(str(entry.get("iteration") or ""))
+            )
+            readiness = entry.get("readiness")
+            self.readiness_history_table.setItem(
+                r,
+                1,
+                QTableWidgetItem(
+                    f"{float(readiness):.1f}%"
+                    if readiness is not None
+                    else "—"
+                ),
+            )
+        if state.status is CampaignStatus.WAITING_FOR_OPERATOR:
+            self.campaign_note_label.setText(_WAITING_FOR_OPERATOR_TEXT)
+        elif state.status is CampaignStatus.PAUSED:
+            self.campaign_note_label.setText(
+                "Campaign PAUSED at a safe boundary — RESUME continues at "
+                "the persisted checkpoint."
+            )
+
+    def _render_consensus(self, ws: Path) -> None:
+        """Session 020 §16 — the persisted panel consensus matrix."""
+        try:
+            status = load_workspace_status(ws)
+            iteration = status.latest_iteration
+        except Exception:
+            iteration = 0
+        artifact = None
+        if iteration >= 1:
+            artifact = _read_json(
+                ws
+                / "04_REVIEWS"
+                / f"iteration_{iteration:03d}"
+                / _PANEL_CONSENSUS_FILE
+            )
+        if artifact is None:
+            self.consensus_table.setRowCount(0)
+            self.consensus_summary_label.setText("Unresolved disagreements: —")
+            return
+        try:
+            matrix = PanelConsensusMatrix.from_dict(artifact)
+        except (ValueError, KeyError):
+            self.consensus_table.setRowCount(0)
+            self.consensus_summary_label.setText(
+                "Unresolved disagreements: — (consensus artifact unreadable)"
+            )
+            return
+        docket = _read_json(
+            ws / "04_REVIEWS" / f"iteration_{iteration:03d}" / "panel_docket.json"
+        )
+        sections: dict[str, str] = {}
+        if docket:
+            for item in docket.get("items") or []:
+                if isinstance(item, dict) and item.get("item_id"):
+                    sections[str(item["item_id"])] = str(
+                        item.get("section") or item.get("category") or ""
+                    )
+        rows = matrix.rows
+        self.consensus_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            status_text = "RESOLVED" if not row.unresolved else "UNRESOLVED"
+            values = (
+                row.item_id,
+                sections.get(row.item_id, ""),
+                str(row.agreement_count),
+                str(row.disagreement_count),
+                str(row.insufficient_count),
+                "YES" if row.blocks_acceptance else "NO",
+                status_text,
+            )
+            for c, value in enumerate(values):
+                self.consensus_table.setItem(r, c, QTableWidgetItem(value))
+        self.consensus_summary_label.setText(
+            f"Unresolved disagreements: {matrix.unresolved_count}"
+        )
 
     def _render_reviews(self, ws: Path, status: Any) -> None:
         it_dir = ws / "04_REVIEWS" / f"iteration_{status.latest_iteration:03d}"
-        bundle = self._read_json(it_dir / _BUNDLE_FILE)
+        bundle = _read_json(it_dir / _BUNDLE_FILE)
         rows: list[tuple[str, str, str, str]] = []
         if bundle is not None:
             hash_text = str(bundle.get("proposal_hash") or "")[:12]
@@ -741,7 +1794,7 @@ class ProposalModePanel(QWidget):
                 rows.append(
                     (label, verdict, hash_text, f"{findings} findings / {claims} claims")
                 )
-            integration = self._read_json(it_dir / "integration_result.json")
+            integration = _read_json(it_dir / "integration_result.json")
             if integration is not None:
                 applied = len(integration.get("applied_items") or [])
                 unresolved = len(integration.get("unresolved_items") or [])
@@ -755,7 +1808,7 @@ class ProposalModePanel(QWidget):
                 )
         else:
             for label, filename in _REVIEW_FILES:
-                artifact = self._read_json(it_dir / filename)
+                artifact = _read_json(it_dir / filename)
                 if artifact is not None:
                     result = artifact.get("result") or {}
                     rows.append(
@@ -773,9 +1826,9 @@ class ProposalModePanel(QWidget):
 
     def _render_gates(self, ws: Path, status: Any) -> None:
         it_dir = ws / "04_REVIEWS" / f"iteration_{status.latest_iteration:03d}"
-        artifact = self._read_json(it_dir / _HARD_GATES_FILE)
+        artifact = _read_json(it_dir / _HARD_GATES_FILE)
         if artifact is None:
-            artifact = self._read_json(ws / "05_CONTROL" / HARD_GATES_SNAPSHOT_FILENAME)
+            artifact = _read_json(ws / "05_CONTROL" / HARD_GATES_SNAPSHOT_FILENAME)
         results: dict[str, dict[str, Any]] = {}
         if artifact is not None:
             for entry in artifact.get("gate_results") or []:
@@ -822,7 +1875,8 @@ class ProposalModePanel(QWidget):
     def _on_create_skeleton(self) -> None:
         ws = self._workspace()
         if ws is None:
-            self.detail_label.setText("Choose a workspace path first.")
+            self._action_note = "Choose a workspace path first."
+            self.refresh_status()
             return
         created = 0
         for filename, subdir in _EVIDENCE_FILES:
@@ -832,7 +1886,7 @@ class ProposalModePanel(QWidget):
             payload = self._skeleton_payload(filename)
             _atomic_write_json(path, payload)
             created += 1
-        self.detail_label.setText(
+        self._action_note = (
             f"Evidence skeletons created for {created} missing file(s); "
             "existing files untouched. Skeletons are NOT pass-ready evidence."
         )
@@ -891,6 +1945,29 @@ class ProposalModePanel(QWidget):
             return {"unresolved": ["OPERATOR REQUIRED: list contradictions"]}
         return {"_note": required}
 
+    def _sync_role_rows(self) -> None:
+        """Push ``self._role_configs`` into the AGENTS widgets (no signals)."""
+        for role in ProposalRole:
+            config = self._role_configs[role]
+            row = self._role_rows[role]
+            index = row["engine"].findData(config.engine)
+            row["engine"].setCurrentIndex(index if index >= 0 else 0)
+            self._set_editable_text(row["profile"], config.project_profile)
+            self._set_editable_text(row["provider"], config.provider)
+            self._set_editable_text(row["model"], config.model)
+            mode_index = (
+                1 if config.session_mode == "RESUME_SELECTED_SESSION" else 0
+            )
+            row["session_mode"].setCurrentIndex(mode_index)
+            if config.session_id:
+                if row["session"].findData(config.session_id) < 0:
+                    row["session"].addItem(config.session_id, config.session_id)
+                row["session"].setCurrentIndex(
+                    row["session"].findData(config.session_id)
+                )
+            else:
+                row["session"].setCurrentIndex(0)
+
     # -- test seam -----------------------------------------------------------------
     def machine(self) -> ProposalStateMachine:
         """The panel's proposal state machine (created lazily).
@@ -914,17 +1991,3 @@ class ProposalModePanel(QWidget):
                 )
             self._machine = machine
         return self._machine
-
-    @staticmethod
-    def _read_json(path: Path) -> dict[str, Any] | None:
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            return None
-        if not raw.strip():
-            return None
-        try:
-            data = json.loads(raw.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return None
-        return data if isinstance(data, dict) else None

@@ -109,74 +109,142 @@ zero AI calls; the completed batch stays in HISTORY.
 
 ---
 
-# Part P — Proposal Mode (Session 017)
+# Part P — Proposal Mode (Sessions 017–020)
 
 Select **PROPOSAL MODE** from the top tab bar — or the **PROPOSAL MODE**
 button inside Coding Simple Mode (both drive the same navigation state).
 Press **BACK TO CODING MODE**, or the **CODING MODE** tab, to return.
 Coding Mode is never modified by Proposal Mode (separate configuration,
-separate workspace).
+separate workspace). The whole surface scrolls vertically — every section
+below is reachable on a normal display.
 
-## P1. The proposal flow
+## P1. The proposal flow (Session 020 production workflow)
 
 ```
-Workspace → Agents → RUN ITERATION → RUN HARD GATES → COMPLETE
-                                   ↘ REVISION_REQUIRED / BLOCKED / INCOMPLETE
+PROJECT INPUTS → GENERATE INITIAL PROPOSAL → RUN PANEL ITERATION
+  (or START CAMPAIGN — the bounded loop drives all of it)
+→ RUN HARD GATES → COMPLETE
 ```
 
-1. **PROPOSAL WORKSPACE** — choose (or Browse to) an empty folder and press
-   **INITIALIZE WORKSPACE**. This creates the contract directories and
-   EMPTY seed files only when absent — an existing `MASTER_PROPOSAL.md` or
-   any existing file is NEVER overwritten. Write your master proposal into
-   `03_PROPOSAL/MASTER_PROPOSAL.md` and your source-of-truth and evidence
-   files by hand (the tool never fabricates content for you). **REFRESH**
-   re-reads the durable state: the master-proposal hash prefix, the current
-   iteration, and whether the master is MISSING or EMPTY.
-2. **AGENTS** — configure the four proposal roles (ORCHESTRATOR,
-   SCIENTIFIC REVIEWER, PROPOSAL ENGINEER, RED TEAM REVIEWER). Each row has
-   Engine (the dropdown lists the real registered engines — codex, generic
-   cli, hermes), plus optional profile / provider / model and a session id
-   (kept only for engines that support sessions). The configuration is
-   stored in the workspace itself (`05_CONTROL/PROPOSAL_CONFIG.json`) —
-   never in Coding Mode's settings.
-3. **RUN ITERATION** — one full review cycle: the three reviewers read the
-   current master proposal, then the ORCHESTRATOR integrates. A clean PASS
-   needs no integration call at all (the zero-AI bypass). When the run
-   finishes the CURRENT STATE shows the real phase and REVIEW RESULTS shows
-   each reviewer's verdict, the reviewed hash prefix and finding/claim
-   counts.
-4. **RUN HARD GATES** — enabled once an iteration reaches the gates
-   (`READY_FOR_HARD_GATES`). This step is fully deterministic (no AI): fill
-   the evidence files first (`02_EVIDENCE/SOURCE_REGISTRY.json`,
-   `CLAIM_LEDGER.json`, `05_CONTROL/UNVERIFIED_CLAIMS.json`,
-   `PAGE_BUDGET.json`, `CONTRADICTIONS.json`, and the bound
-   `HARD_GATE_EVIDENCE.json`). **CREATE EVIDENCE SKELETON** creates
-   placeholder files ONLY where missing — skeletons are never pass-ready;
-   every gate stays honest until you replace the placeholders.
-5. **Outcomes** — COMPLETE (terminal, every gate PASS or justified N/A);
-   REVISION_REQUIRED (a proposal issue — see HARD_GATE_FEEDBACK.json);
-   BLOCKED (evidence missing/invalid/stale — supply it and re-run);
-   INCOMPLETE (a WARN remains — supply authoritative evidence and re-run
-   the gates). A WARN never shows as COMPLETE.
+The legacy **RUN ITERATION** button (sequential review → integration)
+remains for partial-phase resume; the production V2 button is
+**RUN PANEL ITERATION**.
 
-## P2. Reading the surfaces
+## P2. PROJECT INPUTS
+
+- **Workspace** — choose (or BROWSE to) a folder and press **INITIALIZE**.
+  This creates the contract directories and EMPTY seed files only when
+  absent — an existing `MASTER_PROPOSAL.md` or any existing file is NEVER
+  overwritten. **REFRESH** re-reads the durable state and rebuilds the
+  recovery view (a restart never auto-runs AI).
+- **IMPORT BLUEPRINT / IMPORT TEMPLATE** — the real source importer
+  (`.md`, `.txt`, `.pdf`, `.docx`, `.rtf`; no OCR). The ORIGINAL bytes are
+  preserved under `IMPORTS/`, a normalized canonical copy is derived, and
+  every import is recorded in `05_CONTROL/SOURCE_IMPORT_MANIFEST.json`.
+  Re-importing over a non-empty canonical file asks for explicit
+  confirmation and freezes a backup first. Extraction warnings and
+  failures are shown — never hidden.
+- **ADD OFFICIAL DOCS** — multi-select; one normalized document per file
+  under `01_OFFICIAL/NORMALIZED/`.
+- **IMPORT PROPOSAL** — fills the (still empty) master from an existing
+  draft; over a non-empty master it requires the explicit replace
+  confirmation (backup-before-replace).
+- **Source pack** — the blueprint character budget is displayed
+  continuously; when a run would exceed it the label reads
+  **SOURCE BUDGET EXCEEDED** before you can start any AI action.
+
+## P3. AGENTS
+
+Four roles — **ASTRA / ORCHESTRATOR — PANEL CHAIR**, **SCIENTIFIC
+EVALUATOR**, **PROPOSAL / IMPLEMENTATION EVALUATOR**, **RED TEAM
+EVALUATOR**. Each row: Engine, Profile, Provider, Model, Session Mode,
+Session, REFRESH.
+
+- For the `hermes` engine, **REFRESH** runs real read-only discovery:
+  profiles from the installed CLI, provider/model derived HONESTLY from
+  the selected profile's own `config.yaml` (labelled profile-derived —
+  the CLI exposes no model catalogue), sessions profile-scoped from the
+  production discovery bridge. Every combo stays EDITABLE — nothing is
+  invented, anything can be typed.
+- **Session Mode** defaults to **NEW SESSION**. RESUME SELECTED SESSION
+  requires you to pick a real session id from the discovered list;
+  switching profile (or engine) resets both — a resume binding is never
+  carried across profiles implicitly.
+- The configuration persists to the workspace
+  (`05_CONTROL/PROPOSAL_CONFIG.json`) — never into Coding Mode.
+
+## P4. PANEL / CAMPAIGN
+
+- **GENERATE INITIAL PROPOSAL** — enabled only when the blueprint and
+  template are READY, the master is EMPTY, all four engines are
+  configured and nothing is running. Three specialists run in parallel,
+  then ASTRA synthesizes (4 model calls).
+- **RUN PANEL ITERATION** — the production V2 iteration: three parallel
+  evaluator calls → three parallel consensus calls over the docket →
+  ASTRA as PANEL CHAIR + sole editor (7 calls, 6 on the clean-pass
+  bypass). Panel disagreements land in the consensus matrix (§P6).
+- **RUN HARD GATES** — deterministic, zero-AI; enabled only from
+  HARD_GATE_VALIDATION. Fill the evidence files first
+  (**CREATE EVIDENCE SKELETON** creates placeholders ONLY where missing —
+  skeletons are never pass-ready).
+- **AUTONOMOUS PANEL CAMPAIGN** — configure Max hours (1–120), Max
+  iterations (1–50), Target readiness (default 92), Max model calls, and
+  the no-improvement limit; then START. The campaign drives generation →
+  chair iterations → gates itself, checkpointing durable state after
+  every stage. **PAUSE / STOP are boundary requests**: the current model
+  call always finishes first ("Pause requested — current model
+  call/stage will finish first."). **RESUME** appears for recoverable
+  durable states (PAUSED / WAITING_FOR_OPERATOR / stopped bounds) and
+  continues at the persisted checkpoint — a restart NEVER auto-runs.
+
+## P5. CURRENT STATE & READINESS
+
+Campaign status, phase, iteration, proposal hash, model calls used,
+elapsed campaign time, and the advisory **Internal readiness** — always
+labelled **INTERNAL READINESS — NOT AN EIC SCORE**. The readiness history
+per iteration renders under it. Readiness never overrides the hard gates.
+
+## P6. PANEL RESULTS
+
+First-pass verdicts per evaluator, then the persisted consensus matrix:
+ID, section, agreement/disagreement/insufficient-evidence counts,
+blocking flag, and RESOLVED/UNRESOLVED per item, with the total
+"Unresolved disagreements: N". Every value is read from the durable
+`panel_consensus.json` — nothing is recomputed or faked green.
+
+## P7. Reading the surfaces
 
 - **CURRENT STATE** always shows the real phase (IDLE, SOURCE_VALIDATION,
-  the three review phases, INTEGRATION, HARD_GATE_VALIDATION,
+  the review phases, INTEGRATION, HARD_GATE_VALIDATION,
   REVISION_REQUIRED, BLOCKED, FAILED, COMPLETE) — the UI never invents a
   nicer one.
 - **HARD GATES** lists all 14 canonical gates with the exact status and
-  message from the durable artifacts; `NOT_RUN` means no artifact recorded
-  that gate yet.
-- **EVIDENCE** shows EXISTS/EMPTY/VALID JSON/INVALID JSON per file — the
+  message from the durable artifacts; `NOT_RUN` means no artifact has
+  recorded that gate yet.
+- **EVIDENCE** shows MISSING/EMPTY/VALID JSON/INVALID JSON per file — the
   hard-gate engine, not this table, is the authority.
+- When the campaign stops at **WAITING_FOR_OPERATOR**, the panel explains:
+  deterministic hard gates need operator evidence and NO further model
+  calls will be made until it is resolved. Fix the evidence, then RESUME.
 - If recovery is ambiguous (a partial run), the panel says **Recovery
   requires operator confirmation** and nothing auto-runs.
 
-## P3. Buttons are disabled while a run is in progress
+## P8. Buttons are disabled while a run is in progress
 
 Only one proposal operation runs at a time (worker thread). Conflicting
-buttons (RUN, INITIALIZE, BACK) re-enable when the report lands.
+buttons re-enable when the report lands; the campaign's PAUSE/STOP stay
+armed while it runs (they are boundary requests, not cancellations).
+
+---
+
+# Part P0 — Legacy sequential path (Session 017, unchanged)
+
+The original one-click flow is still available exactly as documented in
+v1.3: **RUN ITERATION** walks SOURCE_VALIDATION → the three sequential
+reviewers → integration over the current master. Use it to resume a
+partial-phase workspace; fresh work should use the panel path above.
+
+---
 
 ---
 

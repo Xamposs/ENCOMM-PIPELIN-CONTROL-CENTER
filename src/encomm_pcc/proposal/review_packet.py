@@ -132,6 +132,11 @@ HARD OUTPUT RULES:
 - BLOCKED requires a finding (or summary) stating the concrete blocking
   reason.
 - Severity values are lowercase: critical, high, medium, low.
+- Each patch MUST carry content in EXACTLY ONE of 'replacement_text' /
+  'patch_instructions': put the full replacement text in 'replacement_text'
+  and leave 'patch_instructions' empty, OR vice versa — never fill both,
+  never leave both empty.  If you propose no patch, return an empty
+  'proposed_patches' list.
 - Numbers are plain JSON numbers; strings are bounded (keep every string
   under ~4000 characters; keep findings/patches/claims lists compact).
 - Use forward slashes in any path-like reference inside JSON strings;

@@ -29,31 +29,49 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`1.4.0` — Proposal Factory V2 (Session 019, branch
+`1.4.0` — Proposal Factory V2, UI COMPLETE (Sessions 019+020, branch
 `proposal-factory-v2-session-019`, NOT yet merged). The Proposal backend
-gains the parallel evaluator panel (three barrier-proven concurrent
-first-pass calls; deterministic post-join phase walk; own-driver-instance
-rule), the structured consensus round over a stable-id docket
-(`AGREE/DISAGREE/PARTIAL/INSUFFICIENT_EVIDENCE` per item; deterministic
-matrix), ASTRA as PANEL CHAIR + SOLE EDITOR (consensus reaches the
-integration packet via the bounded `extra_instructions` seam), the advisory
-INTERNAL READINESS index (weighted per-criterion medians + penalties,
-labelled `INTERNAL READINESS - NOT AN EIC SCORE`, never overriding hard
-gates), safe source imports (originals preserved, manifest, real
-docx/pdf/rtf extraction, no OCR), the operator source-budget gate, explicit
-session-resume support in `ProposalAgentConfig`, honest Hermes selector
-discovery (profiles/sessions via the production bridges; provider/model
-profile-derived - the v0.21.5 CLI has no listing command), and the bounded
-restart-safe AUTONOMOUS PANEL CAMPAIGN (`05_CONTROL/CAMPAIGN_STATE.json`,
-stop conditions COMPLETE / WAITING_FOR_OPERATOR / CONVERGED /
-BOUND_REACHED / PAUSED / STOPPED / FAILED, model-call accounting 4-7-6,
-nothing auto-runs after a restart). 44 new offline tests; suite
-**1127 passed, 0 failed**. Acceptances: `PANEL CAMPAIGN ACCEPTANCE PASSED`,
-`CAMPAIGN RECOVERY ACCEPTANCE PASSED`. ADRs D-071..D-076. The Proposal
-operator UI for the new actions (importers/selectors/campaign controls) is
-the next session work; the S017 UI remains the operator surface and is
-unchanged. Reference:
-`docs/reports/SESSION_019_PROPOSAL_FACTORY_V2.md`.
+(Session 019) gains the parallel evaluator panel (three barrier-proven
+concurrent first-pass calls; deterministic post-join phase walk;
+own-driver-instance rule), the structured consensus round over a stable-id
+docket (`AGREE/DISAGREE/PARTIAL/INSUFFICIENT_EVIDENCE` per item;
+deterministic matrix), ASTRA as PANEL CHAIR + SOLE EDITOR (consensus
+reaches the integration packet via the bounded `extra_instructions` seam),
+the advisory INTERNAL READINESS index (weighted per-criterion medians +
+penalties, labelled `INTERNAL READINESS - NOT AN EIC SCORE`, never
+overriding hard gates), safe source imports (originals preserved,
+manifest, real docx/pdf/rtf extraction, no OCR), the operator
+source-budget gate, explicit session-resume support in
+`ProposalAgentConfig`, honest Hermes selector discovery (profiles/sessions
+via the production bridges; provider/model profile-derived - the v0.21.5
+CLI has no listing command), and the bounded restart-safe AUTONOMOUS PANEL
+CAMPAIGN (`05_CONTROL/CAMPAIGN_STATE.json`, stop conditions COMPLETE /
+WAITING_FOR_OPERATOR / CONVERGED / BOUND_REACHED / PAUSED / STOPPED /
+FAILED, model-call accounting 4-7-6, nothing auto-runs after a restart).
+Session 020 wires the production OPERATOR UI for all of it
+(`ui/proposal_mode.py`, vertically scrollable sections PROJECT INPUTS /
+AGENTS / PANEL-CAMPAIGN / CURRENT STATE & READINESS / PANEL RESULTS / HARD
+GATES / EVIDENCE): the REAL `source_import` behind every import button
+(explicit replace confirmation, visible extraction warnings, live
+SOURCE-BUDGET-EXCEEDED display), real Hermes profile/provider/model/
+session selectors (editable combos, never invented; profile switch resets
+the session binding AND mode), GENERATE INITIAL PROPOSAL + RUN PANEL
+ITERATION (the panel-chair path, never the legacy sequential cycle) +
+the legacy RUN ITERATION kept for partial-phase resume, the bounded
+campaign controls with boundary-request PAUSE/STOP and the REAL recovery
+RESUME (a restart performs zero model calls), the readiness render with
+the disclaimer ALWAYS visible + readiness history, and the consensus
+disagreement table over `panel_consensus.json`. The worker
+(`ui/proposal_worker.py`) gains the bounded actions GENERATE_INITIAL /
+RUN_PANEL / START_CAMPAIGN / RESUME_CAMPAIGN (AI never on the UI thread;
+PAUSE/STOP ride the campaign control object, never a fake cancel). 31 new
+offline UI tests (`tests/test_session_020.py`); suite **1158 passed,
+0 failed**. Acceptances: `PROPOSAL V2 UI ACCEPTANCE PASSED` (new,
+`scripts/session_020_ui_acceptance.py`), `PROPOSAL ACCEPTANCE PASSED`,
+`PANEL CAMPAIGN ACCEPTANCE PASSED`, `CAMPAIGN RECOVERY ACCEPTANCE PASSED`.
+Packaged smoke extended: `proposal_v2_ui=ok`. References:
+`docs/reports/SESSION_019_PROPOSAL_FACTORY_V2.md` (Session 020 UI
+completion note appended).
 
 `1.3.1` — Global dual-mode navigation + the Windows v1.3.1 release build
 (Session 018, branch `release-session-018`). ONE application
