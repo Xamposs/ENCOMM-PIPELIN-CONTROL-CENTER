@@ -37,6 +37,7 @@ from ..drivers.base import BaseDriver
 from ..domain.enums import SessionPolicy
 from ..proposal.enums import ProposalPhase, ProposalRole
 from ..proposal.fingerprint import proposal_fingerprint
+from ..proposal.models import ProposalAgentConfig
 from ..proposal.state_machine import ProposalStateMachine
 from .integration_executor import (
     ProposalIntegrationExecutionReport,
@@ -141,11 +142,21 @@ def run_iteration(
     previous_findings: tuple[str, ...] = (),
     previous_findings_records: Optional[list[dict[str, Any]]] = None,
     extra_instructions: str = "",
+    reviewer_agent_configs: Optional[Mapping[ProposalRole, ProposalAgentConfig]] = None,
+    orchestrator_agent_config: Optional[ProposalAgentConfig] = None,
 ) -> ProposalIterationReport:
     """Run ONE controlled proposal iteration — review cycle, then integration.
 
     Composition ONLY: every guard, artifact and state advance belongs to the
     two executors this function calls.  No loop, no automatic re-entry.
+
+    Session 017A: ``reviewer_agent_configs`` /
+    ``orchestrator_agent_config`` forward the operator's per-role
+    :class:`~encomm_pcc.proposal.ProposalAgentConfig` objects into
+    ``run_review_cycle()`` / ``run_integration()`` so the driver
+    ``SessionRequest`` carries the ACTUAL profile/provider/model/workspace —
+    exactly what the operator sees in AGENTS.  Both stay optional; existing
+    scripted/offline callers keep working unchanged.
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -169,6 +180,11 @@ def run_iteration(
         timeout_s=timeout_s,
         previous_findings=tuple(previous_findings),
         extra_instructions=extra_instructions,
+        reviewer_agent_configs=reviewer_agent_configs,
+        # The cycle's SessionRequest workspace IS the actual proposal
+        # workspace (it already defaults to ``workspace``; pinned explicitly
+        # so it is never accidentally empty in production).
+        proposal_workspace_path=workspace,
     )
     report.review_report = review.to_dict()
 
@@ -193,6 +209,7 @@ def run_iteration(
         timeout_s=timeout_s,
         previous_findings=previous_findings_records,
         pre_review_version_path=review.frozen_version_path,
+        orchestrator_agent_config=orchestrator_agent_config,
     )
     report.integration_report = integration.to_dict()
     report.state_after = state_machine.phase

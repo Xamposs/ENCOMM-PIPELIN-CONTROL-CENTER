@@ -29,6 +29,31 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
+`1.3.0` — The FIRST production Proposal Mode operator surface (Session 017,
+branch `proposal-session-017`). Coding Simple Mode remains the default
+surface; the window's mode stack gains index 2 (`ProposalModePanel`) with a
+single `PROPOSAL MODE` affordance from Simple Mode and a `BACK TO CODING
+MODE` return. The panel composes the EXISTING backend: idempotent workspace
+initialise/refresh (never overwrites MASTER_PROPOSAL or any existing file),
+four proposal roles whose engine dropdowns come from the real
+`DriverRegistry` (no provider/model hardcoded) with configs persisted to an
+isolated `05_CONTROL/PROPOSAL_CONFIG.json` (atomic writes; Coding role
+config untouched), `RUN ITERATION` / `RUN HARD GATES` on a dedicated
+QThread worker (`ui/proposal_worker.py` — bounded actions, no loop, never
+the UI thread; the worker-parenting defect that silently pins work to the
+UI thread is pinned by test), an honest CURRENT STATE / review / 14-gate /
+evidence renderer over durable artifacts, and the READ-ONLY recovery loader
+`proposal_runtime/workspace_status.py` (`load_workspace_status()` —
+ambiguity surfaces "Recovery requires operator confirmation", never an
+auto-run). Offline scripted acceptance:
+`scripts/session_017_proposal_acceptance.py` ends `PROPOSAL ACCEPTANCE
+PASSED`. The suite is **1070 passed, 0 failed** (1021 + 26 + 23 corrective;
+Session 017A wired the per-role agent configuration into the real runtime,
+made state-machine recovery artifact-derived and workspace-bound, added
+`NEXT_ITERATION.json` recovery, config auto-load and phase-aware run
+controls — see the corrective note in the session report).
+Reference: `docs/reports/SESSION_017_PROPOSAL_UI_ACCEPTANCE.md`.
+
 `1.2.0` — Deterministic hard-gate completion engine + the FIRST legitimate
 `ProposalPhase.COMPLETE` path (Session 016, branch
 `proposal-session-016`). Proposal Mode gains the REAL HARD-GATE ENGINE:
@@ -51,6 +76,12 @@ an inconsistent evaluation to reach COMPLETE. The test suite is
 **1021 passed, 0 failed** (1003 after Session 016; 937 at the Session
 015+015A merge). Reference:
 `docs/reports/SESSION_016_HARD_GATE_ENGINE.md` (Session 016A note).
+**MERGE STATE (corrected Session 017):** Session 016 + 016A are MERGED to
+`main` through **PR #5** — merge commit
+`8b2411abb37132a100ac195d6b4c70c101232263` (feature
+`e351c42788e8f5bd108bb79b1ad65ca89f989130`, corrective
+`69668e8836d8e2aa1c9eda6283580dcf7f69e126`); verified pre-017 baseline on
+`main`: **1021 passed, 0 failed**. Historical reports are NOT rewritten.
 
 `1.1.0` — ORCHESTRATOR integration + deterministic revision handoff
 (Session 015). Proposal Mode gains the REAL INTEGRATION phase: the

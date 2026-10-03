@@ -43,6 +43,7 @@ from .diagnostics_panel import DiagnosticsPanel
 from .history_panel import HistoryPanel
 from .panels import BatchPanel, FinalAuditPanel, LogPanel, RolePanel, TaskPanel, WorkspacePanel
 from .simple_mode import SimpleModePanel
+from .proposal_mode import ProposalModePanel
 from .worker import start_executor_worker
 
 __all__ = ["MainWindow"]
@@ -157,11 +158,21 @@ class MainWindow(QMainWindow):
         self.simple_panel.request_continue = self._on_simple_continue
         self.simple_panel.request_pause = self._on_pause
         self.simple_panel.request_stop = self._on_stop
+        self.simple_panel.request_proposal = self._show_proposal_mode
         self._simple_continuous = False
+
+        # Session 017 (§14): Proposal Mode is the THIRD surface (index 2).
+        # The proposal registry IS the same real DriverRegistry instance the
+        # controller already carries; the panel only reads driver ids from it.
+        self.proposal_panel = ProposalModePanel(
+            controller.registry, parent=self
+        )
+        self.proposal_panel.request_coding = self._show_simple_mode
 
         self.mode_stack = QStackedWidget()
         self.mode_stack.addWidget(self.simple_panel)  # index 0 — default
         self.mode_stack.addWidget(self.advanced_view)  # index 1
+        self.mode_stack.addWidget(self.proposal_panel)  # index 2 — Session 017
         self.setCentralWidget(self.mode_stack)
 
         self.statusBar().showMessage(self._idle_status())
@@ -425,6 +436,10 @@ class MainWindow(QMainWindow):
     def _show_simple_mode(self) -> None:
         self.simple_panel.refresh()
         self.mode_stack.setCurrentWidget(self.simple_panel)
+
+    def _show_proposal_mode(self) -> None:
+        """Session 017 (§14): show Proposal Mode (index 2); Coding untouched."""
+        self.mode_stack.setCurrentWidget(self.proposal_panel)
 
     def _on_simple_start(self, brief: str, size: int, continuous: bool) -> None:
         """SIMPLE START: one brief, one size, optional continuous run."""

@@ -646,9 +646,22 @@ class TestIsolation:
 
     def test_59_coding_mode_production_files_untouched(self) -> None:
         # No Coding Mode production file may reference the proposal domain.
+        # Session 017 (by design): the UI package now hosts the Proposal Mode
+        # operator surface (proposal_mode.py + proposal_worker.py) and the
+        # MainWindow wiring — the core pipeline packages stay proposal-free.
+        proposal_ui_modules = {
+            SRC_ROOT / "encomm_pcc" / "ui" / "proposal_mode.py",
+            SRC_ROOT / "encomm_pcc" / "ui" / "proposal_worker.py",
+            # Session 017 wiring: the mode-stack surface + the Simple Mode
+            # navigation affordance (brief §2: changes limited to it).
+            SRC_ROOT / "encomm_pcc" / "ui" / "main_window.py",
+            SRC_ROOT / "encomm_pcc" / "ui" / "simple_mode.py",
+        }
         offenders: list[str] = []
         for pkg in ("core", "domain", "drivers", "persistence", "ui"):
             for path in (SRC_ROOT / "encomm_pcc" / pkg).rglob("*.py"):
+                if path in proposal_ui_modules:
+                    continue
                 text = path.read_text(encoding="utf-8")
                 if "proposal" in text:
                     offenders.append(str(path.relative_to(REPO_ROOT)))

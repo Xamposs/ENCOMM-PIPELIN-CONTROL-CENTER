@@ -108,6 +108,12 @@ from .version_freeze_post import (
     POST_INTEGRATION_SIDECAR_SUFFIX,
     freeze_post_integration_version,
 )
+from .workspace_status import (
+    PROPOSAL_STATUS_SCHEMA,
+    ProposalWorkspaceStatus,
+    latest_iteration_number,
+    load_workspace_status,
+)
 
 __all__ = [
     "HARD_GATE_FEEDBACK_FILENAME",
@@ -121,6 +127,7 @@ __all__ = [
     "NEXT_ITERATION_FILENAME",
     "NEXT_REVIEW_PHASE",
     "PHASE_FOR_REVIEWER",
+    "PROPOSAL_STATUS_SCHEMA",
     "POST_INTEGRATION_MD_SUFFIX",
     "POST_INTEGRATION_SIDECAR_SUFFIX",
     "REVIEW_FRESHNESS_GATE_ID",
@@ -143,6 +150,7 @@ __all__ = [
     "ProposalIterationReport",
     "ProposalReviewCycleOutcome",
     "ProposalReviewCycleReport",
+    "ProposalWorkspaceStatus",
     "ProposalReviewExecutionReport",
     "ProposalReviewGuardError",
     "ProposalReviewOutcome",
@@ -161,6 +169,8 @@ __all__ = [
     "persist_cycle_artifacts",
     "replace_master_proposal",
     "run_hard_gates",
+    "latest_iteration_number",
+    "load_workspace_status",
     "run_integration",
     "run_iteration",
     "run_review",

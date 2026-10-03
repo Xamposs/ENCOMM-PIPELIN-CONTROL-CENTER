@@ -56,7 +56,7 @@ from ..drivers.base import (
 from ..domain.enums import AgentRole, SessionPolicy
 from ..proposal.enums import ProposalPhase, ProposalRole, ProposalReviewVerdict
 from ..proposal.fingerprint import proposal_fingerprint
-from ..proposal.models import ProposalReviewResult
+from ..proposal.models import ProposalAgentConfig, ProposalReviewResult
 from ..proposal.review_parser import ProposalReviewParseError, parse_proposal_review
 from ..proposal.state_machine import ProposalStateMachine
 
@@ -179,6 +179,8 @@ def run_review(
     master_proposal_path: Path,
     session_policy: SessionPolicy = SessionPolicy.ALWAYS_NEW,
     timeout_s: Optional[float] = None,
+    agent_config: Optional[ProposalAgentConfig] = None,
+    proposal_workspace_path: Optional[Path] = None,
 ) -> ProposalReviewExecutionReport:
     """Execute ONE reviewer operation through ``driver`` — fail closed.
 
@@ -199,6 +201,17 @@ def run_review(
         How the driver session is (re)used for this one call.
     timeout_s:
         Optional prompt timeout forwarded to the driver.
+    agent_config:
+        Optional :class:`~encomm_pcc.proposal.ProposalAgentConfig` for THIS
+        reviewer role (Session 017A).  When supplied, its ``project_profile``,
+        ``provider`` and ``model`` reach the driver's :class:`SessionRequest`
+        verbatim — the operator's AGENTS configuration becomes authoritative
+        for a real run.  When omitted, the offline/unit legacy shape is
+        preserved unchanged.
+    proposal_workspace_path:
+        Optional ACTUAL proposal workspace root (Session 017A).  When
+        supplied it becomes the ``SessionRequest.workspace_path`` so a real
+        driver is never launched against an empty workspace.
     """
     role: ProposalRole = packet.role
     started = time.monotonic()
@@ -234,7 +247,12 @@ def run_review(
     # -- driver call ------------------------------------------------------
     session: DriverSession | None = None
     try:
-        request = _session_request(packet, session_policy)
+        request = _session_request(
+            packet,
+            session_policy,
+            agent_config=agent_config,
+            proposal_workspace_path=proposal_workspace_path,
+        )
         session = driver.start_session(request)
         handle: PromptHandle = driver.send_prompt(session, packet.prompt_text)
         prompt_result: PromptResult = driver.wait_for_completion(handle, timeout_s)
@@ -353,16 +371,44 @@ def run_review(
     )
 
 
-def _session_request(packet: Any, session_policy: SessionPolicy) -> Any:
+def _session_request(
+    packet: Any,
+    session_policy: SessionPolicy,
+    *,
+    agent_config: Optional[ProposalAgentConfig] = None,
+    proposal_workspace_path: Optional[Path] = None,
+) -> Any:
     """Build the generic SessionRequest for ONE reviewer call.
 
     Imported lazily so this module's import surface stays minimal; the
     request carries the proposal role string for traceability only — role
     logic itself never references an engine.
+
+    Session 017A: when ``agent_config`` is supplied, its
+    ``project_profile`` / ``provider`` / ``model`` reach the request
+    verbatim (the operator's configuration is authoritative).  When
+    ``proposal_workspace_path`` is supplied it IS the request's
+    ``workspace_path`` (the ACTUAL proposal workspace — never empty in
+    production); without it the legacy packet fallback is preserved for
+    offline/unit callers.  The pure packet never carries a path.
     """
+    profile = ""
+    provider = ""
+    model = ""
+    if agent_config is not None:
+        profile = str(agent_config.project_profile or "")
+        provider = str(agent_config.provider or "")
+        model = str(agent_config.model or "")
+    if proposal_workspace_path is not None:
+        workspace_path = str(proposal_workspace_path)
+    else:
+        workspace_path = str(getattr(packet, "workspace_path", "") or "")
     return SessionRequest(
         role=_REVIEW_AGENT_ROLE,
-        workspace_path=str(getattr(packet, "workspace_path", "") or ""),
+        workspace_path=workspace_path,
+        project_profile=profile,
+        provider=provider,
+        model=model,
         session_policy=session_policy,
         extra={
             "proposal_role": packet.role.value,

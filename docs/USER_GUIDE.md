@@ -1,8 +1,11 @@
 # ENCOMM Pipeline Control Center — Operator Guide (v1.0)
 
-This guide is written for the **operator** who runs real AI coding batches.
-Everything below refers to actual controls in the desktop application.
-**Simple Mode is the default production surface** — start there (§A). Advanced
+This guide is written for the **operator** who runs real AI coding batches
+(**Coding Mode**) and reviews/validates research proposals (**Proposal
+Mode**, Session 017). Everything below refers to actual controls in the
+desktop application. **Coding Simple Mode is the default production
+surface** — start there (§A). **Proposal Mode** is the second production
+surface, reached with the `PROPOSAL MODE` button (§A7, Part P). Advanced
 Mode (the full panel grid, formerly the whole app) is the development/debug
 surface: launch with `python main.py --debug-ui` to see the "Advanced /
 Details…" button, then §B onwards covers it.
@@ -103,6 +106,75 @@ audit → handing off). The task table shows the current task, its state,
 attempts, audit rounds and the real session ids. The log panel records every
 boundary decision. At a final-audit PASS the next batch is materialised with
 zero AI calls; the completed batch stays in HISTORY.
+
+---
+
+# Part P — Proposal Mode (Session 017)
+
+Press **PROPOSAL MODE** at the bottom of Coding Simple Mode; press **BACK
+TO CODING MODE** to return. Coding Mode is never modified by Proposal Mode
+(separate configuration, separate workspace).
+
+## P1. The proposal flow
+
+```
+Workspace → Agents → RUN ITERATION → RUN HARD GATES → COMPLETE
+                                   ↘ REVISION_REQUIRED / BLOCKED / INCOMPLETE
+```
+
+1. **PROPOSAL WORKSPACE** — choose (or Browse to) an empty folder and press
+   **INITIALIZE WORKSPACE**. This creates the contract directories and
+   EMPTY seed files only when absent — an existing `MASTER_PROPOSAL.md` or
+   any existing file is NEVER overwritten. Write your master proposal into
+   `03_PROPOSAL/MASTER_PROPOSAL.md` and your source-of-truth and evidence
+   files by hand (the tool never fabricates content for you). **REFRESH**
+   re-reads the durable state: the master-proposal hash prefix, the current
+   iteration, and whether the master is MISSING or EMPTY.
+2. **AGENTS** — configure the four proposal roles (ORCHESTRATOR,
+   SCIENTIFIC REVIEWER, PROPOSAL ENGINEER, RED TEAM REVIEWER). Each row has
+   Engine (the dropdown lists the real registered engines — codex, generic
+   cli, hermes), plus optional profile / provider / model and a session id
+   (kept only for engines that support sessions). The configuration is
+   stored in the workspace itself (`05_CONTROL/PROPOSAL_CONFIG.json`) —
+   never in Coding Mode's settings.
+3. **RUN ITERATION** — one full review cycle: the three reviewers read the
+   current master proposal, then the ORCHESTRATOR integrates. A clean PASS
+   needs no integration call at all (the zero-AI bypass). When the run
+   finishes the CURRENT STATE shows the real phase and REVIEW RESULTS shows
+   each reviewer's verdict, the reviewed hash prefix and finding/claim
+   counts.
+4. **RUN HARD GATES** — enabled once an iteration reaches the gates
+   (`READY_FOR_HARD_GATES`). This step is fully deterministic (no AI): fill
+   the evidence files first (`02_EVIDENCE/SOURCE_REGISTRY.json`,
+   `CLAIM_LEDGER.json`, `05_CONTROL/UNVERIFIED_CLAIMS.json`,
+   `PAGE_BUDGET.json`, `CONTRADICTIONS.json`, and the bound
+   `HARD_GATE_EVIDENCE.json`). **CREATE EVIDENCE SKELETON** creates
+   placeholder files ONLY where missing — skeletons are never pass-ready;
+   every gate stays honest until you replace the placeholders.
+5. **Outcomes** — COMPLETE (terminal, every gate PASS or justified N/A);
+   REVISION_REQUIRED (a proposal issue — see HARD_GATE_FEEDBACK.json);
+   BLOCKED (evidence missing/invalid/stale — supply it and re-run);
+   INCOMPLETE (a WARN remains — supply authoritative evidence and re-run
+   the gates). A WARN never shows as COMPLETE.
+
+## P2. Reading the surfaces
+
+- **CURRENT STATE** always shows the real phase (IDLE, SOURCE_VALIDATION,
+  the three review phases, INTEGRATION, HARD_GATE_VALIDATION,
+  REVISION_REQUIRED, BLOCKED, FAILED, COMPLETE) — the UI never invents a
+  nicer one.
+- **HARD GATES** lists all 14 canonical gates with the exact status and
+  message from the durable artifacts; `NOT_RUN` means no artifact recorded
+  that gate yet.
+- **EVIDENCE** shows EXISTS/EMPTY/VALID JSON/INVALID JSON per file — the
+  hard-gate engine, not this table, is the authority.
+- If recovery is ambiguous (a partial run), the panel says **Recovery
+  requires operator confirmation** and nothing auto-runs.
+
+## P3. Buttons are disabled while a run is in progress
+
+Only one proposal operation runs at a time (worker thread). Conflicting
+buttons (RUN, INITIALIZE, BACK) re-enable when the report lands.
 
 ---
 
