@@ -29,6 +29,32 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
+`1.4.0` — Proposal Factory V2 (Session 019, branch
+`proposal-factory-v2-session-019`, NOT yet merged). The Proposal backend
+gains the parallel evaluator panel (three barrier-proven concurrent
+first-pass calls; deterministic post-join phase walk; own-driver-instance
+rule), the structured consensus round over a stable-id docket
+(`AGREE/DISAGREE/PARTIAL/INSUFFICIENT_EVIDENCE` per item; deterministic
+matrix), ASTRA as PANEL CHAIR + SOLE EDITOR (consensus reaches the
+integration packet via the bounded `extra_instructions` seam), the advisory
+INTERNAL READINESS index (weighted per-criterion medians + penalties,
+labelled `INTERNAL READINESS - NOT AN EIC SCORE`, never overriding hard
+gates), safe source imports (originals preserved, manifest, real
+docx/pdf/rtf extraction, no OCR), the operator source-budget gate, explicit
+session-resume support in `ProposalAgentConfig`, honest Hermes selector
+discovery (profiles/sessions via the production bridges; provider/model
+profile-derived - the v0.21.5 CLI has no listing command), and the bounded
+restart-safe AUTONOMOUS PANEL CAMPAIGN (`05_CONTROL/CAMPAIGN_STATE.json`,
+stop conditions COMPLETE / WAITING_FOR_OPERATOR / CONVERGED /
+BOUND_REACHED / PAUSED / STOPPED / FAILED, model-call accounting 4-7-6,
+nothing auto-runs after a restart). 44 new offline tests; suite
+**1127 passed, 0 failed**. Acceptances: `PANEL CAMPAIGN ACCEPTANCE PASSED`,
+`CAMPAIGN RECOVERY ACCEPTANCE PASSED`. ADRs D-071..D-076. The Proposal
+operator UI for the new actions (importers/selectors/campaign controls) is
+the next session work; the S017 UI remains the operator surface and is
+unchanged. Reference:
+`docs/reports/SESSION_019_PROPOSAL_FACTORY_V2.md`.
+
 `1.3.1` — Global dual-mode navigation + the Windows v1.3.1 release build
 (Session 018, branch `release-session-018`). ONE application
 (`ENCOMM-PCC.exe`) carries BOTH production surfaces behind a persistent

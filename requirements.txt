@@ -1,5 +1,13 @@
-# ENCOMM Pipeline Control Center — runtime dependencies (v0.2).
+# ENCOMM Pipeline Control Center — runtime dependencies (v1.4.0).
 # Kept deliberately minimal: no web server, no Electron, no Docker, no cloud SDK.
 PySide6>=6.6,<7
+
+# Proposal source import (Session 019): real document extraction, no OCR.
+# Lazy imports inside proposal/source_import.py — required for PDF/DOCX/RTF
+# import; the packaged build ships them (see ENCOMM-PCC.spec hiddenimports).
+pypdf>=4.0
+python-docx>=1.1
+striprtf>=0.0.26
+PyYAML>=6.0
 
 # Test-only extras:  pip install -r requirements-dev.txt

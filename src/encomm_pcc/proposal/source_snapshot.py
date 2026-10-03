@@ -48,6 +48,12 @@ __all__ = [
 #: Optional official-requirements input — canonical plain-text/Markdown only.
 OFFICIAL_REQUIREMENTS_RELPATH = "01_OFFICIAL/OFFICIAL_REQUIREMENTS.md"
 
+#: Session 019: the OFFICIAL application template (canonical normalized).
+APPLICATION_TEMPLATE_RELPATH = "01_OFFICIAL/APPLICATION_TEMPLATE.md"
+
+#: Session 019: directory of normalized official programme documents.
+OFFICIAL_NORMALIZED_DIRNAME = "01_OFFICIAL/NORMALIZED"
+
 #: Every file the snapshot reader may look at (canonical POSIX relpaths).
 SOURCE_SNAPSHOT_RELPATHS: tuple[str, ...] = (
     "00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md",
@@ -90,6 +96,11 @@ class ReviewSourceSnapshot:
     a snapshot without it).  Optional sources carry ``available=False`` plus
     a stable ``unavailable_reason`` when absent — the packet renders them
     honestly instead of inventing content.
+
+    Session 019: the OFFICIAL APPLICATION TEMPLATE and the normalized
+    official programme documents are first-class packet inputs (brief §8).
+    ``official_documents`` is a deterministic (name → text) tuple sorted by
+    stable name; every packet labels each document with its name.
     """
 
     master_proposal_text: str
@@ -103,9 +114,15 @@ class ReviewSourceSnapshot:
     official_requirements_unavailable_reason: str = ""
     #: Per-source availability evidence (relpath → reason when unavailable).
     unavailable_sources: dict[str, str] = field(default_factory=dict)
+    #: Session 019: ``01_OFFICIAL/APPLICATION_TEMPLATE.md`` (canonical).
+    application_template_text: str = ""
+    #: Session 019: normalized official documents,
+    #: ``((stable-name, text), ...)`` sorted by name — never a dict (the
+    #: packet order must be deterministic across runs).
+    official_documents: tuple[tuple[str, str], ...] = ()
 
 
-def _read_bounded(path: Path) -> _SourceFile:
+def _read_bounded(path: Path, max_chars: int = MAX_SNAPSHOT_FILE_CHARS) -> _SourceFile:
     """Read one file bounded; absence/oversize is recorded, never raised."""
     if not path.exists():
         return _SourceFile(unavailable_reason="missing")
@@ -115,7 +132,7 @@ def _read_bounded(path: Path) -> _SourceFile:
         raw = path.read_bytes()
     except OSError as exc:
         return _SourceFile(unavailable_reason=f"unreadable: {exc}")
-    if len(raw) > MAX_SNAPSHOT_FILE_CHARS * 4:
+    if len(raw) > max_chars * 4:
         # Cheap byte-level pre-check: 4 bytes per decoded char worst case.
         return _SourceFile(
             unavailable_reason=(
@@ -123,18 +140,26 @@ def _read_bounded(path: Path) -> _SourceFile:
             )
         )
     text = raw.decode("utf-8", errors="replace")
-    if len(text) > MAX_SNAPSHOT_FILE_CHARS:
+    if len(text) > max_chars:
         return _SourceFile(
             unavailable_reason=(
-                f"oversized: {len(text)} characters exceed "
-                f"{MAX_SNAPSHOT_FILE_CHARS}"
+                f"oversized: {len(text)} characters exceed {max_chars}"
             )
         )
     return _SourceFile(text=text, available=True)
 
 
-def load_review_snapshot(root: Path) -> ReviewSourceSnapshot:
+def load_review_snapshot(
+    root: Path, *, blueprint_max_chars: int | None = None
+) -> ReviewSourceSnapshot:
     """Read the review-relevant workspace files under ``root`` (read-only).
+
+    Session 019: ``blueprint_max_chars`` (default: the historical 400,000
+    per-file cap) raises the MASTER BLUEPRINT's read bound only — the
+    canonical source-of-truth document reaches packets whole when the
+    configured source budget allows it.  All other files keep the standard
+    per-file cap.  An over-budget blueprint stays explicitly UNAVAILABLE
+    (never truncated); the budget gate raises before any model call.
 
     Raises :class:`SourceSnapshotError` ONLY when
     ``03_PROPOSAL/MASTER_PROPOSAL.md`` is missing/unreadable — a review
@@ -142,6 +167,11 @@ def load_review_snapshot(root: Path) -> ReviewSourceSnapshot:
     missing source is recorded as explicitly unavailable.
     """
     root = Path(root)
+    blueprint_cap = (
+        MAX_SNAPSHOT_FILE_CHARS
+        if blueprint_max_chars is None
+        else max(1, int(blueprint_max_chars))
+    )
 
     def _p(relpath: str) -> Path:
         return root.joinpath(*relpath.split("/"))
@@ -154,7 +184,9 @@ def load_review_snapshot(root: Path) -> ReviewSourceSnapshot:
             "a review without the master proposal is impossible.",
         )
 
-    blueprint = _read_bounded(_p("00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md"))
+    blueprint = _read_bounded(
+        _p("00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md"), max_chars=blueprint_cap
+    )
     facts = _read_bounded(_p("00_SOURCE_OF_TRUTH/PROJECT_FACTS.md"))
     team = _read_bounded(_p("00_SOURCE_OF_TRUTH/TEAM.md"))
     architecture = _read_bounded(_p("00_SOURCE_OF_TRUTH/ARCHITECTURE.md"))
@@ -186,6 +218,28 @@ def load_review_snapshot(root: Path) -> ReviewSourceSnapshot:
     if not official.available:
         unavailable[OFFICIAL_REQUIREMENTS_RELPATH] = official.unavailable_reason
 
+    # Session 019: OFFICIAL TEMPLATE (canonical, bounded like the blueprint
+    # when raised) and the normalized official documents (deterministic
+    # name order).  Both are optional — absence is recorded, never invented.
+    template = _read_bounded(
+        _p(APPLICATION_TEMPLATE_RELPATH), max_chars=blueprint_cap
+    )
+    if not template.available:
+        unavailable[APPLICATION_TEMPLATE_RELPATH] = template.unavailable_reason
+    official_documents: list[tuple[str, str]] = []
+    normalized_dir = _p(OFFICIAL_NORMALIZED_DIRNAME)
+    if normalized_dir.is_dir():
+        for entry in sorted(normalized_dir.iterdir()):
+            if not entry.is_file() or entry.suffix.lower() != ".md":
+                continue
+            doc = _read_bounded(entry)
+            if doc.available:
+                official_documents.append((entry.stem, doc.text))
+            else:
+                unavailable[
+                    f"{OFFICIAL_NORMALIZED_DIRNAME}/{entry.name}"
+                ] = doc.unavailable_reason
+
     return ReviewSourceSnapshot(
         master_proposal_text=master.text,
         master_blueprint_text=blueprint.text if blueprint.available else "",
@@ -197,4 +251,8 @@ def load_review_snapshot(root: Path) -> ReviewSourceSnapshot:
         official_requirements_available=official.available,
         official_requirements_unavailable_reason=official.unavailable_reason,
         unavailable_sources=unavailable,
+        application_template_text=(
+            template.text if template.available else ""
+        ),
+        official_documents=tuple(official_documents),
     )
