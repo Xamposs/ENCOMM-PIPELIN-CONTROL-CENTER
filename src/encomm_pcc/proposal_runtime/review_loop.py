@@ -56,7 +56,7 @@ from ..drivers.base import BaseDriver
 from ..domain.enums import SessionPolicy
 from ..proposal.enums import ProposalPhase, ProposalRole, ProposalReviewVerdict
 from ..proposal.fingerprint import proposal_fingerprint
-from ..proposal.models import ProposalReviewResult
+from ..proposal.models import ProposalAgentConfig, ProposalReviewResult
 from ..proposal.review_aggregation import (
     ProposalReviewBundle,
     aggregate_reviews,
@@ -299,6 +299,8 @@ def run_review_cycle(
     timeout_s: Optional[float] = None,
     previous_findings: tuple[str, ...] = (),
     extra_instructions: str = "",
+    reviewer_agent_configs: Optional[Mapping[ProposalRole, ProposalAgentConfig]] = None,
+    proposal_workspace_path: Optional[Path] = None,
 ) -> ProposalReviewCycleReport:
     """Run ONE deterministic three-reviewer cycle — fail closed throughout.
 
@@ -310,10 +312,24 @@ def run_review_cycle(
     roles (engine choice is runtime configuration; nothing is hardcoded).
     ``reviewer_session_policies`` optionally overrides the default
     ``ALWAYS_NEW`` policy per reviewer role.
+
+    Session 017A: ``reviewer_agent_configs`` optionally maps each reviewer
+    role to its :class:`~encomm_pcc.proposal.ProposalAgentConfig`; when
+    present, the matching config reaches ``run_review()`` so its
+    profile/provider/model land in the driver's ``SessionRequest``.
+    ``proposal_workspace_path`` is the ACTUAL proposal workspace root
+    (defaulting to ``workspace``); it becomes the ``SessionRequest``
+    ``workspace_path`` so a real driver is never launched against an empty
+    workspace.  Both stay ``None``-tolerant for existing offline callers.
     """
     started = time.monotonic()
     workspace = Path(workspace)
     master_proposal_path = workspace / "03_PROPOSAL" / "MASTER_PROPOSAL.md"
+    # Session 017A: the SessionRequest workspace defaults to the cycle's own
+    # workspace but may be pinned explicitly by the composition layer.
+    effective_workspace = (
+        Path(proposal_workspace_path) if proposal_workspace_path is not None else workspace
+    )
     state_before = state_machine.phase
     report = ProposalReviewCycleReport(
         outcome=ProposalReviewCycleOutcome.REVIEW_FAILED,
@@ -492,6 +508,12 @@ def run_review_cycle(
         policy = SessionPolicy.ALWAYS_NEW
         if reviewer_session_policies and role in reviewer_session_policies:
             policy = reviewer_session_policies[role]
+        # Session 017A: the role's OWN ProposalAgentConfig (when supplied)
+        # becomes the driver SessionRequest's profile/provider/model, and the
+        # request carries the ACTUAL proposal workspace path — a real run is
+        # never launched with an empty workspace or a silently-defaulted
+        # model.  The packet itself stays pure (no paths, no engine config).
+        agent_config = reviewer_agent_configs.get(role) if reviewer_agent_configs else None
         try:
             execution = run_review(
                 packet=packet,
@@ -500,6 +522,8 @@ def run_review_cycle(
                 master_proposal_path=master_proposal_path,
                 session_policy=policy,
                 timeout_s=timeout_s,
+                agent_config=agent_config,
+                proposal_workspace_path=effective_workspace,
             )
         except ProposalReviewGuardError as exc:
             # The executor's pre-driver fingerprint failed: the frozen

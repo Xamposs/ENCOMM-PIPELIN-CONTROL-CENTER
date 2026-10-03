@@ -73,12 +73,71 @@ registry carrying `NullProcessRunner` can never silently execute a
 - **EVIDENCE (21–23):** MISSING / EMPTY / INVALID JSON statuses displayed; the skeleton NEVER overwrites existing content (byte-pinned); the skeleton is NOT pass-ready (unbound iteration 0 + placeholder hash → a gates run can never COMPLETE over it).
 - **CODING (24–25):** no Coding pipeline module references the proposal domain; Simple Mode's only change is the navigation affordance.
 
-Full suite after: **1047 passed, 0 failed** (1021 + 26).
+Full suite after: **1070 passed, 0 failed** (1021 + 26 + 23 from the
+Session 017A corrective, below).
 
 Determinism note: the file is run-stable (4 consecutive green runs). An
 intermittent offscreen teardown abort was eliminated by parking each worker
 thread deterministically (`thread.wait()` + one `processEvents()` hop) so
 `deleteLater`-ed worker wrappers never race interpreter teardown.
+
+> **Session 017A corrective note:** live-runtime wiring and deterministic
+> recovery gaps found in final review are FIXED on the same branch (no
+> version bump, stays 1.3.0; full suite 1047 → **1070 passed, 0 failed**;
+> zero Coding Mode changes, zero model calls, zero network):
+>
+> 1. **`ProposalAgentConfig` profile/provider/model are now REAL runtime
+>    inputs.** The Session 017 report's §1 claim that the operator
+>    configuration reaches a real run was NOT yet true: the reviewer and
+>    orchestrator `SessionRequest`s carried neither the per-role
+>    profile/provider/model nor a guaranteed workspace. `run_review()`,
+>    `run_review_cycle()`, `run_integration()` and `run_iteration()` now
+>    accept optional per-role `ProposalAgentConfig` mappings; the panel
+>    forwards the FOUR current AGENTS configs through `ProposalRunSpec`,
+>    and the request `workspace_path` is ALWAYS the actual proposal
+>    workspace. The values the operator sees are provably the values the
+>    drivers receive (recording-driver tests + a new acceptance step).
+> 2. **Session ids remain a known limitation** — stored and
+>    capability-gated only; no resume-capable proposal runtime path exists
+>    and none was added in 017A. Session resume is future work.
+> 3. **State-machine recovery is artifact-derived and workspace-bound.**
+>    The panel previously fabricated a fresh IDLE machine whenever it had
+>    none — a restart at `HARD_GATE_VALIDATION` honestly DISPLAYED that
+>    phase while RUN HARD GATES received a machine at IDLE. The machine is
+>    now reconstructed from `load_workspace_status()`, tracked per
+>    workspace (`_machine_workspace`), and NEVER carried across a
+>    workspace switch. Ambiguous recovery fabricates NO machine and no AI
+>    call can start ("Recovery requires operator confirmation").
+> 4. **`NEXT_ITERATION.json` recovery.** A valid handoff (schema +
+>    iteration linkage + `revised_proposal_hash` == current master hash +
+>    `previous_reviewed_hash` == bundle hash) recovers
+>    `REVISION_REQUIRED` with `next_iteration_number`; a malformed/stale
+>    handoff — or a changed proposal whose required handoff is missing —
+>    is AMBIGUOUS, never a fake `HARD_GATE_VALIDATION`. A freeze-only
+>    interrupted iteration (06_VERSIONS freeze without a reviews
+>    directory) is now discoverable. The iteration spinner synchronises
+>    from durable state (latest iteration, or the handoff's next
+>    iteration), never while a worker runs.
+> 5. **`PROPOSAL_CONFIG.json` auto-loads ONCE per selected workspace**
+>    (rows repopulated verbatim; invalid/missing config stays
+>    unconfigured, never guessed; Coding Mode config untouched;
+>    workspace-switch loads THAT workspace's config — nothing leaks).
+> 6. **Phase-aware run controls.** RUN HARD GATES is enabled only at
+>    `HARD_GATE_VALIDATION`; RUN ITERATION only at IDLE / SOURCE_VALIDATION
+>    / a review phase / REVISION_REQUIRED (the exact `run_review_cycle()`
+>    entry phases). INTEGRATION (recovery not implemented in this MVP),
+>    BLOCKED, FAILED, COMPLETE and ambiguous recovery disable both.
+> 7. **A real Session 017 click-path defect found by the 017A recovery
+>    tests:** `_start_worker()` never called `thread.start()` — every
+>    panel button press left the worker thread unstarted forever
+>    ("Running…" stuck, buttons dead). The S017 tests started the worker
+>    themselves and never exercised the click path. Fixed and pinned by
+>    the item-9 test (RUN HARD GATES genuinely runs from the recovered
+>    phase).
+>
+> 23 new offline regression tests (`tests/test_session_017a.py`, brief
+> §13 matrix); the offline acceptance gains a SessionRequest
+> profile/provider/model/workspace proof step (still zero AI).
 
 ## 6. Acceptance (§17 — offline, scripted)
 

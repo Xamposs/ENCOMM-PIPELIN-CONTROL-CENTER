@@ -89,6 +89,22 @@ _REVIEW_FILES: tuple[tuple[str, str], ...] = (
 _BUNDLE_FILE = "review_bundle.json"
 _HARD_GATES_FILE = "hard_gates.json"
 
+#: Phases from which RUN ITERATION may start (Session 017A §10): the EXACT
+#: entry phases ``run_review_cycle()`` accepts (IDLE, SOURCE_VALIDATION, a
+#: review phase with consistent artifacts, or REVISION_REQUIRED after a
+#: revision handoff).  INTEGRATION / HARD_GATE_VALIDATION / BLOCKED / FAILED
+#: / COMPLETE never enable it.
+_ITERATION_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
+    {
+        ProposalPhase.IDLE,
+        ProposalPhase.SOURCE_VALIDATION,
+        ProposalPhase.SCIENTIFIC_REVIEW,
+        ProposalPhase.IMPLEMENTATION_REVIEW,
+        ProposalPhase.RED_TEAM_REVIEW,
+        ProposalPhase.REVISION_REQUIRED,
+    }
+)
+
 
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     """Deterministic atomic JSON write (same convention as the runtime)."""
@@ -124,6 +140,13 @@ class ProposalModePanel(QWidget):
         self.registry = registry  # the SAME real registry (driver ids only)
         self.workspace_root = Path(workspace_root) if workspace_root else None
         self._machine: ProposalStateMachine | None = None
+        #: Session 017A: the workspace the in-memory machine was recovered
+        #: from — the machine is NEVER carried across workspaces.
+        self._machine_workspace: Path | None = None
+        #: Session 017A §9: the workspace whose PROPOSAL_CONFIG.json was
+        #: already auto-loaded (once per workspace selection; never re-read
+        #: mid-run so operator edits are not clobbered).
+        self._config_loaded_for: Path | None = None
         self._role_configs: dict[ProposalRole, ProposalAgentConfig] = {
             role: ProposalAgentConfig(role=role, engine="")
             for role in ProposalRole
@@ -422,13 +445,57 @@ class ProposalModePanel(QWidget):
         self.init_button.setEnabled(not running)
         self.back_button.setEnabled(not running)
 
+    # -- state-machine recovery (Session 017A §6) ----------------------------
+    def _recover_machine(self, ws: Path, status: Any) -> ProposalStateMachine | None:
+        """Return the machine bound to THIS workspace, rebuilt from artifacts.
+
+        Deterministic recovery contract:
+
+        * the in-memory machine is discarded whenever the selected workspace
+          changes — a machine is NEVER carried from workspace A into
+          workspace B;
+        * with no active worker, the machine is reconstructed from the
+          workspace's durable status phase (an unambiguous restart at
+          HARD_GATE_VALIDATION really runs gates FROM that phase, never
+          from a fake IDLE);
+        * an AMBIGUOUS recovery fabricates NO phase and NO runnable
+          machine — execution stays disabled until the operator resolves
+          it.
+
+        Durable artifacts are never mutated here (the loader is read-only).
+        """
+        if self._machine is not None and self._machine_workspace == ws:
+            return self._machine
+        if status.ambiguous or status.phase is ProposalPhase.PAUSED:
+            # Ambiguous (or pause-deskewed) recovery: no machine, no run.
+            self._machine = None
+            self._machine_workspace = ws
+            return None
+        self._machine = ProposalStateMachine(status.phase)
+        self._machine_workspace = ws
+        return self._machine
+
     def _require_ready(self) -> tuple[Path, ProposalStateMachine] | None:
         ws = self._workspace()
         if ws is None:
             self.detail_label.setText("Choose a workspace path first.")
             return None
-        if self._machine is None:
-            self._machine = ProposalStateMachine()
+        if self._running_action:
+            return None
+        if self._machine is None or self._machine_workspace != ws:
+            # Session 017A §6: the machine ALWAYS belongs to the selected
+            # workspace — a workspace switch (typed or browsed) discards the
+            # old machine and reconstructs from the NEW workspace's durable
+            # status.  An ambiguous recovery never fabricates a runnable
+            # machine.
+            status = load_workspace_status(ws)
+            machine = self._recover_machine(ws, status)
+            if machine is None:
+                self.detail_label.setText(
+                    "Recovery requires operator confirmation"
+                )
+                return None
+            self._machine = machine
         return ws, self._machine
 
     def _build_drivers(self) -> tuple[dict[ProposalRole, BaseDriver], Optional[BaseDriver]]:
@@ -465,6 +532,18 @@ class ProposalModePanel(QWidget):
         except ValueError as exc:
             self.detail_label.setText(str(exc))
             return
+        # Session 017A: the FOUR current ProposalAgentConfig objects reach
+        # the worker/runtime — the values the operator sees in AGENTS are
+        # the exact values the drivers receive in their SessionRequest.
+        reviewer_configs = {
+            role: self._role_configs[role]
+            for role in (
+                ProposalRole.SCIENTIFIC_REVIEWER,
+                ProposalRole.PROPOSAL_ENGINEER,
+                ProposalRole.RED_TEAM_REVIEWER,
+            )
+        }
+        orchestrator_config = self._role_configs[ProposalRole.ORCHESTRATOR]
         spec = ProposalRunSpec(
             action=ProposalWorkerAction.RUN_ITERATION,
             workspace=ws,
@@ -477,6 +556,8 @@ class ProposalModePanel(QWidget):
             },
             orchestrator_session_policy=SessionPolicy.ALWAYS_NEW,
             state_machine=machine,
+            reviewer_agent_configs=reviewer_configs,
+            orchestrator_agent_config=orchestrator_config,
         )
         self._start_worker(spec, "RUN ITERATION")
 
@@ -485,6 +566,14 @@ class ProposalModePanel(QWidget):
         if ready is None or self._running_action:
             return
         ws, machine = ready
+        if machine.phase is not ProposalPhase.HARD_GATE_VALIDATION:
+            # Phase-aware gating (Session 017A §10): gates run ONLY from
+            # HARD_GATE_VALIDATION — never from a fake IDLE after recovery.
+            self.detail_label.setText(
+                "RUN HARD GATES requires phase HARD_GATE_VALIDATION "
+                f"(current: {machine.phase.value})."
+            )
+            return
         spec = ProposalRunSpec(
             action=ProposalWorkerAction.RUN_HARD_GATES,
             workspace=ws,
@@ -500,6 +589,12 @@ class ProposalModePanel(QWidget):
         self.state_label.setText("Phase: RUNNING")
         self._thread, self._worker = start_proposal_worker(spec, parent=self)
         self._worker.finished.connect(self._on_worker_finished)
+        # Session 017A (found by the item-9 recovery test): the factory
+        # returns an UNSTARTED thread — the caller must start it.  Without
+        # this the panel showed "Running…" forever and the run buttons
+        # never recovered (the click path was never exercised by the S017
+        # tests, which start the worker thread themselves).
+        self._thread.start()
 
     def _on_worker_finished(self, report: object) -> None:
         self._set_running(False)
@@ -509,15 +604,81 @@ class ProposalModePanel(QWidget):
     #: Last worker report (test/diagnostic surface).
     _last_report: object = None
 
+    # -- phase-aware run controls (Session 017A §10) --------------------------
+    def _apply_phase_gating(self, ws: Path | None) -> None:
+        """Enable the run buttons ONLY for phases the runtime accepts.
+
+        RUN HARD GATES: only HARD_GATE_VALIDATION.  RUN ITERATION: only
+        IDLE / SOURCE_VALIDATION / SCIENTIFIC_REVIEW / IMPLEMENTATION_REVIEW
+        / RED_TEAM_REVIEW / REVISION_REQUIRED (the exact entry phases
+        ``run_review_cycle()`` genuinely accepts).  INTEGRATION disables
+        both (automatic integration-recovery is NOT implemented in this
+        MVP); BLOCKED / FAILED / COMPLETE / ambiguous recovery disable both.
+        A worker running disables both.  No workspace: both disabled.
+        """
+        if self._running_action:
+            self.run_iteration_button.setEnabled(False)
+            self.run_gates_button.setEnabled(False)
+            return
+        if ws is None or not ws.is_dir():
+            self.run_iteration_button.setEnabled(False)
+            self.run_gates_button.setEnabled(False)
+            return
+        if self._machine is None:
+            # Ambiguous recovery: no runnable machine, nothing may start.
+            self.run_iteration_button.setEnabled(False)
+            self.run_gates_button.setEnabled(False)
+            return
+        phase = self._machine.phase
+        iteration_ok = phase in _ITERATION_RUN_PHASES
+        gates_ok = phase is ProposalPhase.HARD_GATE_VALIDATION
+        self.run_iteration_button.setEnabled(iteration_ok)
+        self.run_gates_button.setEnabled(gates_ok)
+        if phase is ProposalPhase.INTEGRATION:
+            self.detail_label.setText(
+                "INTEGRATION recovery is not implemented in this MVP; "
+                "recovery requires operator confirmation."
+            )
+
     # -- status rendering (§9/§10/§11/§12) --------------------------------------
     def refresh_status(self) -> None:
-        """Re-read durable artifacts; honest renderer, no recomputation."""
+        """Re-read durable artifacts; honest renderer, no recomputation.
+
+        Session 017A: this is also the DETERMINISTIC RECOVERY point — the
+        in-memory machine is (re)bound to the selected workspace from the
+        workspace's durable status, the iteration spinner is synchronised
+        from durable state, and ``PROPOSAL_CONFIG.json`` auto-loads ONCE
+        per selected workspace.  While a worker runs, recovery and spinner
+        updates are suppressed (the operator's in-flight run owns them).
+        """
         ws = self._workspace()
         if ws is None or not ws.is_dir():
             self.ws_status_label.setText("Workspace directory does not exist yet.")
             self.state_label.setText("Phase: IDLE")
+            self._apply_phase_gating(ws)
             return
+        # -- §9: config auto-load, ONCE per selected workspace ----------------
+        if self._config_loaded_for != ws:
+            self._config_loaded_for = ws
+            loaded = self.load_role_config(ws)
+            if not loaded:
+                # No valid config file: rows stay unconfigured — never
+                # guessed, and nothing is written merely by reading.
+                self._role_configs = {
+                    role: ProposalAgentConfig(role=role, engine="")
+                    for role in ProposalRole
+                }
+                self._sync_role_rows()
+        # -- §6: deterministic machine recovery (never while running) ---------
         status = load_workspace_status(ws)
+        if not self._running_action:
+            self._recover_machine(ws, status)
+            # -- §8: spinner sync -------------------------------------------------
+            next_n = status.detail.get("next_iteration_number")
+            if isinstance(next_n, int) and next_n >= 1:
+                self.iteration_spin.setValue(next_n)
+            elif status.latest_iteration >= 1:
+                self.iteration_spin.setValue(max(1, status.latest_iteration))
         phase = status.phase
         extra = ""
         if status.has_master_proposal:
@@ -548,6 +709,19 @@ class ProposalModePanel(QWidget):
         self._render_reviews(ws, status)
         self._render_gates(ws, status)
         self._render_evidence(ws)
+        self._apply_phase_gating(ws)
+
+    def _sync_role_rows(self) -> None:
+        """Push ``self._role_configs`` into the AGENTS widgets (no signals)."""
+        for role in ProposalRole:
+            config = self._role_configs[role]
+            row = self._role_rows[role]
+            index = row["engine"].findData(config.engine)
+            row["engine"].setCurrentIndex(index if index >= 0 else 0)
+            row["profile"].setText(config.project_profile)
+            row["provider"].setText(config.provider)
+            row["model"].setText(config.model)
+            row["session"].setText(config.session_id)
 
     def _render_reviews(self, ws: Path, status: Any) -> None:
         it_dir = ws / "04_REVIEWS" / f"iteration_{status.latest_iteration:03d}"
@@ -719,9 +893,26 @@ class ProposalModePanel(QWidget):
 
     # -- test seam -----------------------------------------------------------------
     def machine(self) -> ProposalStateMachine:
-        """The panel's proposal state machine (created lazily)."""
-        if self._machine is None:
-            self._machine = ProposalStateMachine()
+        """The panel's proposal state machine (created lazily).
+
+        Session 017A: the machine is BOUND to the currently selected
+        workspace (``_machine_workspace``), so a test or handler that
+        changed the workspace never receives the previous workspace's
+        machine.
+        """
+        if self._machine is None or self._machine_workspace != self._workspace():
+            ws = self._workspace()
+            if ws is None:
+                if self._machine is None:
+                    self._machine = ProposalStateMachine()
+                return self._machine
+            status = load_workspace_status(ws)
+            machine = self._recover_machine(ws, status)
+            if machine is None:
+                raise RuntimeError(
+                    "Recovery requires operator confirmation"
+                )
+            self._machine = machine
         return self._machine
 
     @staticmethod

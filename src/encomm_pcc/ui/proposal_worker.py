@@ -30,6 +30,7 @@ from PySide6.QtCore import QObject, QThread, Signal
 
 from ..drivers.base import BaseDriver
 from ..domain.enums import SessionPolicy
+from ..proposal.models import ProposalAgentConfig
 from ..proposal.state_machine import ProposalStateMachine
 from ..proposal_runtime import run_hard_gates, run_iteration
 
@@ -67,6 +68,11 @@ class ProposalRunSpec:
     timeout_s: Optional[float] = None
     #: State machine shared with the panel (rebuilt per run by the panel).
     state_machine: ProposalStateMachine | None = None
+    #: Session 017A: the operator's per-role agent configs.  These EXACT
+    #: objects reach the runtime executors, so the profile/provider/model in
+    #: each driver SessionRequest is what the operator sees in AGENTS.
+    reviewer_agent_configs: Mapping[Any, ProposalAgentConfig] | None = None
+    orchestrator_agent_config: Optional[ProposalAgentConfig] = None
 
 
 class ProposalWorker(QObject):
@@ -114,6 +120,12 @@ class ProposalWorker(QObject):
             ),
             orchestrator_session_policy=self.spec.orchestrator_session_policy,
             timeout_s=self.spec.timeout_s,
+            reviewer_agent_configs=(
+                dict(self.spec.reviewer_agent_configs)
+                if self.spec.reviewer_agent_configs is not None
+                else None
+            ),
+            orchestrator_agent_config=self.spec.orchestrator_agent_config,
         )
         return report.to_dict()
 

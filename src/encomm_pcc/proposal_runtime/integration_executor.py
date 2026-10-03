@@ -54,6 +54,7 @@ from ..domain.enums import AgentRole, SessionPolicy
 from ..proposal.enums import ProposalPhase
 from ..proposal.fingerprint import proposal_fingerprint
 from ..proposal.integration_models import ProposalIntegrationResult
+from ..proposal.models import ProposalAgentConfig
 from ..proposal.integration_packet import (
     MAX_INTEGRATION_PACKET_SECTION_CHARS,
     ProposalIntegrationInputs,
@@ -249,6 +250,7 @@ def run_integration(
     timeout_s: Optional[float] = None,
     previous_findings: list[dict[str, Any]] | None = None,
     pre_review_version_path: str = "",
+    orchestrator_agent_config: Optional[ProposalAgentConfig] = None,
 ) -> ProposalIntegrationExecutionReport:
     """Run ONE INTEGRATION operation — fail closed throughout.
 
@@ -261,6 +263,13 @@ def run_integration(
     ``previous_findings`` (the earlier iterations' finding records) is
     rendered deterministically into the packet's existing PREVIOUS FINDINGS
     section — bounded and fail-closed BEFORE any driver contact.
+
+    Session 017A: ``orchestrator_agent_config`` optionally supplies the
+    ORCHESTRATOR :class:`~encomm_pcc.proposal.ProposalAgentConfig`; when
+    present, its ``project_profile`` / ``provider`` / ``model`` reach the
+    driver's ``SessionRequest`` and the request's ``workspace_path`` is the
+    ACTUAL proposal workspace.  Omitted (offline/unit callers) keeps the
+    previous legacy request shape.
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -442,15 +451,34 @@ def run_integration(
     try:
         from ..drivers.base import SessionRequest
 
-        request = SessionRequest(
-            role=_ORCHESTRATOR_AGENT_ROLE,
-            workspace_path=str(workspace),
-            session_policy=session_policy,
-            extra={
-                "proposal_role": "ORCHESTRATOR",
-                "proposal_iteration": iteration_number,
-            },
-        )
+        # Session 017A: the ORCHESTRATOR config (when supplied) is
+        # authoritative for profile/provider/model; the workspace is the
+        # ACTUAL proposal workspace — never empty in production.  No engine
+        # behaviour is hardcoded here: the drivers keep interpreting
+        # SessionRequest.
+        if orchestrator_agent_config is not None:
+            request = SessionRequest(
+                role=_ORCHESTRATOR_AGENT_ROLE,
+                workspace_path=str(workspace),
+                project_profile=str(orchestrator_agent_config.project_profile or ""),
+                provider=str(orchestrator_agent_config.provider or ""),
+                model=str(orchestrator_agent_config.model or ""),
+                session_policy=session_policy,
+                extra={
+                    "proposal_role": "ORCHESTRATOR",
+                    "proposal_iteration": iteration_number,
+                },
+            )
+        else:
+            request = SessionRequest(
+                role=_ORCHESTRATOR_AGENT_ROLE,
+                workspace_path=str(workspace),
+                session_policy=session_policy,
+                extra={
+                    "proposal_role": "ORCHESTRATOR",
+                    "proposal_iteration": iteration_number,
+                },
+            )
         session = orchestrator_driver.start_session(request)
         handle = orchestrator_driver.send_prompt(session, packet.prompt_text)
         prompt_result = orchestrator_driver.wait_for_completion(handle, timeout_s)

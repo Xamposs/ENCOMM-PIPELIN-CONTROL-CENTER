@@ -47,7 +47,11 @@ evidence renderer over durable artifacts, and the READ-ONLY recovery loader
 ambiguity surfaces "Recovery requires operator confirmation", never an
 auto-run). Offline scripted acceptance:
 `scripts/session_017_proposal_acceptance.py` ends `PROPOSAL ACCEPTANCE
-PASSED`. The suite is **1047 passed, 0 failed** (1021 + 26).
+PASSED`. The suite is **1070 passed, 0 failed** (1021 + 26 + 23 corrective;
+Session 017A wired the per-role agent configuration into the real runtime,
+made state-machine recovery artifact-derived and workspace-bound, added
+`NEXT_ITERATION.json` recovery, config auto-load and phase-aware run
+controls — see the corrective note in the session report).
 Reference: `docs/reports/SESSION_017_PROPOSAL_UI_ACCEPTANCE.md`.
 
 `1.2.0` — Deterministic hard-gate completion engine + the FIRST legitimate

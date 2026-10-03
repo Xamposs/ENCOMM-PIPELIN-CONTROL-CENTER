@@ -245,6 +245,89 @@ def main() -> int:
             and not status.ambiguous,
         )
 
+        # -- 6. Session 017A: runtime SessionRequest carries the config -------
+        # A SECOND scripted run over a FRESH workspace proves the operator
+        # configuration is authoritative: per-role ProposalAgentConfig
+        # objects reach the reviewers' SessionRequest (profile/provider/
+        # model + the ACTUAL proposal workspace for every reviewer role),
+        # captured by a recording reviewer subclass.
+        ws2 = tmp / "proposal-workspace-2"
+        pp.ProposalWorkspace(ws2).initialize()
+        (ws2 / "03_PROPOSAL" / "MASTER_PROPOSAL.md").write_bytes(
+            GOOD_TEXT.encode("utf-8")
+        )
+
+        class _RecordingReviewer(ScriptedReviewer):
+            # Per-INSTANCE recording: a class-level list would make every
+            # role's requests[0] return the FIRST reviewer's request.
+            def __init__(self, role, iteration=1):
+                super().__init__(role, iteration)
+                self.requests: list = []
+
+            def start_session(self, request):
+                self.requests.append(request)
+                return super().start_session(request)
+
+        reviewer_configs = {
+            ProposalRole.SCIENTIFIC_REVIEWER: pp.ProposalAgentConfig(
+                role=ProposalRole.SCIENTIFIC_REVIEWER,
+                engine="scripted",
+                project_profile="acc-sci-profile",
+                provider="acc-sci-provider",
+                model="acc-sci-model",
+            ),
+            ProposalRole.PROPOSAL_ENGINEER: pp.ProposalAgentConfig(
+                role=ProposalRole.PROPOSAL_ENGINEER,
+                engine="scripted",
+                project_profile="acc-eng-profile",
+                provider="acc-eng-provider",
+                model="acc-eng-model",
+            ),
+            ProposalRole.RED_TEAM_REVIEWER: pp.ProposalAgentConfig(
+                role=ProposalRole.RED_TEAM_REVIEWER,
+                engine="scripted",
+                project_profile="acc-red-profile",
+                provider="acc-red-provider",
+                model="acc-red-model",
+            ),
+        }
+        machine2 = ProposalStateMachine()
+        reviewers2 = {
+            role: _RecordingReviewer(role, 1) for role in prt.REVIEW_SEQUENCE
+        }
+        iteration2 = prt.run_iteration(
+            workspace=ws2,
+            state_machine=machine2,
+            iteration_number=1,
+            proposal_revision=REVISION,
+            reviewer_drivers=reviewers2,
+            orchestrator_driver=None,
+            reviewer_agent_configs=reviewer_configs,
+        )
+        step(
+            "run_iteration with per-role agent configs",
+            iteration2.outcome.value == "READY_FOR_HARD_GATES",
+            f"outcome={iteration2.outcome.value}",
+        )
+        captured = {}
+        for role in prt.REVIEW_SEQUENCE:
+            request = reviewers2[role].requests[0]
+            cfg = reviewer_configs[role]
+            captured[role.value] = (
+                request.project_profile == cfg.project_profile
+                and request.provider == cfg.provider
+                and request.model == cfg.model
+                and request.workspace_path == str(ws2)
+            )
+        step(
+            "SessionRequest carries profile/provider/model/workspace "
+            "(all three reviewers)",
+            all(captured.values()),
+            "; ".join(
+                f"{role}={ok}" for role, ok in captured.items()
+            ),
+        )
+
         print()
         print(f"scratch workspace: {tmp}")
         print("PROPOSAL ACCEPTANCE PASSED")
