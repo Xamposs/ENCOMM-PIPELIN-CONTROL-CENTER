@@ -266,6 +266,7 @@ def run_integration(
     pre_review_version_path: str = "",
     orchestrator_agent_config: Optional[ProposalAgentConfig] = None,
     extra_instructions: str = "",
+    source_pack_id: str = "",
 ) -> ProposalIntegrationExecutionReport:
     """Run ONE INTEGRATION operation — fail closed throughout.
 
@@ -292,6 +293,11 @@ def run_integration(
     readiness reach ASTRA through this seam WITHOUT changing the strict
     integration parser contract.  Empty by default (byte-identical packets
     for existing callers).
+
+    Session 021B: ``source_pack_id`` (optional) is the REAL source-pack
+    identity the panel/chair operated on; on the dual write path it is
+    PRESERVED into the committed ``DOCUMENT_PAIR_STATE`` manifest.  Empty
+    (legacy/standalone callers) keeps the previous manifest shape.
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -675,7 +681,10 @@ def run_integration(
                 iteration_number=iteration_number,
                 revised_blueprint_text=revised_bp_text,
                 revised_proposal_text=parsed.revised_proposal,
-                source_pack_id="",
+                # Session 021B: the panel's real source-pack identity is
+                # PRESERVED into the committed pair manifest (never an
+                # empty placeholder when the caller carries one).
+                source_pack_id=str(source_pack_id or ""),
                 proposal_revision=str(proposal_revision),
             )
         except DocumentPairStateError as exc:

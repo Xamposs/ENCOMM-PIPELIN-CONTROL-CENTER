@@ -171,6 +171,49 @@ CURRENT / LIVING BLUEPRINT (CURRENT_BLUEPRINT.md — ASTRA-write-only)
 > rejected by this ChatGPT account): disposable git-init'ed workspace,
 > ONE real session created and RESUMED (same id returned, model+reasoning
 > proven in argv), pair committed, MASTER byte-identical, session still
-> discoverable. Suite **1229 passed, 0 failed** (27 new S021A tests);
+> discoverable. Suite **1229 passed, 0 failed** (27 new S021A tests; 1249 after the S021B corrective pass);
 > all six acceptances green; rebuild + packaged smoke
 > `SMOKE OK version=1.5.0` exit 0.
+
+> **Session 021B corrective note:** final state/raw-contract invariant pass
+> (corrective commit on the SAME branch, version stays 1.5.0, DO NOT MERGE):
+> (1) `BLUEPRINT_STATE.json` now ADVANCES WITH EVERY committed document pair —
+> `commit_document_pair` snapshots the prior state bytes BEFORE any write,
+> prepares the new state payload, replaces both documents, writes the
+> advanced state atomically, and writes `DOCUMENT_PAIR_STATE.json` LAST as
+> the commit marker; a state-write or manifest-write failure restores BOTH
+> documents AND the prior state bytes exactly (typed `state_write_failed` /
+> `manifest_write_failed`, `restored` evidence), so `ensure_current_blueprint()`
+> never raises `current_drift` against a VALID runtime commit; (2) the
+> consensus round is READ-ONLY against BOTH documents — the living Blueprint
+> is fingerprinted before the three calls and re-verified after the join
+> (mutation ⇒ RuntimeError, no matrix/readiness/artifacts); (3) the three
+> initial-generation specialists are guarded by a MUTATION BARRIER — both
+> living documents AND the immutable original are frozen byte-exactly
+> before any model call (absence frozen too) and verified after the join;
+> any mutation ⇒ `SPECIALIST_FAILED`, ASTRA never runs, nothing written;
+> (4) the panel's REAL `source_pack_id` is threaded panel-chair →
+> `run_integration(source_pack_id=...)` → `commit_document_pair` →
+> `DOCUMENT_PAIR_STATE.source_pack_id` (never the empty placeholder); (5)
+> RAW-CONTRACT live proof added: `scripts/session_021b_live_raw_chair.py`
+> (raw model output → strict production parser → production runtime with
+> ZERO output rewriting/injection — the chair driver never overrides
+> `wait_for_completion`; raw contract failure would fail the test
+> honestly). **LIVE CODEX TRANSPORT TEST PASSED** (S021A mini re-run on the
+> corrected code, real session `01a107ef-4b61-…`) and **LIVE CODEX RAW
+> CHAIR CONTRACT PASSED** (real session `01a107ed-42db-…`, model
+> `gpt-5.6-sol`, effort low): raw chair output passed the STRICT parser
+> (COMPLETED_CHANGED), pair committed, `source_pack_id` preserved,
+> BLUEPRINT_STATE advanced (iteration 1), `ensure_current_blueprint()`
+> green, immutable original byte-identical. 15 new offline regression
+> tests (`tests/test_session_021b_invariants.py`): state advance on
+> blueprint-change / proposal-only / both-identical pairs, exact state+docs
+> rollback on simulated state-write and manifest-write failures,
+> TWO-ITERATION sequence coherence, consensus Blueprint/proposal mutation
+> fail-closed + untouched-pair success, specialist mutation barrier
+> (CURRENT / empty-master content / immutable original) + clean generation,
+> `source_pack_id` persistence through the full chair composition, and
+> chair-level consensus mutation → `CONSENSUS_FAILED`. Suite **1249
+> passed, 0 failed**; dual-document acceptance and Codex discovery
+> acceptance re-run green; build + packaged smoke re-verified
+> (`SMOKE OK version=1.5.0`, `proposal_v2_ui=ok`, exit 0).

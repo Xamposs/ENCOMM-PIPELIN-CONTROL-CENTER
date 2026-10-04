@@ -326,6 +326,10 @@ def run_panel_chair_iteration(
         pre_review_version_path=str(_pre_review_path(workspace, iteration_number)),
         orchestrator_agent_config=orchestrator_agent_config,
         extra_instructions=combined_instructions,
+        # Session 021B: the REAL source-pack identity the evaluators/chair
+        # operated on is threaded into the integration (and thus into the
+        # committed DOCUMENT_PAIR_STATE) instead of an empty placeholder.
+        source_pack_id=panel.source_pack_id,
     )
     report.model_calls_used += (
         0

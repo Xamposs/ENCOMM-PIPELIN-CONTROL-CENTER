@@ -15,9 +15,21 @@ all-or-rollback semantics for the pair:
    via a same-directory atomic ``os.replace`` of the staged temp file;
 5. if the SECOND replacement fails, the FIRST document is restored from
    its exact snapshot bytes (best-effort, re-verified by fingerprint);
-6. ONLY after both replacements are durable is the pair manifest
+6. the durable ``05_CONTROL/BLUEPRINT_STATE.json`` is advanced ATOMICALLY
+   (Session 021B): ``original_blueprint_hash`` stays the unchanged
+   immutable MASTER hash, ``current_blueprint_hash`` /
+   ``current_blueprint_iteration`` / ``last_pair_revision_id`` carry the
+   committed pair — a later ``ensure_current_blueprint()`` therefore
+   never raises ``current_drift`` against a VALID runtime commit.  A
+   state-less workspace (no prior state file AND no immutable original)
+   skips the advance honestly instead of fabricating a provenance hash;
+7. ONLY after the state advance is durable is the pair manifest
    ``05_CONTROL/DOCUMENT_PAIR_STATE.json`` written (atomically,
-   deterministically) — the manifest's existence IS the commit marker.
+   deterministically) LAST — the manifest's existence IS the commit
+   marker.  If the state advance OR the manifest write fails, BOTH
+   documents AND the prior BLUEPRINT_STATE bytes are restored exactly
+   and no new commit marker exists (the previous pair state remains
+   authoritative).
 
 There is never an accepted durable state where Blueprint iteration N+1
 and Proposal iteration N are considered a valid committed pair: before
@@ -45,6 +57,7 @@ from typing import Any, Optional
 
 from .enums import ProposalPhase
 from .fingerprint import MAX_PROPOSAL_BYTES, ProposalFingerprintError
+from .models import utc_now
 from .state_machine import ProposalStateMachine
 from .workspace import MASTER_PROPOSAL_RELPATH
 
@@ -383,6 +396,90 @@ def commit_document_pair(
         ).encode("utf-8")
     )[:32]
 
+    # -- 1b. prepare the BLUEPRINT_STATE advance BEFORE any write ------------
+    # Session 021B: the living-Blueprint state MUST advance with every
+    # committed pair, or a later ``ensure_current_blueprint()`` would raise
+    # ``current_drift`` against a VALID runtime commit.  The prior state is
+    # snapshotted byte-exactly and the new state payload is FULLY prepared
+    # here — before staging or replacing anything — so a preparation
+    # failure can never leave half-replaced documents behind.  Only the
+    # atomic WRITE below sits inside the commit window.
+    from .living_blueprint import (
+        BLUEPRINT_STATE_RELPATH,
+        BlueprintState,
+        BlueprintStateError,
+    )
+
+    _state_path = Path(workspace).joinpath(*BLUEPRINT_STATE_RELPATH.split("/"))
+    prior_state_bytes: Optional[bytes] = None
+    if _state_path.is_file():
+        try:
+            prior_state_bytes = _state_path.read_bytes()
+        except OSError as exc:
+            raise DocumentPairStateError(
+                "state_snapshot_failed",
+                f"cannot read the prior {BLUEPRINT_STATE_RELPATH}: {exc}",
+            ) from exc
+    # The immutable-original provenance hash: carried unchanged from the
+    # prior state when one exists; otherwise derived from the actual
+    # MASTER_BLUEPRINT.md bytes (an absent original leaves it empty and the
+    # advance is skipped honestly — no fabricated anchor).
+    if prior_state_bytes is not None:
+        try:
+            prior_state = BlueprintState.from_dict(
+                json.loads(prior_state_bytes.decode("utf-8"))
+            )
+        except (BlueprintStateError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise DocumentPairStateError(
+                "state_unreadable",
+                f"{BLUEPRINT_STATE_RELPATH} cannot be parsed: {exc}",
+            ) from exc
+        original_hash = prior_state.original_blueprint_hash
+    else:
+        master_bp = _document_path(
+            workspace, "00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md"
+        )
+        if master_bp.is_file():
+            try:
+                original_hash = _sha256_bytes(master_bp.read_bytes())
+            except OSError as exc:
+                raise DocumentPairStateError(
+                    "state_snapshot_failed",
+                    f"cannot read the immutable original for the blueprint "
+                    f"state advance: {exc}",
+                ) from exc
+        else:
+            original_hash = ""
+    try:
+        new_state = BlueprintState(
+            original_blueprint_hash=original_hash,
+            current_blueprint_hash=new_blueprint_hash,
+            current_blueprint_iteration=iteration_number,
+            last_pair_revision_id=pair_revision_id,
+            updated_at=utc_now(),
+        )
+    except BlueprintStateError as exc:
+        raise DocumentPairStateError(
+            "state_advance_failed",
+            f"the committed pair could not be reflected in "
+            f"{BLUEPRINT_STATE_RELPATH}: {exc}",
+        ) from exc
+    # An empty original hash means neither a prior state nor an immutable
+    # original exists in this workspace — there is no provenance anchor,
+    # so the state is skipped honestly (never fabricated).
+    if not new_state.original_blueprint_hash:
+        blueprint_state_payload: Optional[bytes] = None
+    else:
+        blueprint_state_payload = (
+            json.dumps(
+                new_state.to_dict(),
+                indent=2,
+                sort_keys=True,
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
     # -- 2. STAGE both outputs BEFORE touching any live file -----------------
     def _stage(target: Path, data: bytes, prefix: str) -> tuple[Path, str]:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -439,7 +536,36 @@ def commit_document_pair(
             restored=restored,
         ) from exc
 
-    # -- 4. both files durable → write the manifest (the commit marker) ------
+    # -- 4. both files durable → advance BLUEPRINT_STATE atomically ----------
+    # The payload was fully prepared BEFORE any document write; only the
+    # atomic write sits inside the commit window.  On failure BOTH
+    # documents AND the prior state are restored; no commit marker exists.
+    if blueprint_state_payload is not None:
+        try:
+            _atomic_write_bytes(_state_path, blueprint_state_payload)
+        except OSError as exc:
+            _restore_document(blueprint_path, live_blueprint)
+            _restore_document(proposal_path, live_proposal)
+            bp_ok = _fingerprint(blueprint_path) == previous_blueprint_hash
+            pr_ok = _fingerprint(proposal_path) == previous_proposal_hash
+            state_ok = True
+            if prior_state_bytes is not None:
+                try:
+                    _atomic_write_bytes(_state_path, prior_state_bytes)
+                    state_ok = _state_path.read_bytes() == prior_state_bytes
+                except OSError:
+                    state_ok = False
+            raise DocumentPairStateError(
+                "state_write_failed",
+                f"BLUEPRINT_STATE advance failed after both replacements: "
+                f"{exc}; both documents were restored "
+                f"({'verified' if bp_ok and pr_ok else 'RESTORE UNVERIFIED — operator inspection required'}) "
+                f"and the prior blueprint state was "
+                f"({'restored exactly' if state_ok else 'RESTORE UNVERIFIED — operator inspection required'}).",
+                restored=bp_ok and pr_ok and state_ok,
+            ) from exc
+
+    # -- 5. the manifest (the commit marker) is written LAST ----------------
     state = DocumentPairState(
         iteration=iteration_number,
         blueprint_hash=new_blueprint_hash,
@@ -458,19 +584,36 @@ def commit_document_pair(
             ).encode("utf-8"),
         )
     except OSError as exc:
-        # Both files ARE the new pair on disk but the manifest refused.
-        # Restore BOTH from snapshots so the durable state never shows a
-        # half-committed pair.
+        # The manifest (the FINAL commit marker) refused: restore BOTH
+        # documents AND the prior BLUEPRINT_STATE exactly so the previous
+        # pair state remains the authoritative durable state.
         _restore_document(blueprint_path, live_blueprint)
         _restore_document(proposal_path, live_proposal)
         bp_ok = _fingerprint(blueprint_path) == previous_blueprint_hash
         pr_ok = _fingerprint(proposal_path) == previous_proposal_hash
+        state_ok = True
+        if blueprint_state_payload is not None:
+            if prior_state_bytes is not None:
+                try:
+                    _atomic_write_bytes(_state_path, prior_state_bytes)
+                    state_ok = _state_path.read_bytes() == prior_state_bytes
+                except OSError:
+                    state_ok = False
+            else:
+                # The state file did not exist before this commit; remove
+                # the advanced state so the pre-commit shape is exact.
+                try:
+                    _state_path.unlink(missing_ok=True)
+                except OSError:
+                    state_ok = False
         raise DocumentPairStateError(
             "manifest_write_failed",
             f"pair manifest write failed after both replacements: {exc}; "
             f"both documents were restored "
-            f"({'verified' if bp_ok and pr_ok else 'RESTORE UNVERIFIED — operator inspection required'}).",
-            restored=bp_ok and pr_ok,
+            f"({'verified' if bp_ok and pr_ok else 'RESTORE UNVERIFIED — operator inspection required'}) "
+            f"and the prior blueprint state was "
+            f"({'restored exactly' if state_ok else 'RESTORE UNVERIFIED — operator inspection required'}).",
+            restored=bp_ok and pr_ok and state_ok,
         ) from exc
 
     return DocumentPairWriteReport(

@@ -647,6 +647,24 @@ def run_panel_consensus_round(
     workspace = Path(workspace)
     master_path = workspace / "03_PROPOSAL" / "MASTER_PROPOSAL.md"
 
+    # Session 021B: the consensus round is READ-ONLY against BOTH documents.
+    # Whenever the living Blueprint is present (dual mode), its EXACT frozen
+    # bytes are fingerprinted BEFORE the three calls and re-verified after
+    # the join beside the master — a mutation of either document fails the
+    # round closed: no matrix, no readiness, no artifacts.
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    dual = current_bp_path.is_file()
+    blueprint_hash_before = ""
+    if dual:
+        try:
+            blueprint_hash_before = proposal_fingerprint(current_bp_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"pre-consensus CURRENT_BLUEPRINT fingerprint failed: {exc}"
+            ) from exc
+
     missing = [r.value for r in REVIEW_SEQUENCE if r not in consensus_drivers]
     if missing:
         raise RuntimeError(
@@ -765,6 +783,22 @@ def run_panel_consensus_round(
             f"({proposal_hash} -> {current_hash}); refusing to build a "
             "matrix over a mixed revision."
         )
+    # Session 021B: the LIVING Blueprint is equally read-only — the frozen
+    # bytes fingerprinted before the calls must have survived verbatim.
+    if dual:
+        try:
+            blueprint_hash_after = proposal_fingerprint(current_bp_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"post-consensus CURRENT_BLUEPRINT fingerprint failed: {exc}"
+            ) from exc
+        if blueprint_hash_after != blueprint_hash_before:
+            raise RuntimeError(
+                f"CURRENT_BLUEPRINT changed during the consensus round "
+                f"({blueprint_hash_before} -> {blueprint_hash_after}); the "
+                "consensus round is READ-ONLY against BOTH documents and "
+                "nothing is accepted over a mutated living Blueprint."
+            )
 
     matrix = build_consensus_matrix(
         iteration_number=iteration_number,

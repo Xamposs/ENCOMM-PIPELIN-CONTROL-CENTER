@@ -300,6 +300,32 @@ def run_initial_generation(
             current_bp_hash = ""
     dual = current_bp_before_bytes is not None
 
+    # Session 021B: the specialist barrier freezes BOTH living documents
+    # AND the immutable original BEFORE any model call.  ABSENCE is frozen
+    # too — a document that appears mid-flight is a mutation — and so is
+    # an existing document vanishing.  The post-join guard verifies all
+    # three BEFORE any ASTRA synthesis.
+    _BARRIER_RELPATHS = (
+        CURRENT_BLUEPRINT_RELPATH,
+        "03_PROPOSAL/MASTER_PROPOSAL.md",
+        "00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md",
+    )
+
+    def _freeze_barrier_bytes(relpath: str) -> bytes | None:
+        try:
+            return workspace.joinpath(*relpath.split("/")).read_bytes()
+        except OSError:
+            return None
+
+    _frozen_barrier: dict[str, bytes | None] = {
+        rel: (
+            current_bp_before_bytes
+            if rel is CURRENT_BLUEPRINT_RELPATH and current_bp_before_bytes is not None
+            else _freeze_barrier_bytes(rel)
+        )
+        for rel in _BARRIER_RELPATHS
+    }
+
     # -- preconditions (BEFORE any model call) ------------------------------
     if state_machine.phase is not ProposalPhase.IDLE:
         return _finish(
@@ -427,10 +453,45 @@ def run_initial_generation(
                     "ok": True,
                     "chars": len(contributions[role]),
                 }
-    if errors:
+
+    # -- Session 021B: SPECIALIST MUTATION BARRIER ---------------------------
+    # Only ASTRA may write either living document.  The three initial
+    # specialists run BEFORE ASTRA, so the documents frozen before the
+    # barrier (bytes above) are verified here — BEFORE any ASTRA
+    # synthesis, and even when a specialist call itself failed.  Any
+    # mutation fails SPECIALIST_FAILED with the machine untouched: ASTRA
+    # never runs, the runtime writes nothing.
+    mutated: list[str] = []
+    for relpath in _BARRIER_RELPATHS:
+        frozen_bytes = _frozen_barrier[relpath]
+        path = workspace.joinpath(*relpath.split("/"))
+        try:
+            actual_bytes: bytes | None = path.read_bytes()
+        except OSError:
+            actual_bytes = None
+        if frozen_bytes is None:
+            if actual_bytes is not None:
+                mutated.append(f"{relpath}: appeared during the specialist barrier")
+            continue
+        if actual_bytes is None:
+            mutated.append(f"{relpath}: vanished during the specialist barrier")
+            continue
+        actual = hashlib.sha256(actual_bytes).hexdigest()
+        frozen = hashlib.sha256(frozen_bytes).hexdigest()
+        if actual != frozen:
+            mutated.append(f"{relpath}: {frozen[:12]} -> {actual[:12]}")
+    if mutated or errors:
+        detail = "; ".join(
+            ["SPECIALIST MUTATION (only ASTRA may write either living "
+             "document): " + "; ".join(mutated)] if mutated else []
+        ) or "; ".join(errors)
+        if mutated:
+            detail += (
+                ".  ASTRA synthesis was NOT run and nothing was written."
+            )
         return _finish(
             InitialGenerationOutcome.SPECIALIST_FAILED,
-            "; ".join(errors),
+            detail,
             failed_roles=[
                 r.value for r in _SPECIALIST_ORDER if r not in contributions
             ],

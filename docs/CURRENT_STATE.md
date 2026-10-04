@@ -45,8 +45,12 @@ verified per-invocation reasoning `-c model_reasoning_effort=<level>`
 minimal/low/medium/high/xhigh, explicit RESUME of real discovered Codex
 sessions — zero model calls, workspace-matched first, never auto-armed).
 Living-Blueprint state: `05_CONTROL/BLUEPRINT_STATE.json`
-(`encomm-pcc.blueprint-state/v1`); pair manifest schema
-`encomm-pcc.document-pair-state/v1`. Version pins: `__init__`,
+(`encomm-pcc.blueprint-state/v1`) — it now ADVANCES WITH EVERY committed
+pair (hash/iteration/revision id; exact rollback of documents + state on
+any failure), so `ensure_current_blueprint()` never reports `current_drift`
+against a valid runtime commit; pair manifest schema
+`encomm-pcc.document-pair-state/v1`, which also carries the REAL panel
+`source_pack_id` through the chair composition. Version pins: `__init__`,
 `pyproject.toml`, `tests/test_imports.py`, README.
 
 Previous: `1.4.0` — Proposal Factory V2, UI COMPLETE (Sessions 019+020,
@@ -86,7 +90,8 @@ disagreement table over `panel_consensus.json`. The worker
 RUN_PANEL / START_CAMPAIGN / RESUME_CAMPAIGN (AI never on the UI thread;
 PAUSE/STOP ride the campaign control object, never a fake cancel). 31 new
 offline UI tests (`tests/test_session_020.py`); suite **1158 passed,
-0 failed**. Acceptances: `PROPOSAL V2 UI ACCEPTANCE PASSED` (new,
+0 failed** (1249 after the S021A/S021B corrections on the Session 021
+branch). Acceptances: `PROPOSAL V2 UI ACCEPTANCE PASSED` (new,
 `scripts/session_020_ui_acceptance.py`), `PROPOSAL ACCEPTANCE PASSED`,
 `PANEL CAMPAIGN ACCEPTANCE PASSED`, `CAMPAIGN RECOVERY ACCEPTANCE PASSED`.
 Packaged smoke extended: `proposal_v2_ui=ok`. References:
