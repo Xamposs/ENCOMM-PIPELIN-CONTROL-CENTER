@@ -133,4 +133,12 @@ CURRENT / LIVING BLUEPRINT (CURRENT_BLUEPRINT.md — ASTRA-write-only)
 
 ## Git status
 
-To be filled at commit time (branch push + SHAs).
+- Branch: `proposal-living-blueprint-session-021` (base main `147b7f5`)
+- Feature commit: `0a7f0ebc2b28f3a4244aa4e179a0980c20a6c1c5`
+- Remote: pushed and verified — `origin/proposal-living-blueprint-session-021`
+  == `0a7f0eb` (28 files changed, +1387/−148 across the feature commit)
+- Windows build: REBUILT from this exact source — `BUILD OK`,
+  packaged smoke `SMOKE OK version=1.5.0` exit 0
+  (`mode_tabs=2(coding,proposal)`, `proposal_v2_ui=ok`,
+  drivers `codex,generic_cli,hermes`)
+- DO NOT MERGE YET — operator reviews the GitHub diff first.
