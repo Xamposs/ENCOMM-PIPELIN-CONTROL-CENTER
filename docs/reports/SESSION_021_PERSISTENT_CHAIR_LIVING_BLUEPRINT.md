@@ -142,3 +142,35 @@ CURRENT / LIVING BLUEPRINT (CURRENT_BLUEPRINT.md — ASTRA-write-only)
   (`mode_tabs=2(coding,proposal)`, `proposal_v2_ui=ok`,
   drivers `codex,generic_cli,hermes`)
 - DO NOT MERGE YET — operator reviews the GitHub diff first.
+
+## Session 021A corrective note
+
+> **Session 021A corrective note:** a live GitHub code review found nine
+> production defects the original suite missed. All closed on the SAME
+> branch (corrective commit `be6d33a`, version stays 1.5.0):
+> (1) ProposalPatch.target_section clobbered by the target enum — distinct
+> names; (2) `require_document_target` switch: NEW dual answers fail
+> `missing_target` when a finding/patch omits target, legacy artifacts
+> still load; (3) the ASTRA chair now HONOURS RESUME_SELECTED_SESSION via
+> the proven `_resume_session_id` contract (never silent NEW; the report
+> carries the real resumed thread id); (4) reasoning_effort reaches BOTH
+> initial-generation paths via SessionRequest.extra; (5) the dual
+> initial-generation report bug (UnboundLocalError on `write_report`)
+> fixed — report binds `new_proposal_hash`/`blueprint_hash`/
+> `pair_committed`; (6) all three initial specialists now receive
+> CURRENT_BLUEPRINT as the PRIMARY design (frozen bytes/hash, authority
+> preamble); (7) a dual workspace ALWAYS pair-commits (change/no-change
+> matrix) on BOTH write paths; (8) cross-workspace Codex resume is
+> refused fail-closed at the driver (discovery revalidation before any
+> model call) and other-ws sessions are disabled (not just marked) in the
+> UI + invalidated on workspace change; (9) the dual reviewer mutation
+> guard covers CURRENT_BLUEPRINT. LIVE-CAUGHT defect fixed: the reasoning
+> override must travel as the `-c key=value` PAIR (a bare token is a CLI
+> usage error, exit 2). **LIVE CODEX MINI TEST PASSED** with the real
+> installed CLI (model `gpt-5.6-sol` — the host-config `gpt-6.1-sol` is
+> rejected by this ChatGPT account): disposable git-init'ed workspace,
+> ONE real session created and RESUMED (same id returned, model+reasoning
+> proven in argv), pair committed, MASTER byte-identical, session still
+> discoverable. Suite **1229 passed, 0 failed** (27 new S021A tests);
+> all six acceptances green; rebuild + packaged smoke
+> `SMOKE OK version=1.5.0` exit 0.
