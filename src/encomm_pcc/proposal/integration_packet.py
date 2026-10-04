@@ -198,6 +198,8 @@ class ProposalIntegrationPacket:
         "prompt_text",
         "iteration_number",
         "input_proposal_hash",
+        "current_blueprint_available",
+        "current_blueprint_hash",
     )
 
     def __init__(
@@ -206,6 +208,8 @@ class ProposalIntegrationPacket:
         prompt_text: str,
         iteration_number: int,
         input_proposal_hash: str,
+        current_blueprint_available: bool = False,
+        current_blueprint_hash: str = "",
     ) -> None:
         #: The packet's addressee is ALWAYS the ORCHESTRATOR (the one
         #: integration authority); carrying it as data keeps the executor's
@@ -214,6 +218,10 @@ class ProposalIntegrationPacket:
         self.prompt_text = prompt_text
         self.iteration_number = iteration_number
         self.input_proposal_hash = input_proposal_hash
+        #: Session 021: dual-document contract evidence — True exactly when
+        #: the runtime supplied the LIVING Blueprint (hash-activated).
+        self.current_blueprint_available = current_blueprint_available
+        self.current_blueprint_hash = current_blueprint_hash
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ProposalIntegrationPacket):
@@ -380,4 +388,8 @@ def build_integration_packet(
         prompt_text="\n".join(parts),
         iteration_number=inputs.iteration_number,
         input_proposal_hash=inputs.current_proposal_hash,
+        current_blueprint_available=dual,
+        current_blueprint_hash=(
+            inputs.current_blueprint_hash if dual else ""
+        ),
     )

@@ -351,7 +351,34 @@ def test_resume_prompt_reuses_the_bound_session_id(
 ) -> None:
     # Offline proof of the resume CODE PATH: the live gate is simulated as
     # already verified (the live proof itself happens once, in the smoke).
+    # Session 021A: the workspace-match guard is satisfied with a matching
+    # discovery result (the guard itself is proven separately below).
     monkeypatch.setattr("encomm_pcc.drivers.codex._LIVE_RESUME_VERIFIED", True)
+
+    from encomm_pcc.drivers.session_discovery import (
+        ExternalSessionDescriptor,
+        SessionDiscoveryResult,
+    )
+
+    def _matching(self, *, workspace_path=None, limit=50):
+        return SessionDiscoveryResult(
+            ok=True,
+            driver_id="codex",
+            sessions=[
+                ExternalSessionDescriptor(
+                    session_id="019d1123-1111-2222-3333-444455556666",
+                    driver_id="codex",
+                    workspace_path=workspace_path,
+                    matches_workspace=True,
+                )
+            ],
+            mechanism="codex-rollouts",
+        )
+
+    monkeypatch.setattr(
+        "encomm_pcc.drivers.codex.CodexSessionDiscovery.discover_sessions",
+        _matching,
+    )
     runner = ScriptedCodexRunner([_ok_result([])])
     driver = CodexDriver(runner=runner)
     session = driver.resume_session("019d1123-1111-2222-3333-444455556666", _request(workspace_path=ws))
@@ -364,6 +391,48 @@ def test_resume_prompt_reuses_the_bound_session_id(
     assert argv[1:4] == ["exec", "resume", "019d1123-1111-2222-3333-444455556666"]
     assert "--json" in argv
     assert argv[-1] == "-"
+
+
+def test_resume_refuses_other_workspace_session(
+    monkeypatch: pytest.MonkeyPatch, ws
+) -> None:
+    # Session 021A: a resumed thread INHERITS its original working root, so
+    # an id that is NOT a verified session of THIS workspace is refused
+    # BEFORE any model call (zero runner specs).
+    monkeypatch.setattr("encomm_pcc.drivers.codex._LIVE_RESUME_VERIFIED", True)
+
+    from encomm_pcc.drivers.session_discovery import (
+        ExternalSessionDescriptor,
+        SessionDiscoveryResult,
+    )
+
+    def _no_match(self, *, workspace_path=None, limit=50):
+        return SessionDiscoveryResult(
+            ok=True,
+            driver_id="codex",
+            sessions=[
+                ExternalSessionDescriptor(
+                    session_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    driver_id="codex",
+                    workspace_path="C:/somewhere-else",
+                    matches_workspace=False,
+                )
+            ],
+            mechanism="codex-rollouts",
+        )
+
+    monkeypatch.setattr(
+        "encomm_pcc.drivers.codex.CodexSessionDiscovery.discover_sessions",
+        _no_match,
+    )
+    runner = ScriptedCodexRunner([])
+    driver = CodexDriver(runner=runner)
+    with pytest.raises(Exception) as excinfo:
+        driver.resume_session(
+            "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", _request(workspace_path=ws)
+        )
+    assert "not a verified session of THIS workspace" in str(excinfo.value)
+    assert runner.specs == []  # zero model calls on mismatch
 
 
 def test_resume_is_refused_until_live_verified(monkeypatch: pytest.MonkeyPatch, ws) -> None:

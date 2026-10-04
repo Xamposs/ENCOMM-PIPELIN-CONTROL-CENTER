@@ -547,7 +547,17 @@ def run_integration(
                     "proposal_iteration": iteration_number,
                 },
             )
-        session = orchestrator_driver.start_session(request)
+        # Session 021A: the PERSISTENT CHAIR contract — the operator's
+        # explicit RESUME_SELECTED_SESSION choice is honoured EXACTLY like
+        # every other proposal runtime path (the proven _resume_session_id
+        # contract): never silently fall back to a fresh session.
+        from .review_executor import _resume_session_id
+
+        resume_id = _resume_session_id(orchestrator_agent_config, orchestrator_driver)
+        if resume_id:
+            session = orchestrator_driver.resume_session(resume_id, request)
+        else:
+            session = orchestrator_driver.start_session(request)
         handle = orchestrator_driver.send_prompt(session, packet.prompt_text)
         prompt_result = orchestrator_driver.wait_for_completion(handle, timeout_s)
     except Exception as exc:  # DriverError hierarchy + defensive plain errors
@@ -640,7 +650,20 @@ def run_integration(
             )
 
     # -- 9. runtime-owned write (the model NEVER touches files) --------------
-    if dual and parsed.revised_blueprint is not None:
+    if dual:
+        # Session 021A core invariant: a DUAL workspace ALWAYS commits the
+        # document pair.  "No Blueprint change" is the chair's explicit
+        # decision — the CURRENT bytes are re-committed verbatim
+        # (byte-identical Blueprint + changed Proposal, or both unchanged,
+        # are valid committed pairs; never a proposal-only fallback).
+        from ..proposal.living_blueprint import current_blueprint_path
+
+        revised_bp_text = (
+            parsed.revised_blueprint
+            if parsed.revised_blueprint is not None
+            and parsed.revised_blueprint.strip()
+            else current_blueprint_path(workspace).read_bytes().decode("utf-8")
+        )
         # DUAL DOCUMENT PAIR COMMIT — all-or-rollback.  The parsed pair is
         # written together with ONE durable manifest as the commit marker;
         # any failure restores the touched document(s) from their exact
@@ -650,7 +673,7 @@ def run_integration(
                 workspace=workspace,
                 state_machine=state_machine,
                 iteration_number=iteration_number,
-                revised_blueprint_text=parsed.revised_blueprint,
+                revised_blueprint_text=revised_bp_text,
                 revised_proposal_text=parsed.revised_proposal,
                 source_pack_id="",
                 proposal_revision=str(proposal_revision),
@@ -695,8 +718,11 @@ def run_integration(
         if post_freeze_exception is None:
             # Session 021: the post-integration LIVING Blueprint freeze —
             # same exact-bytes discipline; a Blueprint kept byte-identical
-            # is frozen as such (hash equality recorded).
-            blueprint_data = parsed.revised_blueprint.encode("utf-8")
+            # is frozen as such (hash equality recorded).  The frozen bytes
+            # are the COMMITTED bytes (chair's revision or the verbatim
+            # current text), re-derived through the same canonical EOF.
+            committed_bp_text = revised_bp_text
+            blueprint_data = committed_bp_text.encode("utf-8")
             if not blueprint_data.endswith(b"\n"):
                 blueprint_data += b"\n"
             try:

@@ -86,6 +86,11 @@ class InitialGenerationReport:
     proposal_revision: str = ""
     master_path: str = ""
     proposal_hash: str = ""
+    #: Session 021A: the committed CURRENT_BLUEPRINT hash ("" when the
+    #: workspace has no living Blueprint / legacy single write).
+    blueprint_hash: str = ""
+    #: Session 021A: True when the write went through the pair commit.
+    pair_committed: bool = False
     specialist_reports: dict[str, Any] = field(default_factory=dict)
     synthesis_report: dict[str, Any] = field(default_factory=dict)
     generation_dir: str = ""
@@ -99,6 +104,8 @@ class InitialGenerationReport:
             "proposal_revision": self.proposal_revision,
             "master_path": self.master_path,
             "proposal_hash": self.proposal_hash,
+            "blueprint_hash": self.blueprint_hash,
+            "pair_committed": self.pair_committed,
             "specialist_reports": dict(self.specialist_reports),
             "synthesis_report": dict(self.synthesis_report),
             "generation_dir": self.generation_dir,
@@ -137,8 +144,16 @@ def _specialist_prompt(
     *,
     snapshot: Any,
     proposal_revision: str,
+    current_blueprint_text: str = "",
+    current_blueprint_hash: str = "",
 ) -> str:
-    """Deterministic specialist prompt over the frozen sources."""
+    """Deterministic specialist prompt over the frozen sources.
+
+    Session 021A: in a living workspace the CURRENT_BLUEPRINT is the
+    PRIMARY design under evaluation; the immutable MASTER_BLUEPRINT is
+    provenance.  Every specialist of one generation consumes the SAME
+    frozen living-Blueprint text/hash (frozen snapshot inputs).
+    """
     doc_sections: list[str] = []
     for name, text in snapshot.official_documents:
         doc_sections.append(f"### 01_OFFICIAL/NORMALIZED/{name}.md\n\n{text.strip()}")
@@ -152,18 +167,41 @@ def _specialist_prompt(
         "- Ground EVERY statement in the provided sources; invent nothing.",
         f"- {INPUT_REQUIRED_MARKER_GUIDANCE}",
         "- Return well-structured Markdown sections only (no meta-commentary).",
+    ]
+    if current_blueprint_text.strip():
+        parts.extend([
+            "",
+            "DOCUMENT AUTHORITY (read carefully):",
+            "- 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md = IMMUTABLE PROVENANCE "
+            "(the original imported design; never to be changed).",
+            "- 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md = the CURRENT PROJECT "
+            "DESIGN under evaluation — the PRIMARY design truth, subject to "
+            "official documents and project facts.",
+        ])
+    parts.extend([
         "",
         "## SOURCES",
         "",
-        "### 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md",
+        "### 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md (immutable provenance)",
         "",
         snapshot.master_blueprint_text.strip() or "[UNAVAILABLE]",
         "",
+    ])
+    if current_blueprint_text.strip():
+        parts.extend([
+            "### 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md "
+            "(PRIMARY current project design)",
+            f"(current_blueprint_hash: {current_blueprint_hash or 'UNSPECIFIED'})",
+            "",
+            current_blueprint_text.strip(),
+            "",
+        ])
+    parts.extend([
         "### 01_OFFICIAL/APPLICATION_TEMPLATE.md",
         "",
         snapshot.application_template_text.strip() or "[UNAVAILABLE]",
         "",
-    ]
+    ])
     parts.extend(doc_sections)
     for rel, key in (
         ("PROJECT_FACTS", "project_facts_text"),
@@ -245,6 +283,23 @@ def run_initial_generation(
         report.duration_s = time.monotonic() - started
         return report
 
+    # Session 021A: the LIVING Blueprint is read ONCE, up front, so the
+    # specialist closures (threads) and the later synthesis/write paths all
+    # consume the SAME frozen bytes/hash (the snapshot discipline).
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    _current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    current_bp_before_bytes: bytes | None = None
+    current_bp_hash = ""
+    if _current_bp_path.is_file():
+        try:
+            current_bp_before_bytes = _current_bp_path.read_bytes()
+            current_bp_hash = hashlib.sha256(current_bp_before_bytes).hexdigest()
+        except OSError:
+            current_bp_before_bytes = None
+            current_bp_hash = ""
+    dual = current_bp_before_bytes is not None
+
     # -- preconditions (BEFORE any model call) ------------------------------
     if state_machine.phase is not ProposalPhase.IDLE:
         return _finish(
@@ -300,7 +355,15 @@ def run_initial_generation(
     # -- STEP A: the three specialist contributions in parallel -------------
     def _call(role: ProposalRole) -> str:
         prompt = _specialist_prompt(
-            role, snapshot=snapshot, proposal_revision=str(proposal_revision)
+            role,
+            snapshot=snapshot,
+            proposal_revision=str(proposal_revision),
+            current_blueprint_text=(
+                current_bp_before_bytes.decode("utf-8", errors="replace")
+                if current_bp_before_bytes is not None
+                else ""
+            ),
+            current_blueprint_hash=current_bp_hash,
         )
         driver = specialist_drivers[role]
         config = (
@@ -311,6 +374,17 @@ def run_initial_generation(
         from ..drivers.base import SessionRequest
         from .review_executor import _resume_session_id
 
+        # Session 021A: the role's configured reasoning effort rides the
+        # SAME namespaced SessionRequest.extra mechanism used everywhere
+        # else — the Codex driver consumes/validates it; other engines
+        # never see a Codex flag.
+        extra: dict[str, str] = {
+            "proposal_role": role.value,
+            "proposal_stage": "initial_generation",
+        }
+        effort = str(getattr(config, "reasoning_effort", "") or "").strip()
+        if effort:
+            extra["reasoning_effort"] = effort
         request = SessionRequest(
             role=AgentRole.TASK_AUDITOR,
             workspace_path=str(workspace),
@@ -318,10 +392,7 @@ def run_initial_generation(
             provider=str(config.provider if config else ""),
             model=str(config.model if config else ""),
             session_policy=SessionPolicy.ALWAYS_NEW,
-            extra={
-                "proposal_role": role.value,
-                "proposal_stage": "initial_generation",
-            },
+            extra=extra,
         )
         resume_id = _resume_session_id(config, driver)
         session = (
@@ -379,22 +450,9 @@ def run_initial_generation(
     for name, text in snapshot.official_documents:
         source_lines.append(f"### 01_OFFICIAL/NORMALIZED/{name}.md")
         source_lines.append(text.strip() or "[EMPTY]")
-    # Session 021: the LIVING Blueprint participates in initial generation —
-    # read ONCE here (prompt section + hash binding for the write path).
-    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
-
-    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
-    dual = False
-    current_bp_hash = ""
-    current_bp_before_bytes: bytes | None = None
-    if current_bp_path.is_file():
-        try:
-            current_bp_before_bytes = current_bp_path.read_bytes()
-            current_bp_hash = hashlib.sha256(current_bp_before_bytes).hexdigest()
-            dual = True
-        except OSError:
-            dual = False
-            current_bp_hash = ""
+    # Session 021A: current_bp_before_bytes/current_bp_hash were frozen
+    # BEFORE any model call (top of run_initial_generation); the living
+    # Blueprint section joins the sources here.
     if dual:
         source_lines.append(
             "### 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md (LIVING project design)"
@@ -481,6 +539,17 @@ def run_initial_generation(
     from ..drivers.base import SessionRequest
     from .review_executor import _resume_session_id
 
+    # Session 021A: the chair's reasoning effort reaches the synthesis
+    # call through the SAME SessionRequest.extra mechanism (Codex-only).
+    synthesis_extra: dict[str, object] = {
+        "proposal_role": "ORCHESTRATOR",
+        "proposal_iteration": 0,
+    }
+    synthesis_effort = str(
+        getattr(orchestrator_agent_config, "reasoning_effort", "") or ""
+    ).strip()
+    if synthesis_effort:
+        synthesis_extra["reasoning_effort"] = synthesis_effort
     try:
         request = SessionRequest(
             role=AgentRole.ORCHESTRATOR,
@@ -496,7 +565,7 @@ def run_initial_generation(
                 orchestrator_agent_config.model if orchestrator_agent_config else ""
             ),
             session_policy=SessionPolicy.ALWAYS_NEW,
-            extra={"proposal_role": "ORCHESTRATOR", "proposal_iteration": 0},
+            extra=synthesis_extra,
         )
         resume_id = _resume_session_id(orchestrator_agent_config, orchestrator_driver)
         session = (
@@ -623,18 +692,26 @@ def run_initial_generation(
         state_machine.transition_to(ProposalPhase.IMPLEMENTATION_REVIEW)
         state_machine.transition_to(ProposalPhase.RED_TEAM_REVIEW)
         state_machine.transition_to(ProposalPhase.INTEGRATION)
-        if (
-            dual
-            and parsed.revised_blueprint is not None
-            and parsed.revised_blueprint.strip()
-        ):
+        if dual:
+            # Session 021A core invariant: a DUAL workspace ALWAYS commits
+            # the document pair.  "No Blueprint change" is the chair's
+            # explicit decision — the CURRENT bytes are re-committed
+            # verbatim (byte-identical Blueprint + Proposal is a valid
+            # committed pair; never content churn, never a proposal-only
+            # fallback).
             from ..proposal.document_pair import commit_document_pair
 
+            revised_bp_text = (
+                parsed.revised_blueprint
+                if parsed.revised_blueprint is not None
+                and parsed.revised_blueprint.strip()
+                else (current_bp_before_bytes or b"").decode("utf-8")
+            )
             pair_report = commit_document_pair(
                 workspace=workspace,
                 state_machine=state_machine,
                 iteration_number=1,
-                revised_blueprint_text=parsed.revised_blueprint,
+                revised_blueprint_text=revised_bp_text,
                 revised_proposal_text=parsed.revised_proposal,
                 proposal_revision=str(proposal_revision),
             )
@@ -687,7 +764,12 @@ def run_initial_generation(
 
     report.outcome = InitialGenerationOutcome.COMPLETED
     report.master_path = str(master_path)
-    report.proposal_hash = write_report.new_hash
+    # Session 021A: the canonical hash variable computed on BOTH write
+    # paths (pair commit or legacy single write) — `write_report` does not
+    # exist on the dual path and reading it here was an UnboundLocalError.
+    report.proposal_hash = new_proposal_hash
+    report.blueprint_hash = new_blueprint_hash
+    report.pair_committed = bool(dual)
     report.generation_dir = str(generation_dir)
     report.synthesis_report = {
         "ok": True,
@@ -695,6 +777,8 @@ def run_initial_generation(
         "input_required_markers": parsed.revised_proposal.count(
             "[INPUT REQUIRED"
         ),
+        "current_blueprint_hash": new_blueprint_hash,
+        "pair_committed": bool(dual),
     }
     report.duration_s = time.monotonic() - started
     return report

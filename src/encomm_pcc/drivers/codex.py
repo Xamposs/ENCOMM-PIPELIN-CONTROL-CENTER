@@ -215,6 +215,32 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
         session_id = str(session_id or "").strip()
         if not session_id:
             raise DriverError("resume_session requires a non-empty Codex session id")
+        # Session 021A: a resumed thread INHERITS its original working root
+        # (verified: resume accepts no -C), so the id is revalidated against
+        # the real session store immediately before use — a session from
+        # another workspace is refused BEFORE any model call.
+        workspace = str((request.workspace_path or "")).strip()
+        if workspace and Path(workspace).expanduser().is_dir():
+            from .session_discovery import DEFAULT_DISCOVERY_LIMIT
+
+            result = CodexSessionDiscovery().discover_sessions(
+                workspace_path=workspace, limit=DEFAULT_DISCOVERY_LIMIT
+            )
+            descriptor = next(
+                (
+                    s
+                    for s in result.sessions
+                    if s.session_id == session_id and s.matches_workspace
+                ),
+                None,
+            )
+            if descriptor is None:
+                raise DriverError(
+                    f"Refusing to resume Codex session {session_id!r}: it is "
+                    "not a verified session of THIS workspace (other-"
+                    "workspace or stale ids are rejected — a resumed thread "
+                    "inherits its original working root)."
+                )
         session = self.start_session(request)
         session.session_id = session_id
         session.external = True
@@ -389,9 +415,12 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
         reasoning_effort: str = "",
     ) -> list[str]:
         # Session 021: the verified per-invocation reasoning override —
-        # ``-c model_reasoning_effort="<level>"`` is accepted by BOTH the
-        # exec and exec-resume subcommands (single `key=value` token), and
-        # applies to resumed threads too (a fresh turn's model parameters).
+        # ``codex -c model_reasoning_effort="<level>"`` (config-reference
+        # override; parsed as TOML) is accepted by BOTH the exec and
+        # exec-resume subcommands, and applies to resumed threads too (a
+        # fresh turn's model parameters).
+        # Session 021A (live-caught): the override is a `-c key=value` PAIR —
+        # the bare key=value token alone is a CLI usage error (exit 2).
         effort_args: list[str] = []
         if reasoning_effort:
             if reasoning_effort not in REASONING_EFFORT_LEVELS:
@@ -399,7 +428,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
                     f"Refusing reasoning effort {reasoning_effort!r}; allowed: "
                     + ", ".join(sorted(REASONING_EFFORT_LEVELS)) + "."
                 )
-            effort_args = [f"model_reasoning_effort={reasoning_effort}"]
+            effort_args = ["-c", f"model_reasoning_effort={reasoning_effort}"]
         if resumed:
             # Verified live (0.154.0): exec resume takes NO -s/-C — the thread
             # inherits the original session's sandbox and working root.

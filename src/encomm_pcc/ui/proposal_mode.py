@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -650,10 +651,27 @@ class ProposalModePanel(QWidget):
         text = self.ws_edit.text().strip()
         return Path(text) if text else None
 
+    def _invalidate_codex_sessions_on_workspace_change(self) -> None:
+        """Session 021A: Codex session ids are workspace-bound discoveries.
+
+        Changing the workspace invalidates every Codex role's session
+        selection AND resume mode (the selected thread belongs to the OLD
+        workspace; a resumed thread inherits its original working root, so
+        the binding is meaningless and fail-closed beats stale).
+        """
+        for role in ProposalRole:
+            row = self._role_rows[role]
+            if str(row["engine"].currentData() or "") == _CODEX_ENGINE_ID:
+                row["session"].setCurrentIndex(0)
+                row["session_mode"].setCurrentIndex(0)
+                self._sync_role_config_from_widgets(role)
+
     def _on_browse(self) -> None:
         start = self.ws_edit.text().strip() or str(Path.home())
         chosen = QFileDialog.getExistingDirectory(self, "Proposal workspace", start)
         if chosen:
+            if Path(chosen) != self._workspace():
+                self._invalidate_codex_sessions_on_workspace_change()
             self.ws_edit.setText(chosen)
             self.refresh_status()
 
@@ -674,6 +692,10 @@ class ProposalModePanel(QWidget):
         self.refresh_status()
 
     def _on_refresh(self) -> None:
+        # Session 021A: a manual workspace-path edit (then REFRESH) is a
+        # workspace change too — the same Codex binding invalidation as
+        # BROWSE applies.
+        self._invalidate_codex_sessions_on_workspace_change()
         self.refresh_status()
 
     # -- PROJECT INPUTS importers (Session 020 §4/§5/§6) ---------------------------
@@ -997,9 +1019,21 @@ class ProposalModePanel(QWidget):
         )
         shown = 0
         for s in sessions:
-            marker = "[WS] " if s.matches_workspace else "[other ws] "
-            label = s.label()
-            session_combo.addItem(f"{marker}{label}", s.session_id)
+            if s.matches_workspace:
+                label = s.label()
+                session_combo.addItem(f"[WS] {label}", s.session_id)
+            else:
+                # Session 021A: other-workspace sessions stay VISIBLE for
+                # operator awareness but are DISABLED as resume targets —
+                # a resumed thread inherits its original working root, so
+                # they must never be selectable (not just display text).
+                label = s.label()
+                index = session_combo.count()
+                session_combo.addItem(f"[other ws] {label}", s.session_id)
+                model = session_combo.model()
+                item = model.item(index)
+                item.setEnabled(False)
+                item.setForeground(QBrush(QColor(128, 128, 128)))
             shown += 1
         self._action_note = (
             f"Codex discovery: {shown} session(s) "

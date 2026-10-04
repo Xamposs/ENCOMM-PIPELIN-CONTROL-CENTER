@@ -289,8 +289,35 @@ def test_new_session_clears_the_binding_with_no_model_call(database) -> None:
 # executor + generic role path (Codex offline)
 # ----------------------------------------------------------------------------
 def test_final_auditor_resumes_the_bound_codex_session(
-    codex_gates, database, ws
+    codex_gates, database, ws, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Session 021A: the driver's workspace-match resume guard is satisfied
+    # with a matching discovery result (the guard's refusal itself is proven
+    # in test_codex_driver.py::test_resume_refuses_other_workspace_session).
+    from encomm_pcc.drivers.session_discovery import (
+        ExternalSessionDescriptor,
+        SessionDiscoveryResult,
+    )
+
+    def _matching(self, *, workspace_path=None, limit=50):
+        return SessionDiscoveryResult(
+            ok=True,
+            driver_id="codex",
+            sessions=[
+                ExternalSessionDescriptor(
+                    session_id=SID,
+                    driver_id="codex",
+                    workspace_path=workspace_path,
+                    matches_workspace=True,
+                )
+            ],
+            mechanism="codex-rollouts",
+        )
+
+    monkeypatch.setattr(
+        "encomm_pcc.drivers.codex.CodexSessionDiscovery.discover_sessions",
+        _matching,
+    )
     controller = PipelineController(database=database, event_log=NullEventLog())
     controller.set_role_config(
         AgentRole.FINAL_AUDITOR,
@@ -313,7 +340,34 @@ def test_final_auditor_resumes_the_bound_codex_session(
     assert runner.specs[0].stdin_text and "FINAL_AUDIT" in runner.specs[0].stdin_text
 
 
-def test_final_auditor_binding_resumes_after_a_restart(codex_gates, tmp_path, ws) -> None:
+def test_final_auditor_binding_resumes_after_a_restart(
+    codex_gates, tmp_path, ws, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Session 021A: same workspace-match guard satisfaction as above.
+    from encomm_pcc.drivers.session_discovery import (
+        ExternalSessionDescriptor,
+        SessionDiscoveryResult,
+    )
+
+    def _matching(self, *, workspace_path=None, limit=50):
+        return SessionDiscoveryResult(
+            ok=True,
+            driver_id="codex",
+            sessions=[
+                ExternalSessionDescriptor(
+                    session_id=SID,
+                    driver_id="codex",
+                    workspace_path=workspace_path,
+                    matches_workspace=True,
+                )
+            ],
+            mechanism="codex-rollouts",
+        )
+
+    monkeypatch.setattr(
+        "encomm_pcc.drivers.codex.CodexSessionDiscovery.discover_sessions",
+        _matching,
+    )
     db_path = tmp_path / "pcc.db"
     db = Database(str(db_path)).open()
     first = PipelineController(database=db, event_log=NullEventLog())
