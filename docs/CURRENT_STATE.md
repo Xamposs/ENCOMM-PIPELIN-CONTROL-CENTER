@@ -90,7 +90,7 @@ disagreement table over `panel_consensus.json`. The worker
 RUN_PANEL / START_CAMPAIGN / RESUME_CAMPAIGN (AI never on the UI thread;
 PAUSE/STOP ride the campaign control object, never a fake cancel). 31 new
 offline UI tests (`tests/test_session_020.py`); suite **1158 passed,
-0 failed** (1249 after the S021A/S021B corrections on the Session 021
+0 failed** (1244 after the S021A/S021B corrections on the Session 021
 branch). Acceptances: `PROPOSAL V2 UI ACCEPTANCE PASSED` (new,
 `scripts/session_020_ui_acceptance.py`), `PROPOSAL ACCEPTANCE PASSED`,
 `PANEL CAMPAIGN ACCEPTANCE PASSED`, `CAMPAIGN RECOVERY ACCEPTANCE PASSED`.

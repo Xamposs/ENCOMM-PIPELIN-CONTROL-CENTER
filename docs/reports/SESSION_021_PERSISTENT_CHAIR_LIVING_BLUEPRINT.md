@@ -171,7 +171,7 @@ CURRENT / LIVING BLUEPRINT (CURRENT_BLUEPRINT.md — ASTRA-write-only)
 > rejected by this ChatGPT account): disposable git-init'ed workspace,
 > ONE real session created and RESUMED (same id returned, model+reasoning
 > proven in argv), pair committed, MASTER byte-identical, session still
-> discoverable. Suite **1229 passed, 0 failed** (27 new S021A tests; 1249 after the S021B corrective pass);
+> discoverable. Suite **1229 passed, 0 failed** (27 new S021A tests; 1244 after the S021B corrective pass);
 > all six acceptances green; rebuild + packaged smoke
 > `SMOKE OK version=1.5.0` exit 0.
 
@@ -213,7 +213,7 @@ CURRENT / LIVING BLUEPRINT (CURRENT_BLUEPRINT.md — ASTRA-write-only)
 > fail-closed + untouched-pair success, specialist mutation barrier
 > (CURRENT / empty-master content / immutable original) + clean generation,
 > `source_pack_id` persistence through the full chair composition, and
-> chair-level consensus mutation → `CONSENSUS_FAILED`. Suite **1249
+> chair-level consensus mutation → `CONSENSUS_FAILED`. Suite **1244
 > passed, 0 failed**; dual-document acceptance and Codex discovery
 > acceptance re-run green; build + packaged smoke re-verified
 > (`SMOKE OK version=1.5.0`, `proposal_v2_ui=ok`, exit 0).
