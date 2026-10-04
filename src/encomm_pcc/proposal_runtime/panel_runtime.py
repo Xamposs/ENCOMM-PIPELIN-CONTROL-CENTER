@@ -78,7 +78,11 @@ from .review_loop import (
     SourceValidationError,
     _validate_sources,
 )
-from .version_freeze import VersionFreezeError, freeze_pre_review_version
+from .version_freeze import (
+    VersionFreezeError,
+    freeze_pre_review_blueprint_version,
+    freeze_pre_review_version,
+)
 
 __all__ = [
     "SOURCE_PACK_ID_PREFIX",
@@ -162,6 +166,7 @@ def _source_pack_id(snapshot: ReviewSourceSnapshot, proposal_hash: str) -> str:
         for text in (
             snapshot.master_proposal_text,
             snapshot.master_blueprint_text,
+            snapshot.current_blueprint_text,
             snapshot.application_template_text,
             snapshot.project_facts_text,
             snapshot.team_text,
@@ -330,6 +335,21 @@ def run_parallel_panel_review_cycle(
     source_pack_id = _source_pack_id(snapshot, cycle_hash)
     report.source_pack_id = source_pack_id
 
+    # -- Session 021: fingerprint the LIVING Blueprint BEFORE any freeze ----
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    if current_bp_path.is_file() and snapshot.current_blueprint_available:
+        try:
+            current_bp_hash = proposal_fingerprint(current_bp_path)
+            current_bp_available = True
+        except OSError:
+            current_bp_hash = ""
+            current_bp_available = False
+    else:
+        current_bp_hash = ""
+        current_bp_available = False
+
     # -- version freeze (exact reviewed bytes) ------------------------------
     try:
         freeze_pre_review_version(
@@ -341,6 +361,20 @@ def run_parallel_panel_review_cycle(
         )
     except (VersionFreezeError, OSError) as exc:
         return _finish(ProposalPanelOutcome.ARTIFACT_CONFLICT, f"version freeze failed: {exc}")
+    try:
+        # Session 021: the living Blueprint freezes beside the proposal so
+        # every review artifact is traceable to the exact PAIR (no-op when
+        # the workspace has no living Blueprint).
+        freeze_pre_review_blueprint_version(
+            workspace=workspace,
+            iteration_number=iteration_number,
+            expected_hash=current_bp_hash if current_bp_available else None,
+        )
+    except (VersionFreezeError, OSError) as exc:
+        return _finish(
+            ProposalPanelOutcome.ARTIFACT_CONFLICT,
+            f"blueprint version freeze failed: {exc}",
+        )
 
     if state_machine.phase is ProposalPhase.SOURCE_VALIDATION:
         state_machine.transition_to(ProposalPhase.SCIENTIFIC_REVIEW)
@@ -353,6 +387,8 @@ def run_parallel_panel_review_cycle(
     )
 
     # -- build ALL packets over the SAME frozen inputs, BEFORE launch -------
+    # (current_bp_hash / current_bp_available were fingerprinted before the
+    # version freeze above; every packet echoes the SAME pair binding.)
     def _packet(role: ProposalRole):
         inputs = ProposalReviewInputs(
             proposal_text=snapshot.master_proposal_text,
@@ -360,6 +396,9 @@ def run_parallel_panel_review_cycle(
             proposal_revision=str(proposal_revision),
             proposal_hash=cycle_hash,
             master_blueprint_text=snapshot.master_blueprint_text,
+            current_blueprint_text=snapshot.current_blueprint_text,
+            current_blueprint_hash=current_bp_hash,
+            current_blueprint_available=current_bp_available,
             project_facts_text=snapshot.project_facts_text,
             team_text=snapshot.team_text,
             architecture_text=snapshot.architecture_text,
@@ -507,6 +546,7 @@ def run_parallel_panel_review_cycle(
             scientific_review=results[ProposalRole.SCIENTIFIC_REVIEWER],
             implementation_review=results[ProposalRole.PROPOSAL_ENGINEER],
             red_team_review=results[ProposalRole.RED_TEAM_REVIEWER],
+            current_blueprint_hash=current_bp_hash,
         )
     except ValueError as exc:
         return _finish(ProposalPanelOutcome.PANEL_FAILED, str(exc))
@@ -607,6 +647,24 @@ def run_panel_consensus_round(
     workspace = Path(workspace)
     master_path = workspace / "03_PROPOSAL" / "MASTER_PROPOSAL.md"
 
+    # Session 021B: the consensus round is READ-ONLY against BOTH documents.
+    # Whenever the living Blueprint is present (dual mode), its EXACT frozen
+    # bytes are fingerprinted BEFORE the three calls and re-verified after
+    # the join beside the master — a mutation of either document fails the
+    # round closed: no matrix, no readiness, no artifacts.
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    dual = current_bp_path.is_file()
+    blueprint_hash_before = ""
+    if dual:
+        try:
+            blueprint_hash_before = proposal_fingerprint(current_bp_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"pre-consensus CURRENT_BLUEPRINT fingerprint failed: {exc}"
+            ) from exc
+
     missing = [r.value for r in REVIEW_SEQUENCE if r not in consensus_drivers]
     if missing:
         raise RuntimeError(
@@ -634,6 +692,8 @@ def run_panel_consensus_round(
         source_lines: list[str] = [
             "### 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md",
             source_snapshot.master_blueprint_text.strip() or "[UNAVAILABLE]",
+            "### 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md (LIVING project design)",
+            source_snapshot.current_blueprint_text.strip() or "[UNAVAILABLE]",
             "### 01_OFFICIAL/APPLICATION_TEMPLATE.md",
             source_snapshot.application_template_text.strip() or "[UNAVAILABLE]",
         ]
@@ -723,6 +783,22 @@ def run_panel_consensus_round(
             f"({proposal_hash} -> {current_hash}); refusing to build a "
             "matrix over a mixed revision."
         )
+    # Session 021B: the LIVING Blueprint is equally read-only — the frozen
+    # bytes fingerprinted before the calls must have survived verbatim.
+    if dual:
+        try:
+            blueprint_hash_after = proposal_fingerprint(current_bp_path)
+        except OSError as exc:
+            raise RuntimeError(
+                f"post-consensus CURRENT_BLUEPRINT fingerprint failed: {exc}"
+            ) from exc
+        if blueprint_hash_after != blueprint_hash_before:
+            raise RuntimeError(
+                f"CURRENT_BLUEPRINT changed during the consensus round "
+                f"({blueprint_hash_before} -> {blueprint_hash_after}); the "
+                "consensus round is READ-ONLY against BOTH documents and "
+                "nothing is accepted over a mutated living Blueprint."
+            )
 
     matrix = build_consensus_matrix(
         iteration_number=iteration_number,
@@ -730,6 +806,7 @@ def run_panel_consensus_round(
         proposal_revision=str(proposal_revision),
         source_pack_id=docket.source_pack_id,
         consensus_results=results,
+        docket=docket,
     )
 
     assessments = [results[role].readiness_assessment for role in REVIEW_SEQUENCE]

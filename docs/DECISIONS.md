@@ -2049,3 +2049,49 @@ twice.
 **Consequence.** A crashed or closed application loses at most the
 in-flight stage; spend is capped by construction; the operator, not the
 machine, decides when AI runs again.
+
+## D-077 — The Blueprint/Proposal are a VERSIONED PAIR: immutable original, ASTRA-only living Blueprint, all-or-rollback pair commit
+
+**Date:** 2026-10-04 (Session 021)
+**Status:** Accepted
+
+**Context.** The production workflow changes from
+BLUEPRINT → PROPOSAL → revise-proposal to a versioned PAIR: the
+proposal must evolve the underlying DESIGN (Blueprint) and the PROPOSAL
+text together, while the imported original stays immutable provenance and
+no half-committed pair may ever be accepted durable state.
+
+**Decision.**
+1. `00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md` is the IMMUTABLE ORIGINAL —
+   no AI run ever writes it; drift is a typed error
+   (`original_mutated`). `00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md` is the
+   LIVING design: initialized with the EXACT canonical bytes of the
+   original (import hook + deterministic legacy migration), written ONLY
+   by the ASTRA/ORCHESTRATOR runtime integration. State:
+   `05_CONTROL/BLUEPRINT_STATE.json`.
+2. Every evaluator finding/patch declares a typed TARGET
+   (`PROPOSAL` / `BLUEPRINT` / `BOTH`) validated fail-closed by the review
+   parser and preserved through aggregation, docket, consensus matrix and
+   the chair context. Consensus values stay unchanged.
+3. When the chair revises either document the runtime performs an
+   ALL-OR-ROLLBACK PAIR COMMIT (`proposal/document_pair.py`): validate →
+   stage both → snapshot → replace (blueprint then proposal; a second
+   failure restores the first from its exact bytes) → write
+   `05_CONTROL/DOCUMENT_PAIR_STATE.json` LAST as the commit marker. The
+   filesystem gives no two-file atomic rename; the manifest's existence IS
+   the committed state.
+4. Review freshness binds the PAIR: the latest bundle carries the reviewed
+   `current_blueprint_hash`; a change to EITHER document makes reviews
+   stale. Dual fields are optional everywhere — legacy single-document
+   workspaces and callers keep the exact prior contract.
+5. Codex reasoning effort is wired ONLY through the verified installed-CLI
+   contract (`-c model_reasoning_effort=<level>`, levels
+   minimal/low/medium/high/xhigh), validated fail-closed at the driver and
+   carried only in `SessionRequest.extra`; no invented flags, no model
+   catalogue. Codex session RESUME stays operator-explicit over real
+   discovered session ids.
+
+**Consequences.** ASTRA must consciously evaluate BOTH documents every
+round (byte-identical is a valid outcome); the campaign can never continue
+from a half-committed pair; the UI renders living-Blueprint and
+document-pair state from durable artifacts only.

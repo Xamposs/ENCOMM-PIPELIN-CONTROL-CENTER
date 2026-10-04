@@ -373,11 +373,17 @@ def execute_review_call(
         )
 
     # -- strict parse (fail closed) ---------------------------------------
+    # Session 021A: whenever the living pair is present the dual-document
+    # contract is ACTIVE and a NEW model answer MUST declare every finding
+    # target explicitly (legacy stored artifacts still load with the
+    # default-PROPOSAL contract).
+    dual_pair_active = packet_has_living_blueprint(packet)
     try:
         parsed = parse_proposal_review(
             prompt_result.text,
             expected_role=role,
             expected_iteration=packet.iteration_number,
+            require_document_target=dual_pair_active,
         )
     except ProposalReviewParseError as exc:
         return _report(
@@ -440,6 +446,49 @@ def execute_review_call(
             driver_id=getattr(driver, "driver_id", ""),
         )
 
+    # -- gate 3b (Session 021A): LIVING Blueprint immutability AFTER the call
+    # Reviewers are read-only against BOTH living documents; in dual mode a
+    # mutated CURRENT_BLUEPRINT poisons the execution exactly like a mutated
+    # master.  The workspace root is derived from the master's contract path
+    # (03_PROPOSAL/MASTER_PROPOSAL.md → workspace root).
+    if packet_has_living_blueprint(packet):
+        bp_path = (
+            Path(master_proposal_path).parent.parent
+            / "00_SOURCE_OF_TRUTH"
+            / "CURRENT_BLUEPRINT.md"
+        )
+        bp_expected = str(getattr(packet, "current_blueprint_hash", "") or "").strip()
+        try:
+            bp_hash_after = proposal_fingerprint(bp_path)
+        except OSError as exc:
+            return _report(
+                outcome=ProposalReviewOutcome.MUTATION_DETECTED,
+                proposal_hash=hash_before,
+                session_id=session_id,
+                result=parsed,
+                error=f"post-review CURRENT_BLUEPRINT fingerprint failed: {exc}",
+                raw_excerpt=_bounded_excerpt(prompt_result.text),
+                state_advanced=False,
+                driver_id=getattr(driver, "driver_id", ""),
+            )
+        if bp_hash_after != bp_expected:
+            return _report(
+                outcome=ProposalReviewOutcome.MUTATION_DETECTED,
+                proposal_hash=hash_before,
+                proposal_hash_after=bp_hash_after,
+                session_id=session_id,
+                result=parsed,
+                error=(
+                    "CURRENT_BLUEPRINT.md changed during the review "
+                    "(write-authority violation): "
+                    f"{bp_expected} -> {bp_hash_after}; reviewer result "
+                    "refused, state NOT advanced."
+                ),
+                raw_excerpt=_bounded_excerpt(prompt_result.text),
+                state_advanced=False,
+                driver_id=getattr(driver, "driver_id", ""),
+            )
+
     # -- completed: the CALLER owns any state advance -----------------------
     # The machine-free core reports COMPLETED with the parsed result; the
     # phase graph is advanced by run_review (sequential) or the panel's
@@ -454,6 +503,73 @@ def execute_review_call(
         state_advanced=False,
         new_phase=None,
         driver_id=getattr(driver, "driver_id", ""),
+    )
+
+
+def validate_codex_resume_target(
+    driver: BaseDriver, resume_id: str, workspace_path: str
+) -> None:
+    """Fail closed when a Codex resume target is NOT this workspace's thread.
+
+    Session 021A: verified ``codex exec resume <id>`` accepts no ``-C`` —
+    the resumed thread INHERITS its original working root.  Resuming a
+    session recorded against a DIFFERENT workspace would silently run the
+    chair outside the proposal workspace, so the chosen real session id is
+    revalidated against the read-only discovery store IMMEDIATELY before
+    the run:
+
+    * the id must exist in the discovery store (a stale/deleted id fails);
+    * its recorded workspace must EXACTLY match (normalised) the proposal
+      workspace.
+
+    Drivers without session discovery (scripted doubles, other engines)
+    are not constrained here — their resume contracts are their own.
+    Raises ``DriverError`` BEFORE any model call on any mismatch.
+    """
+    discover = getattr(driver, "discover_sessions", None)
+    if discover is None:
+        return
+    result = discover()
+    if not result.ok:
+        raise DriverError(
+            f"Codex resume target {resume_id!r} cannot be validated: "
+            f"discovery failed ({result.error or 'no error reported'}); "
+            "refusing to resume unverified."
+        )
+    descriptor = next(
+        (s for s in result.sessions if s.session_id == str(resume_id).strip()),
+        None,
+    )
+    if descriptor is None:
+        raise DriverError(
+            f"Codex resume target {resume_id!r} was not found in the real "
+            "session store (stale id); refusing to resume."
+        )
+    from ..drivers.codex_discovery import normalise_workspace_key
+
+    recorded = normalise_workspace_key(str(descriptor.workspace_path or ""))
+    wanted = normalise_workspace_key(str(workspace_path or ""))
+    if not recorded or recorded != wanted:
+        raise DriverError(
+            f"Codex resume target {resume_id!r} belongs to workspace "
+            f"{descriptor.workspace_path!r}, not the proposal workspace "
+            f"{workspace_path!r}; a resumed thread inherits its original "
+            "working root, so cross-workspace resume is REFUSED."
+        )
+
+
+def packet_has_living_blueprint(packet: Any) -> bool:
+    """True when the packet was built over the LIVING Blueprint (dual mode).
+
+    The review packet carries ``current_blueprint_available=True`` exactly
+    when the runtime supplied CURRENT_BLUEPRINT.md — the dual-document
+    contract is then ACTIVE for this call (strict target requirement).
+    Packets without the attribute (older doubles/legacy callers) are
+    legacy-mode.
+    """
+    return bool(
+        getattr(packet, "current_blueprint_available", False)
+        and str(getattr(packet, "current_blueprint_hash", "") or "").strip()
     )
 
 
@@ -527,6 +643,18 @@ def _session_request(
         workspace_path = str(proposal_workspace_path)
     else:
         workspace_path = str(getattr(packet, "workspace_path", "") or "")
+    # Session 021: the operator's per-role reasoning effort rides ONLY in the
+    # SessionRequest extra — the Codex driver consumes and validates it, every
+    # other engine ignores unknown extra keys (their own config namespaces are
+    # separate), so a Hermes run can never receive a Codex flag.
+    extra: dict[str, Any] = {
+        "proposal_role": packet.role.value,
+        "proposal_iteration": packet.iteration_number,
+    }
+    if agent_config is not None:
+        effort = str(getattr(agent_config, "reasoning_effort", "") or "").strip()
+        if effort:
+            extra["reasoning_effort"] = effort
     return SessionRequest(
         role=_REVIEW_AGENT_ROLE,
         workspace_path=workspace_path,
@@ -534,10 +662,7 @@ def _session_request(
         provider=provider,
         model=model,
         session_policy=session_policy,
-        extra={
-            "proposal_role": packet.role.value,
-            "proposal_iteration": packet.iteration_number,
-        },
+        extra=extra,
     )
 
 

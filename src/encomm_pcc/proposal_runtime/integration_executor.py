@@ -51,6 +51,10 @@ from typing import Any, Optional
 
 from ..drivers.base import BaseDriver
 from ..domain.enums import AgentRole, SessionPolicy
+from ..proposal.document_pair import (
+    DocumentPairStateError,
+    commit_document_pair,
+)
 from ..proposal.enums import ProposalPhase
 from ..proposal.fingerprint import proposal_fingerprint
 from ..proposal.integration_models import ProposalIntegrationResult
@@ -64,6 +68,7 @@ from ..proposal.integration_parser import (
     ProposalIntegrationParseError,
     parse_proposal_integration,
 )
+from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
 from ..proposal.review_aggregation import INTEGRATION_BRIEF_SCHEMA
 from ..proposal.source_snapshot import load_review_snapshot
 from ..proposal.state_machine import ProposalStateMachine
@@ -78,7 +83,10 @@ from .master_writer import (
     replace_master_proposal,
 )
 from .review_artifacts import ArtifactConflictError, BRIEF_FILENAME
-from .version_freeze_post import freeze_post_integration_version
+from .version_freeze_post import (
+    freeze_post_integration_blueprint_version,
+    freeze_post_integration_version,
+)
 
 __all__ = [
     "INTEGRATION_BRIEF_SCHEMA",
@@ -112,6 +120,10 @@ class ProposalIntegrationExecutionReport:
     iteration_number: int
     input_proposal_hash: str = ""
     output_proposal_hash: str = ""
+    #: Session 021: the committed living-Blueprint hash (dual path only).
+    output_blueprint_hash: str = ""
+    #: Session 021: the deterministic pair revision id (dual path only).
+    pair_revision_id: str = ""
     proposal_revision: str = ""
     state_before: ProposalPhase = ProposalPhase.INTEGRATION
     state_after: ProposalPhase = ProposalPhase.INTEGRATION
@@ -143,6 +155,8 @@ class ProposalIntegrationExecutionReport:
             "iteration_number": self.iteration_number,
             "input_proposal_hash": self.input_proposal_hash,
             "output_proposal_hash": self.output_proposal_hash,
+            "output_blueprint_hash": self.output_blueprint_hash,
+            "pair_revision_id": self.pair_revision_id,
             "proposal_revision": self.proposal_revision,
             "state_before": self.state_before.value,
             "state_after": self.state_after.value,
@@ -252,6 +266,7 @@ def run_integration(
     pre_review_version_path: str = "",
     orchestrator_agent_config: Optional[ProposalAgentConfig] = None,
     extra_instructions: str = "",
+    source_pack_id: str = "",
 ) -> ProposalIntegrationExecutionReport:
     """Run ONE INTEGRATION operation — fail closed throughout.
 
@@ -278,6 +293,11 @@ def run_integration(
     readiness reach ASTRA through this seam WITHOUT changing the strict
     integration parser contract.  Empty by default (byte-identical packets
     for existing callers).
+
+    Session 021B: ``source_pack_id`` (optional) is the REAL source-pack
+    identity the panel/chair operated on; on the dual write path it is
+    PRESERVED into the committed ``DOCUMENT_PAIR_STATE`` manifest.  Empty
+    (legacy/standalone callers) keeps the previous manifest shape.
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -404,6 +424,20 @@ def run_integration(
             ProposalIntegrationOutcome.STALE_INPUT,
             f"bounded source snapshot could not be loaded: {exc}",
         )
+    # Session 021: the DUAL-DOCUMENT contract activates whenever the living
+    # Blueprint exists and is readable — the chair then gets BOTH documents
+    # and must consciously evaluate both every round.  A missing/corrupt
+    # living Blueprint degrades safely to the legacy single-document path.
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    dual = False
+    current_bp_hash = ""
+    if current_bp_path.is_file() and snapshot.current_blueprint_available:
+        try:
+            current_bp_hash = proposal_fingerprint(current_bp_path)
+            dual = True
+        except OSError:
+            dual = False
+            current_bp_hash = ""
     brief_text = json.dumps(brief, indent=2, sort_keys=True, ensure_ascii=False)
     try:
         previous_findings_text = _render_previous_findings(previous_findings)
@@ -439,6 +473,10 @@ def run_integration(
     source_lines.append(
         snapshot.master_blueprint_text.strip() or "[UNAVAILABLE]"
     )
+    source_lines.append("### 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md (LIVING project design)")
+    source_lines.append(
+        snapshot.current_blueprint_text.strip() or "[UNAVAILABLE]"
+    )
     source_lines.append("### 00_SOURCE_OF_TRUTH/PROJECT_FACTS.md")
     source_lines.append(snapshot.project_facts_text.strip() or "[UNAVAILABLE]")
     source_lines.append("### 00_SOURCE_OF_TRUTH/TEAM.md")
@@ -463,6 +501,9 @@ def run_integration(
                     snapshot.official_requirements_available
                 ),
                 previous_findings_text=previous_findings_text,
+                current_blueprint_text=snapshot.current_blueprint_text,
+                current_blueprint_hash=current_bp_hash,
+                current_blueprint_available=dual,
             )
         )
     except ValueError as exc:
@@ -486,6 +527,13 @@ def run_integration(
         # behaviour is hardcoded here: the drivers keep interpreting
         # SessionRequest.
         if orchestrator_agent_config is not None:
+            effort = str(orchestrator_agent_config.reasoning_effort or "").strip()
+            extra = {
+                "proposal_role": "ORCHESTRATOR",
+                "proposal_iteration": iteration_number,
+            }
+            if effort:
+                extra["reasoning_effort"] = effort
             request = SessionRequest(
                 role=_ORCHESTRATOR_AGENT_ROLE,
                 workspace_path=str(workspace),
@@ -493,10 +541,7 @@ def run_integration(
                 provider=str(orchestrator_agent_config.provider or ""),
                 model=str(orchestrator_agent_config.model or ""),
                 session_policy=session_policy,
-                extra={
-                    "proposal_role": "ORCHESTRATOR",
-                    "proposal_iteration": iteration_number,
-                },
+                extra=extra,
             )
         else:
             request = SessionRequest(
@@ -508,7 +553,17 @@ def run_integration(
                     "proposal_iteration": iteration_number,
                 },
             )
-        session = orchestrator_driver.start_session(request)
+        # Session 021A: the PERSISTENT CHAIR contract — the operator's
+        # explicit RESUME_SELECTED_SESSION choice is honoured EXACTLY like
+        # every other proposal runtime path (the proven _resume_session_id
+        # contract): never silently fall back to a fresh session.
+        from .review_executor import _resume_session_id
+
+        resume_id = _resume_session_id(orchestrator_agent_config, orchestrator_driver)
+        if resume_id:
+            session = orchestrator_driver.resume_session(resume_id, request)
+        else:
+            session = orchestrator_driver.start_session(request)
         handle = orchestrator_driver.send_prompt(session, packet.prompt_text)
         prompt_result = orchestrator_driver.wait_for_completion(handle, timeout_s)
     except Exception as exc:  # DriverError hierarchy + defensive plain errors
@@ -546,6 +601,7 @@ def run_integration(
             raw_text,
             expected_iteration=iteration_number,
             expected_input_hash=input_hash,
+            expected_input_blueprint_hash=current_bp_hash,
         )
     except ProposalIntegrationParseError as exc:
         return _fail(
@@ -577,51 +633,157 @@ def run_integration(
             driver_id=driver_id,
             session_id=session_id,
         )
+    if dual:
+        # Session 021: the LIVING Blueprint must ALSO be unchanged during
+        # the chair call — the same write-authority guard as the master.
+        try:
+            bp_before_write_hash = proposal_fingerprint(current_bp_path)
+        except OSError as exc:
+            return _fail(
+                ProposalIntegrationOutcome.MUTATION_DETECTED,
+                f"pre-write CURRENT_BLUEPRINT fingerprint failed: {exc}",
+                driver_id=driver_id,
+                session_id=session_id,
+            )
+        if bp_before_write_hash != current_bp_hash:
+            return _fail(
+                ProposalIntegrationOutcome.MUTATION_DETECTED,
+                f"CURRENT_BLUEPRINT changed during the ORCHESTRATOR call "
+                f"({current_bp_hash} -> {bp_before_write_hash}); the parsed "
+                "output is REFUSED.",
+                driver_id=driver_id,
+                session_id=session_id,
+            )
 
-    # -- 9. atomic master replacement (runtime-owned write authority) --------
-    try:
+    # -- 9. runtime-owned write (the model NEVER touches files) --------------
+    if dual:
+        # Session 021A core invariant: a DUAL workspace ALWAYS commits the
+        # document pair.  "No Blueprint change" is the chair's explicit
+        # decision — the CURRENT bytes are re-committed verbatim
+        # (byte-identical Blueprint + changed Proposal, or both unchanged,
+        # are valid committed pairs; never a proposal-only fallback).
+        from ..proposal.living_blueprint import current_blueprint_path
+
+        revised_bp_text = (
+            parsed.revised_blueprint
+            if parsed.revised_blueprint is not None
+            and parsed.revised_blueprint.strip()
+            else current_blueprint_path(workspace).read_bytes().decode("utf-8")
+        )
+        # DUAL DOCUMENT PAIR COMMIT — all-or-rollback.  The parsed pair is
+        # written together with ONE durable manifest as the commit marker;
+        # any failure restores the touched document(s) from their exact
+        # snapshots and the machine stays at INTEGRATION (fail closed).
+        try:
+            pair_report = commit_document_pair(
+                workspace=workspace,
+                state_machine=state_machine,
+                iteration_number=iteration_number,
+                revised_blueprint_text=revised_bp_text,
+                revised_proposal_text=parsed.revised_proposal,
+                # Session 021B: the panel's real source-pack identity is
+                # PRESERVED into the committed pair manifest (never an
+                # empty placeholder when the caller carries one).
+                source_pack_id=str(source_pack_id or ""),
+                proposal_revision=str(proposal_revision),
+            )
+        except DocumentPairStateError as exc:
+            outcome = (
+                ProposalIntegrationOutcome.STALE_INPUT
+                if exc.reason in {"missing_current_blueprint", "missing_master_proposal"}
+                else ProposalIntegrationOutcome.WRITE_FAILED
+            )
+            return _fail(
+                outcome,
+                f"dual-document pair commit refused ({exc.reason}): {exc}",
+                driver_id=driver_id,
+                session_id=session_id,
+            )
+        new_hash = pair_report.proposal_hash
+        new_blueprint_hash = pair_report.blueprint_hash
+        pair_changed = (
+            pair_report.blueprint_changed or pair_report.proposal_changed
+        )
+        report.output_proposal_hash = new_hash
+        report.output_blueprint_hash = new_blueprint_hash
+        report.pair_revision_id = pair_report.pair_revision_id
+        report.changed = pair_changed
+        post_freeze_exception: Optional[Exception] = None
+        try:
+            frozen_path = freeze_post_integration_version(
+                workspace=workspace,
+                iteration_number=iteration_number,
+                proposal_revision=str(proposal_revision),
+                previous_hash=input_hash,
+                new_bytes=_written_bytes(write_report=None, parsed=parsed),
+                new_hash=new_hash,
+                integration_artifact_path=str(
+                    integration_result_path(workspace, iteration_number)
+                ),
+                pre_review_version_path=str(pre_review_version_path or ""),
+            )
+        except Exception as exc:  # VersionFreezeError or OSError
+            post_freeze_exception = exc
+        if post_freeze_exception is None:
+            # Session 021: the post-integration LIVING Blueprint freeze —
+            # same exact-bytes discipline; a Blueprint kept byte-identical
+            # is frozen as such (hash equality recorded).  The frozen bytes
+            # are the COMMITTED bytes (chair's revision or the verbatim
+            # current text), re-derived through the same canonical EOF.
+            committed_bp_text = revised_bp_text
+            blueprint_data = committed_bp_text.encode("utf-8")
+            if not blueprint_data.endswith(b"\n"):
+                blueprint_data += b"\n"
+            try:
+                freeze_post_integration_blueprint_version(
+                    workspace=workspace,
+                    iteration_number=iteration_number,
+                    blueprint_bytes=blueprint_data,
+                    blueprint_hash=new_blueprint_hash,
+                    previous_blueprint_hash=current_bp_hash,
+                    pair_revision_id=pair_report.pair_revision_id,
+                )
+            except Exception as exc:  # VersionFreezeError or OSError
+                post_freeze_exception = exc
+    else:
         write_report = replace_master_proposal(
             workspace=workspace,
             state_machine=state_machine,
             expected_current_hash=input_hash,
             revised_proposal_text=parsed.revised_proposal,
         )
-    except MasterProposalWriteError as exc:
-        if exc.reason == "stale_input":
-            return _fail(
-                ProposalIntegrationOutcome.STALE_INPUT, str(exc),
-                driver_id=driver_id, session_id=session_id,
+        new_hash = write_report.new_hash
+        new_blueprint_hash = ""
+        report.output_proposal_hash = new_hash
+        report.changed = write_report.changed
+        post_freeze_exception = None
+        try:
+            frozen_path = freeze_post_integration_version(
+                workspace=workspace,
+                iteration_number=iteration_number,
+                proposal_revision=str(proposal_revision),
+                previous_hash=input_hash,
+                new_bytes=_written_bytes(write_report, parsed),
+                new_hash=new_hash,
+                integration_artifact_path=str(
+                    integration_result_path(workspace, iteration_number)
+                ),
+                pre_review_version_path=str(pre_review_version_path or ""),
             )
-        return _fail(
-            ProposalIntegrationOutcome.WRITE_FAILED, str(exc),
-            driver_id=driver_id, session_id=session_id,
-        )
+        except Exception as exc:  # VersionFreezeError or OSError
+            post_freeze_exception = exc
 
-    new_hash = write_report.new_hash
-    report.output_proposal_hash = new_hash
-    report.changed = write_report.changed
-
-    # -- 10. post-integration evidence (BEFORE the state advance) ------------
-    try:
-        frozen_path = freeze_post_integration_version(
-            workspace=workspace,
-            iteration_number=iteration_number,
-            proposal_revision=str(proposal_revision),
-            previous_hash=input_hash,
-            new_bytes=_written_bytes(write_report, parsed),
-            new_hash=new_hash,
-            integration_artifact_path=str(
-                integration_result_path(workspace, iteration_number)
-            ),
-            pre_review_version_path=str(pre_review_version_path or ""),
-        )
-    except Exception as exc:  # VersionFreezeError or OSError
-        # PARTIAL SUCCESS, surfaced honestly: the master write DID happen.
+    if post_freeze_exception is not None:
+        # PARTIAL SUCCESS, surfaced honestly: the document write(s) DID
+        # happen (single master write or committed pair), but the durable
+        # post-integration evidence refused — the machine legitimately
+        # walks to HARD_GATE_VALIDATION and the conflict is surfaced.
         state_machine.transition_to(ProposalPhase.HARD_GATE_VALIDATION)
         return _fail(
             ProposalIntegrationOutcome.ARTIFACT_CONFLICT,
             f"master proposal was atomically replaced ({input_hash} -> "
-            f"{new_hash}) but the post-integration freeze failed: {exc}",
+            f"{new_hash}) but the post-integration freeze failed: "
+            f"{post_freeze_exception}",
             driver_id=driver_id,
             session_id=session_id,
         )
@@ -635,7 +797,7 @@ def run_integration(
         result=parsed,
         runtime_outcome=(
             ProposalIntegrationOutcome.COMPLETED_CHANGED.value
-            if write_report.changed
+            if report.changed
             else ProposalIntegrationOutcome.COMPLETED_NO_CHANGE.value
         ),
         driver_id=driver_id,
@@ -662,7 +824,7 @@ def run_integration(
     state_machine.transition_to(ProposalPhase.HARD_GATE_VALIDATION)
     report.outcome = (
         ProposalIntegrationOutcome.COMPLETED_CHANGED
-        if write_report.changed
+        if report.changed
         else ProposalIntegrationOutcome.COMPLETED_NO_CHANGE
     )
     report.state_advanced = True
@@ -674,7 +836,7 @@ def run_integration(
 
 
 def _written_bytes(
-    write_report: MasterProposalWriteReport,
+    write_report: Optional[MasterProposalWriteReport],
     parsed: ProposalIntegrationResult,
 ) -> bytes:
     """The exact bytes written into MASTER_PROPOSAL.md.
@@ -682,6 +844,9 @@ def _written_bytes(
     Re-derived from the parsed text with the writer's ONE canonical EOF
     policy (append ``\\n`` when absent) — identical to what the writer
     hashed (both over the same transformation of the same text).
+    ``write_report`` is None on the dual-document pair-commit path (the
+    pair writer hashes the same canonical transformation itself); only
+    the parsed text matters either way.
     """
     data = parsed.revised_proposal.encode("utf-8")
     if not data.endswith(b"\n"):

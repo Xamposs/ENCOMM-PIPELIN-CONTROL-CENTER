@@ -44,8 +44,10 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .enums import (
+    FINDING_TARGETS,
     PROPOSAL_REVIEW_VERDICTS,
     ProposalFindingSeverity,
+    ProposalFindingTarget,
     ProposalReviewVerdict,
     ProposalRole,
 )
@@ -212,7 +214,9 @@ def _bounded_ref_list(value: Any, *, field: str) -> list[str]:
 # --------------------------------------------------------------------------
 # findings / patches
 # --------------------------------------------------------------------------
-def _validate_findings(raw: Any) -> list[ProposalFinding]:
+def _validate_findings(
+    raw: Any, *, require_document_target: bool = False
+) -> list[ProposalFinding]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -278,6 +282,32 @@ def _validate_findings(raw: Any) -> list[ProposalFinding]:
             limit=MAX_STRING_CHARS,
             field="finding.suggested_change",
         )
+        target_raw = item.get("target")
+        if target_raw is None:
+            if require_document_target:
+                # Session 021A: a NEW dual-document answer may NOT omit the
+                # target — legacy artifacts default, live dual answers fail.
+                raise ProposalReviewParseError(
+                    "missing_target",
+                    "finding 'target' is REQUIRED in the dual-document "
+                    "contract (PROPOSAL/BLUEPRINT/BOTH); never inferred.",
+                )
+            # Legacy finding without an explicit target: the pre-Session-021
+            # contract only ever targeted the proposal.
+            target = ProposalFindingTarget.PROPOSAL
+        else:
+            if not isinstance(target_raw, str):
+                raise ProposalReviewParseError(
+                    "unexpected_type", "finding 'target' must be a string"
+                )
+            target_value = target_raw.strip().upper()
+            if target_value not in FINDING_TARGETS:
+                raise ProposalReviewParseError(
+                    "invalid_target",
+                    "finding target must be one of "
+                    f"{sorted(FINDING_TARGETS)}, got {target_raw!r}",
+                )
+            target = ProposalFindingTarget(target_value)
         findings.append(
             ProposalFinding(
                 severity=severity,
@@ -287,12 +317,15 @@ def _validate_findings(raw: Any) -> list[ProposalFinding]:
                 evidence=evidence,
                 source_refs=_bounded_ref_list(item.get("source_refs"), field="finding.source_refs"),
                 suggested_change=suggested,
+                target=target,
             )
         )
     return findings
 
 
-def _validate_patches(raw: Any) -> list[ProposalPatch]:
+def _validate_patches(
+    raw: Any, *, require_document_target: bool = False
+) -> list[ProposalPatch]:
     if raw is None:
         return []
     if not isinstance(raw, list):
@@ -353,6 +386,31 @@ def _validate_patches(raw: Any) -> list[ProposalPatch]:
                 "invalid_confidence",
                 f"patch 'confidence' must be within [0.0, 1.0], got {confidence}",
             )
+        # Session 021A: DISTINCT names — the patch's section string and the
+        # document target are two different concepts; reusing `target` for
+        # both clobbered ProposalPatch.target_section with the ENUM.
+        document_target_raw = item.get("target")
+        if document_target_raw is None:
+            if require_document_target:
+                raise ProposalReviewParseError(
+                    "missing_target",
+                    "patch 'target' is REQUIRED in the dual-document "
+                    "contract (PROPOSAL/BLUEPRINT/BOTH); never inferred.",
+                )
+            document_target = ProposalFindingTarget.PROPOSAL
+        else:
+            if not isinstance(document_target_raw, str):
+                raise ProposalReviewParseError(
+                    "unexpected_type", "patch 'target' must be a string"
+                )
+            document_target_value = document_target_raw.strip().upper()
+            if document_target_value not in FINDING_TARGETS:
+                raise ProposalReviewParseError(
+                    "invalid_target",
+                    "patch target must be one of "
+                    f"{sorted(FINDING_TARGETS)}, got {document_target_raw!r}",
+                )
+            document_target = ProposalFindingTarget(document_target_value)
         patches.append(
             ProposalPatch(
                 target_section=target,
@@ -361,6 +419,7 @@ def _validate_patches(raw: Any) -> list[ProposalPatch]:
                 patch_instructions=instructions,
                 source_refs=_bounded_ref_list(item.get("source_refs"), field="patch.source_refs"),
                 confidence=confidence,
+                target=document_target,
             )
         )
     return patches
@@ -370,7 +429,11 @@ def _validate_patches(raw: Any) -> list[ProposalPatch]:
 # schema validation (strict)
 # --------------------------------------------------------------------------
 def _validate(
-    raw: Mapping[str, Any], *, expected_role: ProposalRole, expected_iteration: int
+    raw: Mapping[str, Any],
+    *,
+    expected_role: ProposalRole,
+    expected_iteration: int,
+    require_document_target: bool = False,
 ) -> ProposalReviewResult:
     verdict_raw = raw.get("verdict")
     if not isinstance(verdict_raw, str):
@@ -420,8 +483,14 @@ def _validate(
     summary = _bounded_str(
         raw.get("summary", ""), limit=MAX_SUMMARY_CHARS, field="summary"
     )
-    findings = _validate_findings(raw.get("findings"))
-    patches = _validate_patches(raw.get("proposed_patches"))
+    findings = _validate_findings(
+        raw.get("findings"),
+        require_document_target=require_document_target,
+    )
+    patches = _validate_patches(
+        raw.get("proposed_patches"),
+        require_document_target=require_document_target,
+    )
 
     claims_raw = raw.get("unverified_claims")
     if claims_raw is None:
@@ -489,11 +558,18 @@ def parse_proposal_review(
     *,
     expected_role: ProposalRole,
     expected_iteration: int,
+    require_document_target: bool = False,
 ) -> ProposalReviewResult:
     """Parse untrusted reviewer output into a strict ``ProposalReviewResult``.
 
     Raises :class:`ProposalReviewParseError` on ANY malformed input; it never
     falls back to a lenient interpretation and never fabricates a result.
+
+    Session 021A: ``require_document_target`` (default False = the exact
+    legacy contract) makes an omitted finding/patch ``target`` a
+    ``missing_target`` failure instead of the legacy PROPOSAL default.  The
+    dual-document live review path passes True; legacy stored artifacts keep
+    loading with the default.
     """
     if not isinstance(expected_role, ProposalRole):
         expected_role = ProposalRole(str(expected_role))
@@ -546,6 +622,7 @@ def parse_proposal_review(
             parsed,
             expected_role=expected_role,
             expected_iteration=expected_iteration,
+            require_document_target=require_document_target,
         )
     # The envelope was present but carried no JSON payload at all.
     raise ProposalReviewParseError(

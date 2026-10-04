@@ -136,6 +136,28 @@ HARD OUTPUT RULES:
   the envelope markers inside 'revised_proposal'.
 """
 
+#: Session 021 dual-document output contract addendum — appended ONLY when
+#: the runtime supplied the living Blueprint (hash-activated contract).
+_DUAL_OUTPUT_CONTRACT_ADDENDUM = """\
+DUAL-DOCUMENT RULES (this run includes the LIVING Blueprint):
+
+- 'input_blueprint_hash' is REQUIRED: repeat the input_blueprint_hash given
+  in this prompt EXACTLY (the SHA-256 of the CURRENT_BLUEPRINT.md revision
+  you were shown).
+- 'revised_blueprint' carries your decision for the LIVING Blueprint:
+  either the COMPLETE revised CURRENT_BLUEPRINT.md content (never a diff,
+  never a fragment) when a Blueprint change is justified, or null / ""
+  when NO Blueprint change is justified.  Do not churn the Blueprint just
+  to appear productive — an unchanged Blueprint is a valid, honest answer.
+- You may leave either document byte-identical when no justified change
+  exists, but you must CONSCIOUSLY evaluate BOTH documents every round.
+- 'revised_proposal' is ALWAYS required and always COMPLETE (the full
+  MASTER_PROPOSAL.md content), exactly as the base rules state.
+- External facts are NEVER invented: an unsupported factual change to
+  either document must be expressed as an explicit
+  '[INPUT REQUIRED: ...]' placeholder instead of a fabricated fact.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class ProposalIntegrationInputs:
@@ -158,6 +180,14 @@ class ProposalIntegrationInputs:
     official_requirements_text: str = ""
     official_requirements_available: bool = False
     previous_findings_text: str = ""
+    #: Session 021 DUAL-DOCUMENT inputs.  A non-empty
+    #: ``current_blueprint_hash`` activates the dual contract: the packet
+    #: gains the LIVING PROJECT DESIGN section and the output contract
+    #: requires the Blueprint hash echo + ``revised_blueprint``.  Empty
+    #: hash keeps the exact legacy single-document packet.
+    current_blueprint_text: str = ""
+    current_blueprint_hash: str = ""
+    current_blueprint_available: bool = False
 
 
 class ProposalIntegrationPacket:
@@ -168,6 +198,8 @@ class ProposalIntegrationPacket:
         "prompt_text",
         "iteration_number",
         "input_proposal_hash",
+        "current_blueprint_available",
+        "current_blueprint_hash",
     )
 
     def __init__(
@@ -176,6 +208,8 @@ class ProposalIntegrationPacket:
         prompt_text: str,
         iteration_number: int,
         input_proposal_hash: str,
+        current_blueprint_available: bool = False,
+        current_blueprint_hash: str = "",
     ) -> None:
         #: The packet's addressee is ALWAYS the ORCHESTRATOR (the one
         #: integration authority); carrying it as data keeps the executor's
@@ -184,6 +218,10 @@ class ProposalIntegrationPacket:
         self.prompt_text = prompt_text
         self.iteration_number = iteration_number
         self.input_proposal_hash = input_proposal_hash
+        #: Session 021: dual-document contract evidence — True exactly when
+        #: the runtime supplied the LIVING Blueprint (hash-activated).
+        self.current_blueprint_available = current_blueprint_available
+        self.current_blueprint_hash = current_blueprint_hash
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, ProposalIntegrationPacket):
@@ -260,6 +298,20 @@ def build_integration_packet(
             "official_requirements_available=True requires "
             "official_requirements_text."
         )
+    # Session 021: the dual contract is hash-activated — a living-Blueprint
+    # section without its hash, or a hash without the availability flag,
+    # is a caller programming error, refused before any rendering.
+    dual = bool(inputs.current_blueprint_hash.strip())
+    if dual and not inputs.current_blueprint_available:
+        raise ValueError(
+            "current_blueprint_hash requires "
+            "current_blueprint_available=True (dual-document contract)."
+        )
+    if dual and not (inputs.current_blueprint_text or "").strip():
+        raise ValueError(
+            "current_blueprint_hash requires current_blueprint_text "
+            "(dual-document contract)."
+        )
 
     parts: list[str] = [
         "# PROPOSAL INTEGRATION REQUEST",
@@ -273,20 +325,38 @@ def build_integration_packet(
         f"- proposal_revision: {inputs.proposal_revision or 'UNSPECIFIED'}",
         f"- input_proposal_hash (SHA-256 of the exact revision you are revising): "
         f"{inputs.current_proposal_hash} (echo it EXACTLY)",
-        "",
-        "## CURRENT MASTER PROPOSAL — 03_PROPOSAL/MASTER_PROPOSAL.md (the revision to revise)",
-        "",
-        inputs.current_proposal_text.strip(),
-        "",
-        _section(
-            "INTEGRATION BRIEF — reviewer findings, patches and verdicts",
-            inputs.integration_brief_text,
-        ),
-        _section(
-            "SOURCE OF TRUTH SNAPSHOT — the facts you may never contradict",
-            inputs.source_snapshot_text,
-        ),
     ]
+    if dual:
+        parts.append(
+            f"- input_blueprint_hash (SHA-256 of the exact living Blueprint "
+            f"you are given): {inputs.current_blueprint_hash} (echo it EXACTLY)"
+        )
+    parts.extend(
+        [
+            "",
+            "## CURRENT MASTER PROPOSAL — 03_PROPOSAL/MASTER_PROPOSAL.md (the revision to revise)",
+            "",
+            inputs.current_proposal_text.strip(),
+            "",
+            _section(
+                "INTEGRATION BRIEF — reviewer findings, patches and verdicts",
+                inputs.integration_brief_text,
+            ),
+            _section(
+                "SOURCE OF TRUTH SNAPSHOT — the facts you may never contradict",
+                inputs.source_snapshot_text,
+            ),
+        ]
+    )
+    if dual:
+        parts.append(
+            _section(
+                "LIVING PROJECT DESIGN — CURRENT_BLUEPRINT.md "
+                "(the design you may also revise; the immutable original "
+                "MASTER_BLUEPRINT stays untouched)",
+                inputs.current_blueprint_text,
+            )
+        )
 
     if inputs.official_requirements_available:
         parts.append(
@@ -311,9 +381,15 @@ def build_integration_packet(
     )
 
     parts.append(_INTEGRATION_OUTPUT_CONTRACT)
+    if dual:
+        parts.append(_DUAL_OUTPUT_CONTRACT_ADDENDUM)
 
     return ProposalIntegrationPacket(
         prompt_text="\n".join(parts),
         iteration_number=inputs.iteration_number,
         input_proposal_hash=inputs.current_proposal_hash,
+        current_blueprint_available=dual,
+        current_blueprint_hash=(
+            inputs.current_blueprint_hash if dual else ""
+        ),
     )

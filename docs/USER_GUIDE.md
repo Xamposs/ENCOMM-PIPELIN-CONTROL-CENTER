@@ -237,6 +237,37 @@ armed while it runs (they are boundary requests, not cancellations).
 
 ---
 
+# Part P1 — Living Blueprint + Document Pair + Codex chair (Session 021, v1.5.0)
+
+**The Blueprint/Proposal are now a versioned pair.**
+
+- **MASTER BLUEPRINT (original)** — imported once, NEVER modified by any
+  AI run. Its hash is the provenance anchor (PROJECT INPUTS shows it).
+- **CURRENT / LIVING BLUEPRINT** — created automatically when you import a
+  blueprint (exact copy of the original). Only the ASTRA/ORCHESTRATOR
+  runtime may evolve it; PROJECT INPUTS shows its status, hash and
+  iteration. **DOCUMENT PAIR** shows the last committed iteration +
+  revision id (`05_CONTROL/DOCUMENT_PAIR_STATE.json`).
+- **Targets** — every panel finding now says which document it is about:
+  PROPOSAL (wording), BLUEPRINT (the design must change), BOTH. The PANEL
+  RESULTS tables carry a Target column; the chair sees the same targets.
+- **Reviews go stale when EITHER document changes** — the next panel run
+  re-reviews the new pair automatically.
+- **Codex chair (AGENTS):** pick engine `codex` on a role. Profile and
+  Provider are not applicable; **Model** is editable (type the exact model
+  id your Codex account offers); **Reasoning** selects the per-invocation
+  reasoning effort (DEFAULT, MINIMAL, LOW, MEDIUM, HIGH, XHIGH — verified
+  Codex CLI contract; DEFAULT = Codex's own default). Press **REFRESH**
+  for REAL Codex session discovery (zero model calls): workspace-matched
+  sessions sort first (`[WS]`), other workspaces are marked. To show ASTRA
+  inside the ChatGPT/Codex Desktop app: create your project/thread there
+  in this workspace, press REFRESH, pick the matching session, then set
+  Session Mode to RESUME SELECTED SESSION. Nothing is ever auto-armed:
+  RESUME only happens when you explicitly select it.
+- **Safety** — an all-or-rollback commit guarantees the Blueprint and
+  Proposal always move together; a failed commit restores both documents.
+  The immutable original is verified every run.
+
 # Part P0 — Legacy sequential path (Session 017, unchanged)
 
 The original one-click flow is still available exactly as documented in

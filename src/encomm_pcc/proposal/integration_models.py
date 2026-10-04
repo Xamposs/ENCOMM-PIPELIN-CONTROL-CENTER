@@ -12,7 +12,7 @@ explain reviewer-item → action → reason.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping
+from typing import Any, Mapping, Optional
 
 __all__ = [
     "ProposalIntegrationItem",
@@ -23,7 +23,6 @@ __all__ = [
 INTEGRATION_ITEM_ACTIONS: frozenset[str] = frozenset(
     {"applied", "rejected", "unresolved"}
 )
-
 
 @dataclass(slots=True)
 class ProposalIntegrationItem:
@@ -72,6 +71,13 @@ class ProposalIntegrationResult:
     ``revised_proposal`` is the ONE COMPLETE revised
     ``MASTER_PROPOSAL.md`` content — the runtime (not the model) owns the
     atomic filesystem write of exactly this text.
+
+    Session 021 (dual-document): ``revised_blueprint`` optionally carries
+    the ONE COMPLETE revised ``CURRENT_BLUEPRINT.md`` content.  ``None``
+    means "no Blueprint revision claimed" — the legacy single-document
+    contract.  A Blueprint change must be JUSTIFIED: the runtime records
+    whether the revised text differs from the live living Blueprint, and
+    meaningless churn is the chair's honesty duty, not the parser's.
     """
 
     iteration_number: int
@@ -81,6 +87,12 @@ class ProposalIntegrationResult:
     applied_items: list[ProposalIntegrationItem] = field(default_factory=list)
     rejected_items: list[ProposalIntegrationItem] = field(default_factory=list)
     unresolved_items: list[ProposalIntegrationItem] = field(default_factory=list)
+    #: Session 021: the echoed input CURRENT_BLUEPRINT hash when the chair
+    #: was given the document pair (empty in legacy single-document runs).
+    input_blueprint_hash: str = ""
+    #: Session 021: the COMPLETE revised living Blueprint, or None when the
+    #: chair claims no Blueprint revision.
+    revised_blueprint: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.iteration_number, int) or isinstance(
@@ -95,7 +107,7 @@ class ProposalIntegrationResult:
         self.summary = str(self.summary)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "iteration_number": self.iteration_number,
             "input_proposal_hash": self.input_proposal_hash,
             "revised_proposal": self.revised_proposal,
@@ -104,9 +116,18 @@ class ProposalIntegrationResult:
             "rejected_items": [i.to_dict() for i in self.rejected_items],
             "unresolved_items": [i.to_dict() for i in self.unresolved_items],
         }
+        # Session 021 dual fields — emitted ONLY when the dual contract is
+        # in play, so legacy single-document payloads stay byte-shaped.
+        if self.input_blueprint_hash or self.revised_blueprint is not None:
+            payload["input_blueprint_hash"] = self.input_blueprint_hash
+            payload["revised_blueprint"] = self.revised_blueprint
+        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ProposalIntegrationResult":
+        revised_blueprint = data.get("revised_blueprint")
+        if revised_blueprint is not None and not isinstance(revised_blueprint, str):
+            raise ValueError("revised_blueprint must be a string or null.")
         return cls(
             iteration_number=int(data.get("iteration_number") or 0),
             input_proposal_hash=str(data.get("input_proposal_hash") or ""),
@@ -124,4 +145,6 @@ class ProposalIntegrationResult:
                 ProposalIntegrationItem.from_dict(i)
                 for i in (data.get("unresolved_items") or [])
             ],
+            input_blueprint_hash=str(data.get("input_blueprint_hash") or ""),
+            revised_blueprint=revised_blueprint,
         )

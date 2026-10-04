@@ -392,7 +392,18 @@ class TestAgents:
             __import__("encomm_pcc.ui.proposal_mode", fromlist=["x"]).__file__
         ).read_text(encoding="utf-8")
         lowered = source.lower()
-        for provider in ("codex", "glm", "minimax", "claude", "openai", "anthropic"):
+        # Session 021: the panel legitimately wires Codex ENGINE behavior
+        # (discovery, reasoning, session resume per the brief), so the
+        # bare-word ban is obsolete.  The SHARPENED invariant: exactly ONE
+        # quoted engine-id literal exists (the _CODEX_ENGINE_ID constant) —
+        # every runtime comparison goes through the constant — and
+        # provider/model NAMES remain banned outright (never a catalogue).
+        assert lowered.count('"codex"') == 1, (
+            "the engine id literal 'codex' must exist exactly once (the "
+            "_CODEX_ENGINE_ID constant); all other uses go through the "
+            "constant"
+        )
+        for provider in ("glm", "minimax", "claude", "openai", "anthropic"):
             assert provider not in lowered
 
     def test_12b_session_id_kept_only_for_session_capable_engines(self, qapp, tmp_path):

@@ -34,6 +34,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .living_blueprint import CURRENT_BLUEPRINT_RELPATH
 from .workspace import MASTER_PROPOSAL_RELPATH
 
 __all__ = [
@@ -57,6 +58,7 @@ OFFICIAL_NORMALIZED_DIRNAME = "01_OFFICIAL/NORMALIZED"
 #: Every file the snapshot reader may look at (canonical POSIX relpaths).
 SOURCE_SNAPSHOT_RELPATHS: tuple[str, ...] = (
     "00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md",
+    CURRENT_BLUEPRINT_RELPATH,
     "00_SOURCE_OF_TRUTH/PROJECT_FACTS.md",
     "00_SOURCE_OF_TRUTH/TEAM.md",
     "00_SOURCE_OF_TRUTH/ARCHITECTURE.md",
@@ -114,8 +116,14 @@ class ReviewSourceSnapshot:
     official_requirements_unavailable_reason: str = ""
     #: Per-source availability evidence (relpath → reason when unavailable).
     unavailable_sources: dict[str, str] = field(default_factory=dict)
-    #: Session 019: ``01_OFFICIAL/APPLICATION_TEMPLATE.md`` (canonical).
+    #: Session 019: the OFFICIAL APPLICATION TEMPLATE (canonical).
     application_template_text: str = ""
+    #: Session 021: the LIVING authoritative project design
+    #: (CURRENT_BLUEPRINT.md).  Optional with the same honest-unavailability
+    #: contract as every other non-required source.
+    current_blueprint_text: str = ""
+    current_blueprint_available: bool = False
+    current_blueprint_unavailable_reason: str = ""
     #: Session 019: normalized official documents,
     #: ``((stable-name, text), ...)`` sorted by name — never a dict (the
     #: packet order must be deterministic across runs).
@@ -187,6 +195,9 @@ def load_review_snapshot(
     blueprint = _read_bounded(
         _p("00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md"), max_chars=blueprint_cap
     )
+    # Session 021: the LIVING blueprint is read with the same raised cap as
+    # the original — it is the primary design under review.
+    current_bp = _read_bounded(_p(CURRENT_BLUEPRINT_RELPATH), max_chars=blueprint_cap)
     facts = _read_bounded(_p("00_SOURCE_OF_TRUTH/PROJECT_FACTS.md"))
     team = _read_bounded(_p("00_SOURCE_OF_TRUTH/TEAM.md"))
     architecture = _read_bounded(_p("00_SOURCE_OF_TRUTH/ARCHITECTURE.md"))
@@ -195,6 +206,7 @@ def load_review_snapshot(
     unavailable: dict[str, str] = {}
     for rel, src in (
         ("00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md", blueprint),
+        (CURRENT_BLUEPRINT_RELPATH, current_bp),
         ("00_SOURCE_OF_TRUTH/PROJECT_FACTS.md", facts),
         ("00_SOURCE_OF_TRUTH/TEAM.md", team),
         ("00_SOURCE_OF_TRUTH/ARCHITECTURE.md", architecture),
@@ -243,6 +255,9 @@ def load_review_snapshot(
     return ReviewSourceSnapshot(
         master_proposal_text=master.text,
         master_blueprint_text=blueprint.text if blueprint.available else "",
+        current_blueprint_text=current_bp.text if current_bp.available else "",
+        current_blueprint_available=current_bp.available,
+        current_blueprint_unavailable_reason=current_bp.unavailable_reason,
         project_facts_text=facts.text if facts.available else "",
         team_text=team.text if team.available else "",
         architecture_text=architecture.text if architecture.available else "",

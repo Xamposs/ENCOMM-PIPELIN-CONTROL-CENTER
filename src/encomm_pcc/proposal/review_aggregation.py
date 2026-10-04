@@ -151,6 +151,9 @@ class ProposalReviewBundle:
     iteration_number: int
     proposal_revision: str
     proposal_hash: str
+    #: Session 021: the LIVING Blueprint hash this iteration reviewed (empty
+    #: in legacy single-document bundles).  Freshness binds the PAIR.
+    current_blueprint_hash: str = field(default="", kw_only=True)
     scientific_review: ProposalReviewResult
     implementation_review: ProposalReviewResult
     red_team_review: ProposalReviewResult
@@ -174,6 +177,7 @@ class ProposalReviewBundle:
             "iteration_number": self.iteration_number,
             "proposal_revision": self.proposal_revision,
             "proposal_hash": self.proposal_hash,
+            "current_blueprint_hash": self.current_blueprint_hash,
             "scientific_review": self.scientific_review.to_dict(),
             "implementation_review": self.implementation_review.to_dict(),
             "red_team_review": self.red_team_review.to_dict(),
@@ -197,6 +201,7 @@ class ProposalReviewBundle:
             iteration_number=int(data.get("iteration_number") or 0),
             proposal_revision=str(data.get("proposal_revision") or ""),
             proposal_hash=str(data.get("proposal_hash") or ""),
+            current_blueprint_hash=str(data.get("current_blueprint_hash") or ""),
             scientific_review=ProposalReviewResult.from_dict(
                 data.get("scientific_review") or {}
             ),
@@ -243,6 +248,7 @@ def aggregate_reviews(
     scientific_review: ProposalReviewResult,
     implementation_review: ProposalReviewResult,
     red_team_review: ProposalReviewResult,
+    current_blueprint_hash: str = "",
 ) -> ProposalReviewBundle:
     """Aggregate the three reviewer results of ONE iteration — fail closed.
 
@@ -252,6 +258,10 @@ def aggregate_reviews(
     results can never reach this function through the review loop (the loop
     re-verifies the proposal hash before aggregating); the role/iteration
     checks here are the second line of defence.
+
+    Session 021: ``current_blueprint_hash`` records the living-Blueprint
+    revision the three results reviewed (empty = legacy single-document
+    bundle) so review freshness can bind the DOCUMENT PAIR.
     """
     if (
         not isinstance(iteration_number, int)
@@ -326,6 +336,7 @@ def aggregate_reviews(
         iteration_number=iteration_number,
         proposal_revision=proposal_revision,
         proposal_hash=proposal_hash,
+        current_blueprint_hash=str(current_blueprint_hash or ""),
         scientific_review=scientific_review,
         implementation_review=implementation_review,
         red_team_review=red_team_review,

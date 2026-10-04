@@ -88,6 +88,7 @@ from .review_executor import (
 )
 from .version_freeze import (
     VersionFreezeError,
+    freeze_pre_review_blueprint_version,
     freeze_pre_review_version,
 )
 
@@ -254,6 +255,7 @@ def _validate_sources(
 def _build_packet(
     role: ProposalRole,
     *,
+    workspace: Path,
     snapshot: ReviewSourceSnapshot,
     iteration_number: int,
     proposal_revision: str,
@@ -267,12 +269,34 @@ def _build_packet(
     iteration see identical proposal/source/iteration fields, so reviewer
     independence is structural.
     """
+    # Session 021: the LIVING blueprint hash binds the reviewed pair for the
+    # sequential cycle too (read-only fingerprint; empty when unavailable).
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = Path(workspace).joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    if (
+        isinstance(current_bp_path, Path)
+        and current_bp_path.is_file()
+        and snapshot.current_blueprint_available
+    ):
+        try:
+            current_bp_hash = proposal_fingerprint(current_bp_path)
+        except OSError:
+            current_bp_hash = ""
+        current_bp_available = True
+    else:
+        current_bp_hash = ""
+        current_bp_available = False
+
     inputs = ProposalReviewInputs(
         proposal_text=snapshot.master_proposal_text,
         iteration_number=iteration_number,
         proposal_revision=proposal_revision,
         proposal_hash=proposal_hash,
         master_blueprint_text=snapshot.master_blueprint_text,
+        current_blueprint_text=snapshot.current_blueprint_text,
+        current_blueprint_hash=current_bp_hash,
+        current_blueprint_available=current_bp_available,
         project_facts_text=snapshot.project_facts_text,
         team_text=snapshot.team_text,
         architecture_text=snapshot.architecture_text,
@@ -400,6 +424,33 @@ def run_review_cycle(
         return _finish(report, state_machine, started)
     report.frozen_version_path = str(frozen_path)
 
+    # Session 021: fingerprint the LIVING Blueprint, freeze it beside the
+    # proposal (no-op when absent), and bind the PAIR into the bundle.
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    if current_bp_path.is_file():
+        snapshot_bp_available = True
+        try:
+            current_bp_hash = proposal_fingerprint(current_bp_path)
+        except OSError:
+            current_bp_hash = ""
+            snapshot_bp_available = False
+    else:
+        current_bp_hash = ""
+        snapshot_bp_available = False
+    try:
+        freeze_pre_review_blueprint_version(
+            workspace=workspace,
+            iteration_number=iteration_number,
+            expected_hash=current_bp_hash if snapshot_bp_available else None,
+        )
+    except (VersionFreezeError, OSError) as exc:
+        report.outcome = ProposalReviewCycleOutcome.ARTIFACT_CONFLICT
+        report.error = f"blueprint version freeze failed: {exc}"
+        report.state_after = state_machine.phase
+        return _finish(report, state_machine, started)
+
     # Validation succeeded: walk the explicit SOURCE_VALIDATION →
     # SCIENTIFIC_REVIEW edge (required before the first reviewer; the
     # executor's phase/role guard demands the machine sits exactly at the
@@ -498,6 +549,7 @@ def run_review_cycle(
 
         packet = _build_packet(
             role,
+            workspace=workspace,
             snapshot=snapshot,
             iteration_number=iteration_number,
             proposal_revision=str(proposal_revision),
@@ -637,6 +689,7 @@ def run_review_cycle(
             scientific_review=results[ProposalRole.SCIENTIFIC_REVIEWER],
             implementation_review=results[ProposalRole.PROPOSAL_ENGINEER],
             red_team_review=results[ProposalRole.RED_TEAM_REVIEWER],
+            current_blueprint_hash=current_bp_hash,
         )
     except ValueError as exc:
         _fail_closed(

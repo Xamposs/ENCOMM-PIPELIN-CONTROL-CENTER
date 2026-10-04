@@ -51,13 +51,37 @@ class ReviewFreshnessError(RuntimeError):
 
 @dataclass(slots=True)
 class ReviewFreshness:
-    """Deterministic outcome of the review-freshness check."""
+    """Deterministic outcome of the review-freshness check.
 
-    #: True when the current proposal hash equals the latest reviewed hash.
+    Session 021: ``blueprint_current`` and ``reviewed_blueprint_hash``
+    extend the proposal-only check to the DOCUMENT PAIR.  A review is
+    CURRENT only when BOTH hashes still match; ``is_current`` already
+    accounts for the Blueprint whenever the latest bundle carries a
+    Blueprint hash (dual runs).  Legacy bundles (no Blueprint hash) keep
+    the exact proposal-only semantics.
+    """
+
+    #: True when the current proposal hash equals the latest reviewed hash
+    #: (AND, for dual runs, the current living-Blueprint hash equals the
+    #: reviewed one).
     is_current: bool
     current_proposal_hash: str
     latest_reviewed_hash: str
     latest_iteration: int
+    #: Session 021: current CURRENT_BLUEPRINT.md hash ("" when the workspace
+    #: has no living Blueprint or it became unreadable).
+    current_blueprint_hash: str = ""
+    #: Session 021: the living-Blueprint hash recorded in the latest bundle
+    #: ("" for legacy single-document bundles).
+    reviewed_blueprint_hash: str = ""
+
+    @property
+    def blueprint_current(self) -> bool:
+        """True when no Blueprint binding exists OR the hash still matches."""
+        return (
+            not self.reviewed_blueprint_hash
+            or self.reviewed_blueprint_hash == self.current_blueprint_hash
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -65,6 +89,9 @@ class ReviewFreshness:
             "current_proposal_hash": self.current_proposal_hash,
             "latest_reviewed_hash": self.latest_reviewed_hash,
             "latest_iteration": self.latest_iteration,
+            "current_blueprint_hash": self.current_blueprint_hash,
+            "reviewed_blueprint_hash": self.reviewed_blueprint_hash,
+            "blueprint_current": self.blueprint_current,
         }
 
 
@@ -114,14 +141,22 @@ def evaluate_review_freshness(
     *,
     workspace: Path,
     current_proposal_hash: str,
+    current_blueprint_hash: str | None = None,
 ) -> ReviewFreshness:
-    """Compare the CURRENT proposal hash against the latest reviewed hash.
+    """Compare the CURRENT pair hashes against the latest reviewed pair.
 
     ``current_proposal_hash`` is the caller-fingerprinted SHA-256 of the
     exact current master-proposal bytes (pass the value computed for the
     hard-gate decision; it is not re-read here).  Raises
     :class:`ReviewFreshnessError` when no review evidence exists or the
     latest bundle cannot be read — never silently treating that as fresh.
+
+    Session 021 DUAL FRESHNESS: the review is current ONLY if BOTH the
+    proposal hash AND (when the latest bundle carries a living-Blueprint
+    binding) the current ``CURRENT_BLUEPRINT.md`` hash still match.  When
+    ``current_blueprint_hash`` is not supplied it is derived here from the
+    workspace (empty when the file is absent/unreadable).  A bundle with no
+    Blueprint binding (legacy) keeps the exact proposal-only semantics.
     """
     workspace = Path(workspace)
     latest, bundle = _latest_bundle(workspace)
@@ -131,9 +166,28 @@ def evaluate_review_freshness(
             "latest_bundle_missing_hash",
             "the latest review bundle carries no proposal_hash.",
         )
+    reviewed_blueprint_hash = str(bundle.get("current_blueprint_hash") or "")
+    if current_blueprint_hash is None:
+        from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+        bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+        derived: str = ""
+        if bp_path.is_file():
+            try:
+                derived = proposal_fingerprint(bp_path)
+            except OSError:
+                derived = ""
+        current_blueprint_hash = derived
+    proposal_current = reviewed_hash == str(current_proposal_hash).strip().lower()
+    blueprint_matches = (
+        not reviewed_blueprint_hash
+        or reviewed_blueprint_hash == str(current_blueprint_hash).strip().lower()
+    )
     return ReviewFreshness(
-        is_current=(reviewed_hash == str(current_proposal_hash).strip().lower()),
+        is_current=proposal_current and blueprint_matches,
         current_proposal_hash=str(current_proposal_hash).strip().lower(),
         latest_reviewed_hash=reviewed_hash,
         latest_iteration=latest,
+        current_blueprint_hash=str(current_blueprint_hash or ""),
+        reviewed_blueprint_hash=reviewed_blueprint_hash,
     )
