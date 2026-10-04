@@ -33,14 +33,22 @@ from ..proposal.fingerprint import PROPOSAL_HASH_ALGORITHM
 from .version_freeze import VersionFreezeError, format_iteration_name
 
 __all__ = [
+    "POST_INTEGRATION_BLUEPRINT_MD_SUFFIX",
+    "POST_INTEGRATION_BLUEPRINT_SIDECAR_SUFFIX",
     "POST_INTEGRATION_MD_SUFFIX",
     "POST_INTEGRATION_SIDECAR_SUFFIX",
+    "freeze_post_integration_blueprint_version",
     "freeze_post_integration_version",
 ]
 
 #: Canonical zero-padded post-integration file suffixes.
 POST_INTEGRATION_MD_SUFFIX = "_post_integration.md"
 POST_INTEGRATION_SIDECAR_SUFFIX = "_post_integration.json"
+
+#: Session 021: post-integration living-Blueprint freeze suffixes
+#: (``iteration_001_post_integration_blueprint.*``).
+POST_INTEGRATION_BLUEPRINT_MD_SUFFIX = "_post_integration_blueprint.md"
+POST_INTEGRATION_BLUEPRINT_SIDECAR_SUFFIX = "_post_integration_blueprint.json"
 
 
 def _atomic_write_bytes(target: Path, data: bytes) -> None:
@@ -77,6 +85,71 @@ def _read_bytes_if_exists(path: Path) -> bytes | None:
 def _canonical_sidecar_bytes(contract: dict[str, Any]) -> bytes:
     text = json.dumps(contract, indent=2, sort_keys=True, ensure_ascii=False)
     return (text + "\n").encode("utf-8")
+
+
+def freeze_post_integration_blueprint_version(
+    *,
+    workspace: Path,
+    iteration_number: int,
+    blueprint_bytes: bytes,
+    blueprint_hash: str,
+    previous_blueprint_hash: str = "",
+    pair_revision_id: str = "",
+) -> Path:
+    """Freeze the EXACT post-integration LIVING Blueprint bytes (Session 021).
+
+    ``blueprint_bytes`` MUST be the bytes written into CURRENT_BLUEPRINT.md
+    by the pair commit and ``blueprint_hash`` their SHA-256.  Safe reuse /
+    conflict rules mirror :func:`freeze_post_integration_version`.  A
+    ``blueprint_hash`` equal to ``previous_blueprint_hash`` is legitimate
+    (the chair kept the Blueprint unchanged) and is recorded as such.
+    """
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    workspace = Path(workspace)
+    if not blueprint_bytes:
+        raise VersionFreezeError(
+            "empty_blueprint_post_bytes",
+            "post-integration blueprint freeze requires the exact bytes.",
+        )
+    if not str(blueprint_hash or "").strip():
+        raise VersionFreezeError(
+            "missing_blueprint_post_hash",
+            "post-integration blueprint freeze requires the new hash.",
+        )
+
+    stem = format_iteration_name(iteration_number)
+    versions_dir = workspace / "06_VERSIONS"
+    md_path = versions_dir / f"{stem}{POST_INTEGRATION_BLUEPRINT_MD_SUFFIX}"
+    sidecar_path = (
+        versions_dir / f"{stem}{POST_INTEGRATION_BLUEPRINT_SIDECAR_SUFFIX}"
+    )
+
+    contract = {
+        "blueprint_hash": str(blueprint_hash),
+        "current_blueprint_relpath": CURRENT_BLUEPRINT_RELPATH,
+        "hash_algorithm": PROPOSAL_HASH_ALGORITHM,
+        "iteration_number": int(iteration_number),
+        "pair_revision_id": str(pair_revision_id or ""),
+        "previous_blueprint_hash": str(previous_blueprint_hash or ""),
+    }
+
+    existing_md = _read_bytes_if_exists(md_path)
+    existing_sidecar = _read_bytes_if_exists(sidecar_path)
+    if existing_md is not None or existing_sidecar is not None:
+        expected_sidecar = _canonical_sidecar_bytes(contract)
+        if existing_md != blueprint_bytes or existing_sidecar != expected_sidecar:
+            raise VersionFreezeError(
+                "blueprint_post_version_conflict",
+                f"{md_path.name} already exists with different content; "
+                "refusing to overwrite a frozen post-integration living-"
+                "Blueprint version.",
+            )
+        return md_path  # exact safe reuse
+
+    _atomic_write_bytes(md_path, blueprint_bytes)
+    _atomic_write_json(sidecar_path, contract)
+    return md_path
 
 
 def freeze_post_integration_version(

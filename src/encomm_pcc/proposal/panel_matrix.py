@@ -21,7 +21,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
-from .enums import ProposalRole
+from .enums import FINDING_TARGETS, ProposalRole
 from .review_aggregation import ProposalReviewBundle
 from .panel_contracts import ConsensusJudgement, PanelConsensusResult
 
@@ -51,7 +51,12 @@ _EVALUATOR_ORDER: tuple[ProposalRole, ...] = (
 
 @dataclass(slots=True)
 class PanelDocketItem:
-    """One docket entry — one aggregated finding or patch proposal."""
+    """One docket entry — one aggregated finding or patch proposal.
+
+    Session 021: ``target`` is the finding/patch's document target
+    (PROPOSAL / BLUEPRINT / BOTH) preserved from the parsed review result —
+    the whole chain (docket → consensus → chair context) keeps it.
+    """
 
     item_id: str               # F001… / P001…
     kind: str                  # "finding" | "patch"
@@ -63,6 +68,17 @@ class PanelDocketItem:
     evidence_refs: list[str] = field(default_factory=list)
     #: Index into the bundle's original list (traceability).
     source_index: int = -1
+    #: Session 021 dual-document target (validated whitelist value).
+    target: str = "PROPOSAL"
+
+    def __post_init__(self) -> None:
+        target = str(self.target or "PROPOSAL").strip().upper()
+        if target not in FINDING_TARGETS:
+            raise ValueError(
+                f"docket item target must be one of {sorted(FINDING_TARGETS)}; "
+                f"got {self.target!r}."
+            )
+        self.target = target
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -75,6 +91,7 @@ class PanelDocketItem:
             "message": self.message,
             "evidence_refs": list(self.evidence_refs),
             "source_index": self.source_index,
+            "target": self.target,
         }
 
 
@@ -123,6 +140,7 @@ class PanelDocket:
                         str(r) for r in (item.get("evidence_refs") or [])
                     ],
                     source_index=int(item.get("source_index") if item.get("source_index") is not None else -1),
+                    target=str(item.get("target") or "PROPOSAL"),
                 )
                 for item in (data.get("items") or [])
             ],
@@ -142,6 +160,9 @@ class ConsensusItemRow:
     blocks_acceptance: bool            # ANY evaluator says the item blocks
     proposed_resolutions: list[str]    # deterministic evaluator order
     unresolved: bool
+    #: Session 021: the document target carried from the docket item
+    #: (PROPOSAL / BLUEPRINT / BOTH) — empty only in legacy artifacts.
+    target: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,6 +175,7 @@ class ConsensusItemRow:
             "blocks_acceptance": self.blocks_acceptance,
             "proposed_resolutions": list(self.proposed_resolutions),
             "unresolved": self.unresolved,
+            "target": self.target,
         }
 
 
@@ -221,6 +243,7 @@ class PanelConsensusMatrix:
                         str(r) for r in (row.get("proposed_resolutions") or [])
                     ],
                     unresolved=bool(row.get("unresolved") or False),
+                    target=str(row.get("target") or ""),
                 )
                 for row in (data.get("rows") or [])
             ],
@@ -251,6 +274,7 @@ def build_panel_docket(
                 message=aggregated.finding.message,
                 evidence_refs=list(aggregated.finding.source_refs),
                 source_index=index,
+                target=aggregated.finding.target.value,
             )
         )
     patch_no = 0
@@ -267,6 +291,7 @@ def build_panel_docket(
                 message=aggregated.patch.rationale,
                 evidence_refs=list(aggregated.patch.source_refs),
                 source_index=index,
+                target=aggregated.patch.target.value,
             )
         )
     return PanelDocket(
@@ -287,7 +312,8 @@ def docket_text(docket: PanelDocket) -> str:
         severity = f" [{item.severity}]" if item.severity else ""
         lines.append(
             f"- {item.item_id}{severity} ({item.kind}; by "
-            f"{item.source_reviewer}; section: {item.section or 'n/a'}): "
+            f"{item.source_reviewer}; section: {item.section or 'n/a'}; "
+            f"target: {item.target}): "
             f"{item.message}"
         )
     return "\n".join(lines)
@@ -300,6 +326,7 @@ def build_consensus_matrix(
     proposal_revision: str,
     source_pack_id: str,
     consensus_results: Mapping[ProposalRole, PanelConsensusResult],
+    docket: PanelDocket | None = None,
 ) -> PanelConsensusMatrix:
     """Aggregate the three consensus answers into the deterministic matrix.
 
@@ -308,6 +335,10 @@ def build_consensus_matrix(
     evaluators are not unanimous: any DISAGREE, PARTIAL or
     INSUFFICIENT_EVIDENCE vote makes the item unresolved.  Unanimity on
     AGREE resolves the item.  NOTHING here decides which content is true.
+
+    Session 021: when ``docket`` is supplied, every row carries the docket
+    item's document target (PROPOSAL / BLUEPRINT / BOTH) so the chair
+    context and the UI can see WHICH document each consensus row is about.
     """
     missing = [role for role in _EVALUATOR_ORDER if role not in consensus_results]
     if missing:
@@ -330,6 +361,12 @@ def build_consensus_matrix(
     for role in _EVALUATOR_ORDER:
         for judgement in consensus_results[role].judgements:
             judgements.setdefault(judgement.item_id, {})[role.value] = judgement
+
+    # Session 021: docket item targets by id (the docket is the authoritative
+    # source of the target; an id absent from the docket carries no target).
+    targets_by_id: dict[str, str] = {}
+    if docket is not None:
+        targets_by_id = {item.item_id: item.target for item in docket.items}
 
     rows: list[ConsensusItemRow] = []
     for item_id in sorted(judgements):
@@ -373,6 +410,7 @@ def build_consensus_matrix(
                 blocks_acceptance=blocks,
                 proposed_resolutions=resolutions,
                 unresolved=unresolved,
+                target=targets_by_id.get(item_id, ""),
             )
         )
     return PanelConsensusMatrix(

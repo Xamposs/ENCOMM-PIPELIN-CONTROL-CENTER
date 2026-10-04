@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "encomm-pipeline-control-center"
-version = "1.4.0"
+version = "1.5.0"
 description = "Local Windows desktop supervisor for AI coding pipelines (v1.0: Simple Mode + Continuous Run)."
 readme = "README.md"
 requires-python = ">=3.11"

@@ -36,16 +36,24 @@ from ..proposal.fingerprint import (
 )
 
 __all__ = [
+    "BLUEPRINT_PRE_REVIEW_MD_SUFFIX",
+    "BLUEPRINT_PRE_REVIEW_SIDECAR_SUFFIX",
     "VERSION_FREEZE_MD_SUFFIX",
     "VERSION_FREEZE_SIDECAR_SUFFIX",
     "VersionFreezeError",
     "format_iteration_name",
+    "freeze_pre_review_blueprint_version",
     "freeze_pre_review_version",
 ]
 
 #: Canonical zero-padded iteration directory/file stem (``iteration_001``).
 VERSION_FREEZE_MD_SUFFIX = "_pre_review.md"
 VERSION_FREEZE_SIDECAR_SUFFIX = "_pre_review.json"
+
+#: Session 021: the LIVING Blueprint is frozen beside the proposal using the
+#: same deterministic naming scheme (``iteration_001_pre_review_blueprint``).
+BLUEPRINT_PRE_REVIEW_MD_SUFFIX = "_pre_review_blueprint.md"
+BLUEPRINT_PRE_REVIEW_SIDECAR_SUFFIX = "_pre_review_blueprint.json"
 
 
 class VersionFreezeError(RuntimeError):
@@ -168,6 +176,75 @@ def freeze_pre_review_version(
     _atomic_write_bytes(md_path, data)
     _atomic_write_json(sidecar_path, contract)
     return md_path, cycle_hash
+
+
+def freeze_pre_review_blueprint_version(
+    *,
+    workspace: Path,
+    iteration_number: int,
+    expected_hash: str | None = None,
+) -> tuple[Path, str]:
+    """Freeze the exact LIVING Blueprint bytes for ONE review iteration.
+
+    Session 021: ``06_VERSIONS/<iteration>_pre_review_blueprint.md`` holds
+    the exact ``CURRENT_BLUEPRINT.md`` bytes under review, with the same
+    sidecar discipline as the proposal freeze.  The living Blueprint is
+    OPTIONAL: when the file does not exist the freeze is a no-op returning
+    ``(blueprint_md_path, "")`` — legacy workspaces keep working untouched.
+    An existing living Blueprint that fails to read or mismatches
+    ``expected_hash`` fails closed.
+    """
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    workspace = Path(workspace)
+    bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    stem = format_iteration_name(iteration_number)
+    versions_dir = workspace / "06_VERSIONS"
+    md_path = versions_dir / f"{stem}{BLUEPRINT_PRE_REVIEW_MD_SUFFIX}"
+    sidecar_path = versions_dir / f"{stem}{BLUEPRINT_PRE_REVIEW_SIDECAR_SUFFIX}"
+
+    if not bp_path.is_file():
+        # No living Blueprint in this workspace: nothing to freeze (the
+        # dual-document contract is off).  Never create evidence for a
+        # document that does not exist.
+        return md_path, ""
+
+    try:
+        data = bp_path.read_bytes()
+    except OSError as exc:
+        raise VersionFreezeError(
+            "unreadable_blueprint", f"cannot read {bp_path}: {exc}"
+        ) from exc
+    bp_hash = proposal_fingerprint_from_bytes(data)
+    if expected_hash is not None and bp_hash != expected_hash:
+        raise VersionFreezeError(
+            "blueprint_hash_mismatch",
+            f"living Blueprint hash changed under the cycle: expected "
+            f"{expected_hash}, read {bp_hash}.",
+        )
+
+    contract = {
+        "blueprint_hash": bp_hash,
+        "current_blueprint_relpath": CURRENT_BLUEPRINT_RELPATH,
+        "hash_algorithm": PROPOSAL_HASH_ALGORITHM,
+        "iteration_number": iteration_number,
+    }
+
+    existing_md = _read_bytes_if_exists(md_path)
+    existing_sidecar = _read_bytes_if_exists(sidecar_path)
+    if existing_md is not None or existing_sidecar is not None:
+        expected_sidecar = _canonical_sidecar_bytes(contract)
+        if existing_md != data or existing_sidecar != expected_sidecar:
+            raise VersionFreezeError(
+                "blueprint_version_conflict",
+                f"{md_path.name} already exists with different content; "
+                "refusing to overwrite a frozen living-Blueprint version.",
+            )
+        return md_path, bp_hash  # exact safe reuse
+
+    _atomic_write_bytes(md_path, data)
+    _atomic_write_json(sidecar_path, contract)
+    return md_path, bp_hash
 
 
 def proposal_fingerprint_from_bytes(data: bytes) -> str:

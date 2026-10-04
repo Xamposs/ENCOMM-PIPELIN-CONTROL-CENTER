@@ -64,6 +64,18 @@ __all__ = ["DEFAULT_PROMPT_TIMEOUT_S", "CodexDriver"]
 #: legitimately works for minutes; this bounds a hung provider call.
 DEFAULT_PROMPT_TIMEOUT_S = 900.0
 
+#: Session 021 — the reasoning-effort levels the VERIFIED installed-CLI
+#: contract accepts for the official ``model_reasoning_effort`` config key
+#: (config reference: minimal | low | medium | high | xhigh; xhigh is
+#: model-dependent — a model that rejects a level surfaces the engine's
+#: own error through the normal failure path).  Per-invocation override:
+#: ``-c model_reasoning_effort="<level>"`` on both ``exec`` and
+#: ``exec resume``.  Not a model catalogue: these are the values of the
+#: CLI's own config key.
+REASONING_EFFORT_LEVELS: frozenset[str] = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh"}
+)
+
 #: Flipped to True only after REAL CALL 1 (new session) returned the expected
 #: marker with exit code 0 through this exact argv path.  Verified 2026-09-23:
 #: session 01a0cb24-8500-7652-a4cf-52d167569c5e answered
@@ -158,6 +170,18 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
         # Fail fast on an unsafe sandbox before anything is recorded.
         _validated_sandbox(sandbox)
         extra_args = _validated_extra_args(extra.get("extra_args") or ())
+        # Session 021: optional per-invocation reasoning effort.  ONLY the
+        # Codex driver consumes this key (an engine that does not support it
+        # never sees it); a non-empty value is validated fail-closed against
+        # the VERIFIED level whitelist BEFORE any session exists.
+        reasoning_effort = str(extra.get("reasoning_effort") or "").strip().lower()
+        if reasoning_effort and reasoning_effort not in REASONING_EFFORT_LEVELS:
+            raise DriverError(
+                f"Refusing reasoning_effort {reasoning_effort!r}; the verified "
+                "Codex contract accepts one of: "
+                + ", ".join(sorted(REASONING_EFFORT_LEVELS))
+                + " (or empty for the engine default)."
+            )
 
         session = DriverSession(
             driver_id=self.driver_id,
@@ -174,6 +198,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
                 "session_policy": request.session_policy.value,
                 "skip_git_repo_check": bool(extra.get("skip_git_repo_check", False)),
                 "extra_args": list(extra_args),
+                "reasoning_effort": reasoning_effort,
             },
         )
         return self._set_session(session)
@@ -221,6 +246,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
 
         timeout = DEFAULT_PROMPT_TIMEOUT_S if timeout_s is None else float(timeout_s)
         started = time.monotonic()
+        reasoning_effort = str(session.metadata.get("reasoning_effort") or "")
         try:
             argv = self._build_argv(
                 resumed=resumed,
@@ -231,6 +257,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
                 model=model,
                 skip_git_check=skip_git_check,
                 extra_args=extra_args,
+                reasoning_effort=reasoning_effort,
             )
         except CodexCliError as exc:
             return self._record_result(
@@ -359,7 +386,20 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
         model: str,
         skip_git_check: bool,
         extra_args: list[str],
+        reasoning_effort: str = "",
     ) -> list[str]:
+        # Session 021: the verified per-invocation reasoning override —
+        # ``-c model_reasoning_effort="<level>"`` is accepted by BOTH the
+        # exec and exec-resume subcommands (single `key=value` token), and
+        # applies to resumed threads too (a fresh turn's model parameters).
+        effort_args: list[str] = []
+        if reasoning_effort:
+            if reasoning_effort not in REASONING_EFFORT_LEVELS:
+                raise CodexCliError(
+                    f"Refusing reasoning effort {reasoning_effort!r}; allowed: "
+                    + ", ".join(sorted(REASONING_EFFORT_LEVELS)) + "."
+                )
+            effort_args = [f"model_reasoning_effort={reasoning_effort}"]
         if resumed:
             # Verified live (0.154.0): exec resume takes NO -s/-C — the thread
             # inherits the original session's sandbox and working root.
@@ -368,7 +408,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
                 session_id=str(session_id or ""),
                 model=model,
                 skip_git_repo_check=skip_git_check,
-                extra_args=extra_args,
+                extra_args=[*extra_args, *effort_args],
             )
         return build_exec_argv(
             executable=executable,
@@ -376,7 +416,7 @@ class CodexDriver(BaseDriver, SessionDiscoverer):
             workspace=workspace,
             model=model,
             skip_git_repo_check=skip_git_check,
-            extra_args=extra_args,
+            extra_args=[*extra_args, *effort_args],
         )
 
 

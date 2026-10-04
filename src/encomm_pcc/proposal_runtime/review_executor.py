@@ -527,6 +527,18 @@ def _session_request(
         workspace_path = str(proposal_workspace_path)
     else:
         workspace_path = str(getattr(packet, "workspace_path", "") or "")
+    # Session 021: the operator's per-role reasoning effort rides ONLY in the
+    # SessionRequest extra — the Codex driver consumes and validates it, every
+    # other engine ignores unknown extra keys (their own config namespaces are
+    # separate), so a Hermes run can never receive a Codex flag.
+    extra: dict[str, Any] = {
+        "proposal_role": packet.role.value,
+        "proposal_iteration": packet.iteration_number,
+    }
+    if agent_config is not None:
+        effort = str(getattr(agent_config, "reasoning_effort", "") or "").strip()
+        if effort:
+            extra["reasoning_effort"] = effort
     return SessionRequest(
         role=_REVIEW_AGENT_ROLE,
         workspace_path=workspace_path,
@@ -534,10 +546,7 @@ def _session_request(
         provider=provider,
         model=model,
         session_policy=session_policy,
-        extra={
-            "proposal_role": packet.role.value,
-            "proposal_iteration": packet.iteration_number,
-        },
+        extra=extra,
     )
 
 

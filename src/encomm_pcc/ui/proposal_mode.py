@@ -158,6 +158,7 @@ _ITERATION_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
 #: Hermes engine id (selectors only apply to it; other engines keep the
 #: plain editable fields).
 _HERMES_ENGINE_ID = "hermes"
+_CODEX_ENGINE_ID = "codex"
 
 #: Operator-facing role labels (brief §7 — ASTRA is the panel chair label).
 _ROLE_LABELS: dict[ProposalRole, str] = {
@@ -309,6 +310,16 @@ class ProposalModePanel(QWidget):
         inputs_form.addWidget(self.blueprint_label, 1, 0, 1, 2)
         inputs_form.addWidget(self.import_blueprint_button, 1, 2, 1, 3)
 
+        # Session 021: LIVING Blueprint + DOCUMENT PAIR status labels.
+        self.current_blueprint_label = QLabel(
+            "CURRENT / LIVING BLUEPRINT: MISSING"
+        )
+        self.current_blueprint_label.setWordWrap(True)
+        inputs_form.addWidget(self.current_blueprint_label, 8, 0, 1, 5)
+        self.pair_state_label = QLabel("DOCUMENT PAIR: not committed")
+        self.pair_state_label.setWordWrap(True)
+        inputs_form.addWidget(self.pair_state_label, 9, 0, 1, 5)
+
         self.template_label = QLabel("OFFICIAL TEMPLATE: MISSING")
         self.import_template_button = QPushButton("IMPORT TEMPLATE")
         self.import_template_button.clicked.connect(self._on_import_template)
@@ -369,6 +380,15 @@ class ProposalModePanel(QWidget):
             model.setEditable(True)
             model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             model.setToolTip("Profile-derived model (editable)")
+            reasoning = QComboBox()
+            reasoning.addItem("DEFAULT", "")
+            for level in ("minimal", "low", "medium", "high", "xhigh"):
+                reasoning.addItem(level.upper(), level)
+            reasoning.setToolTip(
+                "Per-invocation reasoning effort — meaningful ONLY for the "
+                "codex engine (verified CLI contract). DEFAULT lets Codex "
+                "use its own default."
+            )
             session_mode = QComboBox()
             session_mode.addItem(_SESSION_MODE_NEW, "NEW_SESSION")
             session_mode.addItem(_SESSION_MODE_RESUME, "RESUME_SELECTED_SESSION")
@@ -392,11 +412,13 @@ class ProposalModePanel(QWidget):
             agents_form.addWidget(provider, row, 6)
             agents_form.addWidget(QLabel("Model:"), row, 7)
             agents_form.addWidget(model, row, 8)
-            agents_form.addWidget(QLabel("Session Mode:"), row, 9)
-            agents_form.addWidget(session_mode, row, 10)
-            agents_form.addWidget(QLabel("Session:"), row, 11)
-            agents_form.addWidget(session, row, 12)
-            agents_form.addWidget(refresh, row, 13)
+            agents_form.addWidget(QLabel("Reasoning:"), row, 9)
+            agents_form.addWidget(reasoning, row, 10)
+            agents_form.addWidget(QLabel("Session Mode:"), row, 11)
+            agents_form.addWidget(session_mode, row, 12)
+            agents_form.addWidget(QLabel("Session:"), row, 13)
+            agents_form.addWidget(session, row, 14)
+            agents_form.addWidget(refresh, row, 15)
             engine.activated.connect(
                 lambda _idx, r=role: self._on_role_engine_changed(r)
             )
@@ -409,6 +431,9 @@ class ProposalModePanel(QWidget):
             model.editTextChanged.connect(
                 lambda _t, r=role: self._on_role_config_text_changed(r)
             )
+            reasoning.activated.connect(
+                lambda _idx, r=role: self._on_role_config_text_changed(r)
+            )
             session_mode.activated.connect(
                 lambda _idx, r=role: self._on_role_session_mode_changed(r)
             )
@@ -420,6 +445,7 @@ class ProposalModePanel(QWidget):
                 "profile": profile,
                 "provider": provider,
                 "model": model,
+                "reasoning": reasoning,
                 "session_mode": session_mode,
                 "session": session,
                 "refresh": refresh,
@@ -733,8 +759,43 @@ class ProposalModePanel(QWidget):
 
     def _on_import_blueprint(self) -> None:
         paths = self._import_paths_dialog("Import MASTER BLUEPRINT", multi=False)
-        if paths:
-            self._run_import(paths, "master_blueprint", "MASTER_BLUEPRINT.md")
+        if not paths:
+            return
+        self._run_import(paths, "master_blueprint", "MASTER_BLUEPRINT.md")
+        # Session 021: after a SUCCESSFUL blueprint import the LIVING
+        # Blueprint is initialized with the EXACT canonical bytes (CURRENT :=
+        # MASTER) so the document pair exists from day one.  A failed import
+        # leaves the workspace untouched (the note keeps the import error).
+        ws = self._workspace()
+        if ws is None or not ws.is_dir():
+            return
+        master_path = ws / "00_SOURCE_OF_TRUTH" / "MASTER_BLUEPRINT.md"
+        try:
+            master_ok = (
+                master_path.is_file() and bool(master_path.read_bytes().strip())
+            )
+        except OSError:
+            master_ok = False
+        if not master_ok:
+            return
+        try:
+            from ..proposal.living_blueprint import ensure_current_blueprint
+
+            _state, migrated = ensure_current_blueprint(ws)
+        except Exception as exc:
+            self._action_note = (
+                f"{self._action_note} LIVING BLUEPRINT INIT FAILED: {exc}"
+                if self._action_note
+                else f"LIVING BLUEPRINT INIT FAILED: {exc}"
+            )
+            self.refresh_status()
+            return
+        if migrated:
+            self._action_note = (
+                f"{self._action_note} — LIVING Blueprint initialized "
+                "(CURRENT := MASTER exact bytes)."
+            )
+        self.refresh_status()
 
     def _on_import_template(self) -> None:
         paths = self._import_paths_dialog("Import OFFICIAL TEMPLATE", multi=False)
@@ -867,10 +928,22 @@ class ProposalModePanel(QWidget):
         row = self._role_rows[role]
         engine = str(row["engine"].currentData() or "")
         is_hermes = engine == _HERMES_ENGINE_ID
+        is_codex = engine == _CODEX_ENGINE_ID
         for key in ("profile", "session_mode", "session", "refresh"):
             widget = row[key]
-            widget.setEnabled(is_hermes)
-        if not is_hermes:
+            widget.setEnabled(is_hermes or is_codex)
+        if is_codex:
+            # Session 021: Codex carries NO profile/provider (N/A for the
+            # engine contract) but an EDITABLE model and real session
+            # discovery.  Stale Hermes bindings are invalidated exactly like
+            # an engine switch away: session selection AND resume mode reset
+            # (an unconstructable RESUME-without-id is never armed).
+            row["profile"].clear()
+            row["provider"].clear()
+            row["session"].setCurrentIndex(0)
+            row["session_mode"].setCurrentIndex(0)
+            self._populate_codex_sessions(role)
+        elif not is_hermes:
             # Engine away from Hermes: clear the incompatible Hermes session
             # binding AND the resume mode (a RESUME mode with no id would be
             # an unconstructable config — fail-closed, same class as the
@@ -882,6 +955,57 @@ class ProposalModePanel(QWidget):
             self._on_refresh_hermes_selectors(role)
             return
         self._on_role_config_text_changed(role)
+
+    def _populate_codex_sessions(self, role: ProposalRole) -> None:
+        """Session 021: REAL Codex session discovery — zero model calls.
+
+        Uses the existing read-only ``CodexSessionDiscovery`` (via the
+        driver's ``SessionDiscoverer`` contract).  Titles are display-only;
+        the REAL full session id rides as item data.  Workspace-matching
+        sessions sort FIRST and carry a ``[WS]`` marker; other workspaces
+        are visibly marked.  NEW SESSION stays the default and NOTHING is
+        ever auto-selected for RESUME.
+        """
+        row = self._role_rows[role]
+        session_combo = row["session"]
+        session_combo.clear()
+        session_combo.addItem("NEW SESSION", "")
+        ws = self._workspace()
+        try:
+            driver = self.registry.create(_CODEX_ENGINE_ID)
+            discover = getattr(driver, "discover_sessions", None)
+            if discover is None:
+                self._action_note = (
+                    "Codex discovery unavailable: the codex driver exposes "
+                    "no session discovery."
+                )
+                return
+            result = discover(
+                workspace_path=str(ws) if ws is not None else None,
+            )
+        except Exception as exc:  # DriverError / missing CLI — honest note
+            self._action_note = f"Codex discovery unavailable: {exc}"
+            return
+        if not result.ok:
+            self._action_note = (
+                f"Codex discovery failed: {result.error or 'unknown error'}"
+            )
+            return
+        sessions = sorted(
+            result.sessions,
+            key=lambda s: (not s.matches_workspace, str(s.title or s.session_id)),
+        )
+        shown = 0
+        for s in sessions:
+            marker = "[WS] " if s.matches_workspace else "[other ws] "
+            label = s.label()
+            session_combo.addItem(f"{marker}{label}", s.session_id)
+            shown += 1
+        self._action_note = (
+            f"Codex discovery: {shown} session(s) "
+            f"({result.mechanism or 'read-only'}) — select one explicitly "
+            "for RESUME; nothing is auto-armed."
+        )
 
     def _on_role_profile_changed(self, role: ProposalRole) -> None:
         row = self._role_rows[role]
@@ -923,9 +1047,19 @@ class ProposalModePanel(QWidget):
         session_text = ""
         if engine == _HERMES_ENGINE_ID and session_mode == "RESUME_SELECTED_SESSION":
             session_text = str(row["session"].currentData() or "")
+        elif engine == _CODEX_ENGINE_ID and session_mode == "RESUME_SELECTED_SESSION":
+            # Session 021: the Codex combo carries the REAL full session id
+            # as item data (titles are display-only); the runtime resume
+            # contract re-verifies the id against the real engine.
+            session_text = str(row["session"].currentData() or "")
         if not supports_sessions:
             session_mode = "NEW_SESSION"
             session_text = ""
+        reasoning = ""
+        if engine == _CODEX_ENGINE_ID:
+            # The reasoning setting is meaningful ONLY for Codex (the
+            # verified CLI contract); other engines always persist "".
+            reasoning = str(row["reasoning"].currentData() or "")
         self._role_configs[role] = ProposalAgentConfig(
             role=role,
             engine=engine,
@@ -935,6 +1069,7 @@ class ProposalModePanel(QWidget):
             session_policy="persistent_optional",
             session_id=session_text,
             session_mode=session_mode,
+            reasoning_effort=reasoning,
         )
 
     def _persist_config_if_workspace(self) -> None:
@@ -971,6 +1106,12 @@ class ProposalModePanel(QWidget):
                 else 0
             )
             row["session_mode"].setCurrentIndex(mode_index)
+            reasoning_index = row["reasoning"].findData(
+                str(getattr(config, "reasoning_effort", "") or "")
+            )
+            row["reasoning"].setCurrentIndex(
+                reasoning_index if reasoning_index >= 0 else 0
+            )
             if config.session_id:
                 if row["session"].findData(config.session_id) < 0:
                     row["session"].addItem(config.session_id, config.session_id)
@@ -1639,6 +1780,37 @@ class ProposalModePanel(QWidget):
         tpl = template_status(ws)
         self.blueprint_label.setText(f"MASTER BLUEPRINT: {bp}")
         self.template_label.setText(f"OFFICIAL TEMPLATE: {tpl}")
+        # Session 021: the LIVING Blueprint + DOCUMENT PAIR status.
+        from ..proposal.living_blueprint import (
+            blueprint_pair_status,
+            try_load_blueprint_state,
+        )
+        from ..proposal.document_pair import try_load_document_pair_state
+
+        pair_status = blueprint_pair_status(ws)
+        try:
+            bp_state = try_load_blueprint_state(ws)
+        except Exception:
+            bp_state = None
+        current_bp_text = f"CURRENT / LIVING BLUEPRINT: {pair_status.get('current', 'MISSING')}"
+        if bp_state is not None:
+            current_bp_text += (
+                f" — hash {bp_state.current_blueprint_hash[:16]}…"
+                f" — iteration {bp_state.current_blueprint_iteration}"
+            )
+        self.current_blueprint_label.setText(current_bp_text)
+        try:
+            pair_state = try_load_document_pair_state(ws)
+        except Exception:
+            pair_state = None
+        if pair_state is not None:
+            pair_text = (
+                f"DOCUMENT PAIR: iteration {pair_state.iteration}"
+                f" — revision {pair_state.pair_revision_id[:12]}…"
+            )
+        else:
+            pair_text = "DOCUMENT PAIR: not committed"
+        self.pair_state_label.setText(pair_text)
         normalized = ws / "01_OFFICIAL" / "NORMALIZED"
         doc_count = 0
         if normalized.is_dir():

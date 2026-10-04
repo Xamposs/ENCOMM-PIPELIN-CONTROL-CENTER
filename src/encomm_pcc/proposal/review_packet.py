@@ -84,6 +84,12 @@ H. Every finding must be classified as exactly one of:
    factual_contradiction | missing_evidence | weak_wording |
    structural_issue | recommendation.
 I. You obey YOUR role focus below — review what your role owns, and say so.
+J. You review the DOCUMENT PAIR: the CURRENT (living) Blueprint is the
+   authoritative project design; the immutable original MASTER_BLUEPRINT is
+   provenance.  Every finding and every patch must declare its 'target':
+   PROPOSAL (the proposal wording/content is weak while the Blueprint is
+   correct), BLUEPRINT (the underlying technical design must change), or
+   BOTH (the documents contradict one another, or both must change).
 """
 
 #: Output contract — the exact JSON envelope and its schema.
@@ -103,7 +109,8 @@ REQUIRED OUTPUT — EXACTLY ONE JSON object wrapped in EXACTLY these markers:
       "message": "<what is wrong and why it matters>",
       "evidence": "<quoted evidence or empty>",
       "source_refs": ["<source document references or empty list>"],
-      "suggested_change": "<what should change, or empty>"
+      "suggested_change": "<what should change, or empty>",
+      "target": "PROPOSAL" | "BLUEPRINT" | "BOTH"
     }
   ],
   "proposed_patches": [
@@ -113,7 +120,8 @@ REQUIRED OUTPUT — EXACTLY ONE JSON object wrapped in EXACTLY these markers:
       "replacement_text": "<full replacement text, or empty>",
       "patch_instructions": "<structured instructions, or empty>",
       "source_refs": ["<supporting sources or empty list>"],
-      "confidence": <number between 0.0 and 1.0>
+      "confidence": <number between 0.0 and 1.0>,
+      "target": "PROPOSAL" | "BLUEPRINT" | "BOTH"
     }
   ],
   "unverified_claims": ["<claims you could not verify>"],
@@ -132,6 +140,10 @@ HARD OUTPUT RULES:
 - BLOCKED requires a finding (or summary) stating the concrete blocking
   reason.
 - Severity values are lowercase: critical, high, medium, low.
+- Every finding and every patch MUST carry 'target' exactly:
+  "PROPOSAL" (the proposal wording/content is weak while the Blueprint is
+  correct), "BLUEPRINT" (the underlying technical design must change), or
+  "BOTH" (the documents contradict one another, or both must change).
 - Each patch MUST carry content in EXACTLY ONE of 'replacement_text' /
   'patch_instructions': put the full replacement text in 'replacement_text'
   and leave 'patch_instructions' empty, OR vice versa — never fill both,
@@ -164,6 +176,12 @@ class ProposalReviewInputs:
     proposal_revision: str = ""
     proposal_hash: str = ""
     master_blueprint_text: str = ""
+    #: Session 021: the LIVING authoritative project design
+    #: (00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md).  Empty/unavailable is
+    #: rendered honestly as unavailable.
+    current_blueprint_text: str = ""
+    current_blueprint_hash: str = ""
+    current_blueprint_available: bool = False
     project_facts_text: str = ""
     team_text: str = ""
     architecture_text: str = ""
@@ -343,6 +361,7 @@ def build_review_packet(
         f"- iteration_number: {inputs.iteration_number} (echo it EXACTLY as a plain JSON integer)",
         f"- proposal_revision: {inputs.proposal_revision or 'UNSPECIFIED'}",
         f"- proposal_hash (SHA-256 of the exact reviewed revision): {inputs.proposal_hash or 'UNSPECIFIED'}",
+        f"- current_blueprint_hash (SHA-256 of the reviewed living Blueprint): {inputs.current_blueprint_hash or 'UNSPECIFIED'}",
         "",
         "## PROPOSAL UNDER REVIEW — 03_PROPOSAL/MASTER_PROPOSAL.md (READ-ONLY for you)",
         "",
@@ -351,6 +370,11 @@ def build_review_packet(
         _section_with_cap(
             "SOURCE OF TRUTH — MASTER_BLUEPRINT.md",
             inputs.master_blueprint_text,
+            max_chars=blueprint_cap,
+        ),
+        _section_with_cap(
+            "LIVING PROJECT DESIGN — CURRENT_BLUEPRINT.md (primary design under review)",
+            inputs.current_blueprint_text if inputs.current_blueprint_available else None,
             max_chars=blueprint_cap,
         ),
         _section("SOURCE OF TRUTH — PROJECT_FACTS.md", inputs.project_facts_text),

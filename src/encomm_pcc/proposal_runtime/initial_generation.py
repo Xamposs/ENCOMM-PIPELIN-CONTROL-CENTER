@@ -19,6 +19,7 @@ BEFORE any model call.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -378,48 +379,91 @@ def run_initial_generation(
     for name, text in snapshot.official_documents:
         source_lines.append(f"### 01_OFFICIAL/NORMALIZED/{name}.md")
         source_lines.append(text.strip() or "[EMPTY]")
+    # Session 021: the LIVING Blueprint participates in initial generation —
+    # read ONCE here (prompt section + hash binding for the write path).
+    from ..proposal.living_blueprint import CURRENT_BLUEPRINT_RELPATH
+
+    current_bp_path = workspace.joinpath(*CURRENT_BLUEPRINT_RELPATH.split("/"))
+    dual = False
+    current_bp_hash = ""
+    current_bp_before_bytes: bytes | None = None
+    if current_bp_path.is_file():
+        try:
+            current_bp_before_bytes = current_bp_path.read_bytes()
+            current_bp_hash = hashlib.sha256(current_bp_before_bytes).hexdigest()
+            dual = True
+        except OSError:
+            dual = False
+            current_bp_hash = ""
+    if dual:
+        source_lines.append(
+            "### 00_SOURCE_OF_TRUTH/CURRENT_BLUEPRINT.md (LIVING project design)"
+        )
+        assert current_bp_before_bytes is not None  # dual ⇒ bytes were read
+        source_lines.append(
+            current_bp_before_bytes.decode("utf-8", errors="replace").strip()
+            or "[EMPTY]"
+        )
     # The integration packet requires a current proposal + hash; generation
     # starts from the EMPTY master, so the packet carries the empty text and
     # a synthetic zero hash via the dedicated generation preamble instead.
-    synthesis_prompt = "\n".join(
-        [
-            "# INITIAL GENERATION — ASTRA SYNTHESIS",
-            "",
-            "You are ASTRA / ORCHESTRATOR.  Synthesise the FIRST COMPLETE",
-            "MASTER PROPOSAL from the specialist contributions and the",
-            "official sources below.",
-            "",
-            "NON-NEGOTIABLE RULES:",
-            "- Preserve the OFFICIAL APPLICATION TEMPLATE structure exactly",
-            "  (same sections, same order); never invent template sections.",
-            f"- {INPUT_REQUIRED_MARKER_GUIDANCE}",
-            "- Never invent source facts; keep only supported content.",
-            "- Integrate the specialist contributions; resolve overlaps",
-            "  conservatively and keep the proposal internally consistent.",
-            "",
-            "## SOURCES",
-            "",
-            "\n\n".join(source_lines),
-            "",
-            "## SPECIALIST CONTRIBUTIONS",
-            "",
-            contribution_text,
-            "",
-            "## OUTPUT CONTRACT (STRICT)",
-            "",
-            "Return the COMPLETE proposal through the integration envelope:",
-            "",
-            "<<<ENCOMM_PROPOSAL_INTEGRATION_START>>>",
-            '{"summary": "<one-paragraph synthesis note>"}',
-            "<<<ENCOMM_PROPOSAL_INTEGRATION_END>>>",
-            "",
-            "and the FULL revised proposal text between:",
-            "",
-            "<<<INITIAL_PROPOSAL_START>>>",
-            "... the complete proposal Markdown ...",
-            "<<<INITIAL_PROPOSAL_END>>>",
-        ]
-    )
+    synthesis_parts = [
+        "# INITIAL GENERATION — ASTRA SYNTHESIS",
+        "",
+        "You are ASTRA / ORCHESTRATOR.  Synthesise the FIRST COMPLETE",
+        "MASTER PROPOSAL from the specialist contributions and the",
+        "official sources below.",
+        "",
+        "NON-NEGOTIABLE RULES:",
+        "- Preserve the OFFICIAL APPLICATION TEMPLATE structure exactly",
+        "  (same sections, same order); never invent template sections.",
+        f"- {INPUT_REQUIRED_MARKER_GUIDANCE}",
+        "- Never invent source facts; keep only supported content.",
+        "- Integrate the specialist contributions; resolve overlaps",
+        "  conservatively and keep the proposal internally consistent.",
+        "",
+        "## SOURCES",
+        "",
+        "\n\n".join(source_lines),
+        "",
+        "## SPECIALIST CONTRIBUTIONS",
+        "",
+        contribution_text,
+        "",
+        "## OUTPUT CONTRACT (STRICT)",
+        "",
+        "Return the COMPLETE proposal through the integration envelope:",
+        "",
+        "<<<ENCOMM_PROPOSAL_INTEGRATION_START>>>",
+        '{"summary": "<one-paragraph synthesis note>"}',
+        "<<<ENCOMM_PROPOSAL_INTEGRATION_END>>>",
+        "",
+        "and the FULL revised proposal text between:",
+        "",
+        "<<<INITIAL_PROPOSAL_START>>>",
+        "... the complete proposal Markdown ...",
+        "<<<INITIAL_PROPOSAL_END>>>",
+    ]
+    if dual:
+        synthesis_parts.extend(
+            [
+                "",
+                "DUAL-DOCUMENT RULES (this workspace includes the LIVING "
+                "Blueprint — CURRENT_BLUEPRINT.md):",
+                "- Return the COMPLETE revised living Blueprint between:",
+                "<<<INITIAL_BLUEPRINT_START>>>",
+                "... the complete CURRENT_BLUEPRINT.md Markdown ...",
+                "<<<INITIAL_BLUEPRINT_END>>>",
+                "- ONLY when a Blueprint revision is justified by the "
+                "specialist findings; omit the block entirely to keep the "
+                "living Blueprint byte-identical (a valid, honest choice).",
+                "- Never invent external facts: an unsupported change "
+                "becomes an explicit '[INPUT REQUIRED: ...]' marker.",
+                "- The immutable original MASTER_BLUEPRINT.md is NEVER "
+                "yours to rewrite.",
+            ]
+        )
+    synthesis_prompt = "\n".join(synthesis_parts)
     # Reuse the strict integration parser by wrapping the answer in the
     # integration envelope shape it already enforces: ASTRA returns the
     # revised proposal in the dedicated block; the runtime builds the
@@ -514,17 +558,46 @@ def run_initial_generation(
 
     # Build the integration-shaped payload and parse it through the SAME
     # strict parser used at INTEGRATION (defence in depth).
+    # Session 021 DUAL INITIAL GENERATION: when the living Blueprint exists
+    # (fingerprinted before the synthesis prompt above) the runtime ALSO
+    # accepts a dedicated INITIAL_BLUEPRINT block pair — optional, since
+    # keeping the living Blueprint byte-identical is a valid choice — and
+    # the synthetic dual payload parses through the SAME dual contract the
+    # INTEGRATION phase uses.
+    revised_blueprint_text: str | None = None
+    if dual:
+        bp_start_marker = "<<<INITIAL_BLUEPRINT_START>>>"
+        bp_end_marker = "<<<INITIAL_BLUEPRINT_END>>>"
+        bp_starts = raw.count(bp_start_marker)
+        bp_ends = raw.count(bp_end_marker)
+        if bp_starts == 1 and bp_ends == 1:
+            bp_text = raw.split(bp_start_marker, 1)[1].split(bp_end_marker, 1)[0]
+            if bp_text.strip():
+                if len(bp_text) > 400_000 and "[INPUT REQUIRED" not in bp_text:
+                    return _finish(
+                        InitialGenerationOutcome.SYNTHESIS_FAILED,
+                        "ASTRA blueprint exceeds 400000 characters.",
+                    )
+                revised_blueprint_text = bp_text
+        elif bp_starts or bp_ends:
+            return _finish(
+                InitialGenerationOutcome.SYNTHESIS_FAILED,
+                "ASTRA output must contain zero or one COMPLETE "
+                "INITIAL_BLUEPRINT block pair (never a one-sided block).",
+            )
+    synthetic_payload: dict[str, object] = {
+        "role": "ORCHESTRATOR",
+        "iteration_number": 1,
+        "input_proposal_hash": empty_hash or "0" * 64,
+        "summary": "initial generation synthesis",
+        "revised_proposal": proposed_text,
+    }
+    if dual:
+        synthetic_payload["input_blueprint_hash"] = current_bp_hash
+        synthetic_payload["revised_blueprint"] = revised_blueprint_text
     synthetic_raw = (
         "<<<ENCOMM_PROPOSAL_INTEGRATION_START>>>\n"
-        + json.dumps(
-            {
-                "role": "ORCHESTRATOR",
-                "iteration_number": 1,
-                "input_proposal_hash": empty_hash or "0" * 64,
-                "summary": "initial generation synthesis",
-                "revised_proposal": proposed_text,
-            }
-        )
+        + json.dumps(synthetic_payload)
         + "\n<<<ENCOMM_PROPOSAL_INTEGRATION_END>>>"
     )
     try:
@@ -532,6 +605,7 @@ def run_initial_generation(
             synthetic_raw,
             expected_iteration=1,
             expected_input_hash=empty_hash or "0" * 64,
+            expected_input_blueprint_hash=current_bp_hash if dual else "",
         )
     except ProposalIntegrationParseError as exc:
         return _finish(
@@ -549,12 +623,32 @@ def run_initial_generation(
         state_machine.transition_to(ProposalPhase.IMPLEMENTATION_REVIEW)
         state_machine.transition_to(ProposalPhase.RED_TEAM_REVIEW)
         state_machine.transition_to(ProposalPhase.INTEGRATION)
-        write_report = replace_master_proposal(
-            workspace=workspace,
-            state_machine=state_machine,
-            expected_current_hash=empty_hash,
-            revised_proposal_text=parsed.revised_proposal,
-        )
+        if (
+            dual
+            and parsed.revised_blueprint is not None
+            and parsed.revised_blueprint.strip()
+        ):
+            from ..proposal.document_pair import commit_document_pair
+
+            pair_report = commit_document_pair(
+                workspace=workspace,
+                state_machine=state_machine,
+                iteration_number=1,
+                revised_blueprint_text=parsed.revised_blueprint,
+                revised_proposal_text=parsed.revised_proposal,
+                proposal_revision=str(proposal_revision),
+            )
+            new_proposal_hash = pair_report.proposal_hash
+            new_blueprint_hash = pair_report.blueprint_hash
+        else:
+            write_report = replace_master_proposal(
+                workspace=workspace,
+                state_machine=state_machine,
+                expected_current_hash=empty_hash,
+                revised_proposal_text=parsed.revised_proposal,
+            )
+            new_proposal_hash = write_report.new_hash
+            new_blueprint_hash = ""
         state_machine.transition_to(ProposalPhase.HARD_GATE_VALIDATION)
         # Generation is NOT a review: return the machine to IDLE so the
         # first real panel iteration starts from the legal entry phase.
@@ -580,7 +674,9 @@ def run_initial_generation(
                 "schema": "encomm-pcc.initial-generation/v1",
                 "proposal_revision": str(proposal_revision),
                 "specialists": dict(report.specialist_reports),
-                "master_proposal_hash": write_report.new_hash,
+                "master_proposal_hash": new_proposal_hash,
+                "current_blueprint_hash": new_blueprint_hash,
+                "pair_committed": bool(new_blueprint_hash),
             },
         )
     except OSError as exc:

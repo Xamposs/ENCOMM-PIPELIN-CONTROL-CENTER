@@ -47,7 +47,7 @@ Hard rules:
 from __future__ import annotations
 
 import json
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 from .integration_models import (
     INTEGRATION_ITEM_ACTIONS,
@@ -80,6 +80,8 @@ MAX_INTEGRATION_RAW_CHARS = 2_000_000
 #: The revised proposal must fit the same 20 MB fingerprint cap with room
 #: for the rest of the JSON envelope; anything larger is refused.
 MAX_INTEGRATION_REVISED_CHARS = 1_000_000
+#: Session 021: the revised living Blueprint obeys the same bound.
+MAX_INTEGRATION_BLUEPRINT_CHARS = 1_000_000
 MAX_INTEGRATION_SUMMARY_CHARS = 20_000
 MAX_INTEGRATION_ITEMS = 200          # per disposition array
 MAX_INTEGRATION_ITEM_TEXT = 20_000   # per item_id / reason string
@@ -257,6 +259,7 @@ def _validate(
     *,
     expected_iteration: int,
     expected_input_hash: str,
+    expected_input_blueprint_hash: str = "",
 ) -> ProposalIntegrationResult:
     role_raw = raw.get("role")
     if not isinstance(role_raw, str):
@@ -304,6 +307,57 @@ def _validate(
         allow_empty=False,
     )
 
+    # -- Session 021: the DUAL-DOCUMENT contract (optional, strict) ---------
+    # Activated when the CALLER supplies expected_input_blueprint_hash (the
+    # runtime gave the chair the document pair).  In that mode the payload
+    # MUST echo the Blueprint hash; revised_blueprint may be null/empty (a
+    # legitimate "no justified Blueprint change") but its PRESENCE with
+    # content is validated and its hash echo is mandatory.
+    input_blueprint_hash = ""
+    revised_blueprint: Optional[str] = None
+    if str(expected_input_blueprint_hash or "").strip():
+        echo_raw = raw.get("input_blueprint_hash")
+        if echo_raw is None:
+            raise ProposalIntegrationParseError(
+                "missing_blueprint_hash",
+                "the dual-document contract requires input_blueprint_hash "
+                "(the CURRENT_BLUEPRINT hash the chair was given) to be "
+                "echoed EXACTLY.",
+            )
+        if not isinstance(echo_raw, str):
+            raise ProposalIntegrationParseError(
+                "unexpected_type",
+                f"'input_blueprint_hash' must be a string, got "
+                f"{type(echo_raw).__name__}",
+            )
+        if echo_raw.strip().lower() != str(expected_input_blueprint_hash).strip().lower():
+            raise ProposalIntegrationParseError(
+                "blueprint_hash_mismatch",
+                "expected input_blueprint_hash "
+                f"{str(expected_input_blueprint_hash)!r}, got {echo_raw!r}; "
+                "refusing to integrate over a stale living Blueprint.",
+            )
+        input_blueprint_hash = echo_raw.strip()
+        blueprint_raw = raw.get("revised_blueprint")
+        if blueprint_raw is not None:
+            if not isinstance(blueprint_raw, str):
+                raise ProposalIntegrationParseError(
+                    "unexpected_type",
+                    f"'revised_blueprint' must be a string or null, got "
+                    f"{type(blueprint_raw).__name__}",
+                )
+            if blueprint_raw.strip():
+                if len(blueprint_raw) > MAX_INTEGRATION_BLUEPRINT_CHARS:
+                    raise ProposalIntegrationParseError(
+                        "oversized_field",
+                        f"'revised_blueprint' exceeds "
+                        f"{MAX_INTEGRATION_BLUEPRINT_CHARS} characters "
+                        f"({len(blueprint_raw)})",
+                    )
+                revised_blueprint = blueprint_raw
+            else:
+                revised_blueprint = None
+
     summary = _bounded_str(
         raw.get("summary", ""),
         limit=MAX_INTEGRATION_SUMMARY_CHARS,
@@ -323,6 +377,8 @@ def _validate(
         applied_items=applied,
         rejected_items=rejected,
         unresolved_items=unresolved,
+        input_blueprint_hash=input_blueprint_hash,
+        revised_blueprint=revised_blueprint,
     )
 
 
@@ -331,6 +387,7 @@ def parse_proposal_integration(
     *,
     expected_iteration: int,
     expected_input_hash: str,
+    expected_input_blueprint_hash: str = "",
 ) -> ProposalIntegrationResult:
     """Parse untrusted ORCHESTRATOR output into a strict result — fail closed.
 
@@ -339,6 +396,12 @@ def parse_proposal_integration(
     result.  The parsed result is checked against the expected iteration
     number AND the expected exact-byte input proposal hash (fail closed
     BEFORE any caller trusts the answer).
+
+    Session 021: when ``expected_input_blueprint_hash`` is supplied (the
+    dual-document run), the payload must echo that living-Blueprint hash
+    exactly; an empty/absent ``revised_blueprint`` is a legitimate "no
+    justified Blueprint change".  Omitted keeps the exact legacy
+    single-document contract (dual fields in the payload are ignored).
     """
     if not isinstance(expected_iteration, int) or isinstance(
         expected_iteration, bool
@@ -388,6 +451,7 @@ def parse_proposal_integration(
             parsed,
             expected_iteration=expected_iteration,
             expected_input_hash=expected_input_hash,
+            expected_input_blueprint_hash=expected_input_blueprint_hash,
         )
     # The envelope was present but carried no JSON payload at all.
     raise ProposalIntegrationParseError(

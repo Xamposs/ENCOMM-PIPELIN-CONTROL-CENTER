@@ -13,11 +13,14 @@ from __future__ import annotations
 from enum import Enum
 
 __all__ = [
+    "FINDING_TARGETS",
+    "DEFAULT_FINDING_TARGET",
     "HARD_GATE_IDS",
     "HARD_GATE_IDS_TUPLE",
     "HARD_GATE_STATUS_VALUES",
     "PROPOSAL_REVIEW_VERDICTS",
     "ProposalFindingSeverity",
+    "ProposalFindingTarget",
     "ProposalHardGateStatus",
     "ProposalPhase",
     "ProposalReviewVerdict",
@@ -95,6 +98,23 @@ class ProposalFindingSeverity(str, Enum):
         return self.value
 
 
+class ProposalFindingTarget(str, Enum):
+    """Which document one finding targets (Session 021 dual-document review).
+
+    Every evaluator finding declares its target: the proposal wording
+    (PROPOSAL), the underlying technical design (BLUEPRINT), or both
+    documents together (BOTH).  Fail-closed whitelist — anything else is
+    rejected by the review parser.
+    """
+
+    PROPOSAL = "PROPOSAL"
+    BLUEPRINT = "BLUEPRINT"
+    BOTH = "BOTH"
+
+    def __str__(self) -> str:  # pragma: no cover - display helper
+        return self.value
+
+
 class ProposalHardGateStatus(str, Enum):
     """Status of one hard-gate check (contract only — no validator exists yet)."""
 
@@ -141,3 +161,13 @@ HARD_GATE_IDS: frozenset[str] = frozenset(HARD_GATE_IDS_TUPLE)
 HARD_GATE_STATUS_VALUES: frozenset[str] = frozenset(
     v.value for v in ProposalHardGateStatus
 )
+
+#: The only accepted finding targets (Session 021 dual-document review).
+FINDING_TARGETS: frozenset[str] = frozenset(
+    v.value for v in ProposalFindingTarget
+)
+
+#: Default finding target for legacy findings that predate the dual-document
+#: contract (records created before Session 021 only ever targeted the
+#: proposal).
+DEFAULT_FINDING_TARGET = "PROPOSAL"

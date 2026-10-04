@@ -44,8 +44,10 @@ import json
 from typing import Any, Iterable, Mapping
 
 from .enums import (
+    FINDING_TARGETS,
     PROPOSAL_REVIEW_VERDICTS,
     ProposalFindingSeverity,
+    ProposalFindingTarget,
     ProposalReviewVerdict,
     ProposalRole,
 )
@@ -278,6 +280,24 @@ def _validate_findings(raw: Any) -> list[ProposalFinding]:
             limit=MAX_STRING_CHARS,
             field="finding.suggested_change",
         )
+        target_raw = item.get("target")
+        if target_raw is None:
+            # Legacy finding without an explicit target: the pre-Session-021
+            # contract only ever targeted the proposal.
+            target = ProposalFindingTarget.PROPOSAL
+        else:
+            if not isinstance(target_raw, str):
+                raise ProposalReviewParseError(
+                    "unexpected_type", "finding 'target' must be a string"
+                )
+            target_value = target_raw.strip().upper()
+            if target_value not in FINDING_TARGETS:
+                raise ProposalReviewParseError(
+                    "invalid_target",
+                    "finding target must be one of "
+                    f"{sorted(FINDING_TARGETS)}, got {target_raw!r}",
+                )
+            target = ProposalFindingTarget(target_value)
         findings.append(
             ProposalFinding(
                 severity=severity,
@@ -287,6 +307,7 @@ def _validate_findings(raw: Any) -> list[ProposalFinding]:
                 evidence=evidence,
                 source_refs=_bounded_ref_list(item.get("source_refs"), field="finding.source_refs"),
                 suggested_change=suggested,
+                target=target,
             )
         )
     return findings
@@ -353,6 +374,22 @@ def _validate_patches(raw: Any) -> list[ProposalPatch]:
                 "invalid_confidence",
                 f"patch 'confidence' must be within [0.0, 1.0], got {confidence}",
             )
+        target_raw = item.get("target")
+        if target_raw is None:
+            target = ProposalFindingTarget.PROPOSAL
+        else:
+            if not isinstance(target_raw, str):
+                raise ProposalReviewParseError(
+                    "unexpected_type", "patch 'target' must be a string"
+                )
+            target_value = target_raw.strip().upper()
+            if target_value not in FINDING_TARGETS:
+                raise ProposalReviewParseError(
+                    "invalid_target",
+                    "patch target must be one of "
+                    f"{sorted(FINDING_TARGETS)}, got {target_raw!r}",
+                )
+            target = ProposalFindingTarget(target_value)
         patches.append(
             ProposalPatch(
                 target_section=target,
@@ -361,6 +398,7 @@ def _validate_patches(raw: Any) -> list[ProposalPatch]:
                 patch_instructions=instructions,
                 source_refs=_bounded_ref_list(item.get("source_refs"), field="patch.source_refs"),
                 confidence=confidence,
+                target=target,
             )
         )
     return patches

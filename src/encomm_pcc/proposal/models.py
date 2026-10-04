@@ -25,8 +25,11 @@ from datetime import datetime, timezone
 from typing import Any, ClassVar, Mapping
 
 from .enums import (
+    DEFAULT_FINDING_TARGET,
+    FINDING_TARGETS,
     HARD_GATE_IDS,
     ProposalFindingSeverity,
+    ProposalFindingTarget,
     ProposalHardGateStatus,
     ProposalPhase,
     ProposalReviewVerdict,
@@ -84,9 +87,27 @@ class ProposalAgentConfig:
     #: driver whose capabilities expose ``supports_resume``).
     session_mode: str = "NEW_SESSION"
 
+    #: Session 021: optional per-invocation reasoning effort for engines
+    #: whose verified contract exposes one (Codex: the official
+    #: ``-c model_reasoning_effort="<level>"`` override; values
+    #: minimal/low/medium/high/xhigh per the installed CLI's config
+    #: reference).  Empty/default = the engine's own default (nothing is
+    #: passed).  Non-empty values are fail-closed validated here against
+    #: the VERIFIED whitelist; the driver passes the setting ONLY for an
+    #: engine that declares support, so a Hermes run never receives a
+    #: Codex flag.
+    reasoning_effort: str = ""
+
     #: The only accepted session modes (fail-closed whitelist).
     SESSION_MODES: ClassVar[frozenset[str]] = frozenset(
         {"NEW_SESSION", "RESUME_SELECTED_SESSION"}
+    )
+
+    #: The only reasoning-effort values the verified Codex contract accepts.
+    #: Not a marketing/model catalogue: these are the values of the CLI's
+    #: own ``model_reasoning_effort`` config key.
+    REASONING_EFFORTS: ClassVar[frozenset[str]] = frozenset(
+        {"minimal", "low", "medium", "high", "xhigh"}
     )
 
     def __post_init__(self) -> None:
@@ -102,6 +123,14 @@ class ProposalAgentConfig:
                 "session_mode RESUME_SELECTED_SESSION requires a real "
                 "session_id (never invented)."
             )
+        effort = str(self.reasoning_effort or "").strip().lower()
+        self.reasoning_effort = effort
+        if effort and effort not in self.REASONING_EFFORTS:
+            raise ValueError(
+                "reasoning_effort must be empty (engine default) or one of "
+                f"{sorted(self.REASONING_EFFORTS)}; got "
+                f"{self.reasoning_effort!r}."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -113,6 +142,7 @@ class ProposalAgentConfig:
             "session_policy": self.session_policy,
             "session_id": self.session_id,
             "session_mode": self.session_mode,
+            "reasoning_effort": self.reasoning_effort,
         }
 
     @classmethod
@@ -126,12 +156,21 @@ class ProposalAgentConfig:
             session_policy=str(data.get("session_policy") or "persistent_optional"),
             session_id=str(data.get("session_id") or ""),
             session_mode=str(data.get("session_mode") or "NEW_SESSION"),
+            reasoning_effort=str(data.get("reasoning_effort") or ""),
         )
 
 
 @dataclass(slots=True)
 class ProposalFinding:
-    """One finding a reviewer reported against the proposal."""
+    """One finding a reviewer reported against the document pair.
+
+    Session 021: every finding declares WHICH document it targets —
+    ``PROPOSAL`` (the wording/content of MASTER_PROPOSAL.md is weak while
+    the Blueprint is correct), ``BLUEPRINT`` (the underlying technical
+    design needs to change), or ``BOTH`` (the documents contradict one
+    another or both must change).  The typed target rides the whole chain:
+    parsers → aggregation → docket → consensus → persistence → UI.
+    """
 
     severity: ProposalFindingSeverity
     category: str
@@ -140,10 +179,20 @@ class ProposalFinding:
     evidence: str = ""
     source_refs: list[str] = field(default_factory=list)
     suggested_change: str = ""
+    #: Session 021 dual-document target (fail-closed whitelist).
+    target: ProposalFindingTarget = ProposalFindingTarget.PROPOSAL
 
     def __post_init__(self) -> None:
         if not isinstance(self.severity, ProposalFindingSeverity):
             self.severity = ProposalFindingSeverity(str(self.severity))
+        if not isinstance(self.target, ProposalFindingTarget):
+            target_raw = str(self.target or DEFAULT_FINDING_TARGET).strip().upper()
+            if target_raw not in FINDING_TARGETS:
+                raise ValueError(
+                    "finding target must be one of "
+                    f"{sorted(FINDING_TARGETS)}; got {self.target!r}."
+                )
+            self.target = ProposalFindingTarget(target_raw)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -154,11 +203,18 @@ class ProposalFinding:
             "evidence": self.evidence,
             "source_refs": list(self.source_refs),
             "suggested_change": self.suggested_change,
+            "target": self.target.value,
         }
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "ProposalFinding":
         refs_raw = data.get("source_refs") or []
+        target_raw = str(data.get("target") or DEFAULT_FINDING_TARGET).strip().upper()
+        if target_raw not in FINDING_TARGETS:
+            raise ValueError(
+                "finding target must be one of "
+                f"{sorted(FINDING_TARGETS)}; got {data.get('target')!r}."
+            )
         return cls(
             severity=ProposalFindingSeverity(str(data.get("severity") or "")),
             category=str(data.get("category") or ""),
@@ -167,6 +223,7 @@ class ProposalFinding:
             evidence=str(data.get("evidence") or ""),
             source_refs=[str(r) for r in refs_raw],
             suggested_change=str(data.get("suggested_change") or ""),
+            target=ProposalFindingTarget(target_raw),
         )
 
 
@@ -188,6 +245,18 @@ class ProposalPatch:
     source_refs: list[str] = field(default_factory=list)
     #: Explicit reviewer confidence metadata in ``[0.0, 1.0]``.
     confidence: float = 0.0
+    #: Session 021 dual-document target (fail-closed whitelist).
+    target: ProposalFindingTarget = ProposalFindingTarget.PROPOSAL
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.target, ProposalFindingTarget):
+            target_raw = str(self.target or DEFAULT_FINDING_TARGET).strip().upper()
+            if target_raw not in FINDING_TARGETS:
+                raise ValueError(
+                    "patch target must be one of "
+                    f"{sorted(FINDING_TARGETS)}; got {self.target!r}."
+                )
+            self.target = ProposalFindingTarget(target_raw)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -197,6 +266,7 @@ class ProposalPatch:
             "patch_instructions": self.patch_instructions,
             "source_refs": list(self.source_refs),
             "confidence": self.confidence,
+            "target": self.target.value,
         }
 
     @classmethod
@@ -206,6 +276,12 @@ class ProposalPatch:
             confidence = float(data.get("confidence") or 0.0)
         except (TypeError, ValueError):
             confidence = 0.0
+        target_raw = str(data.get("target") or DEFAULT_FINDING_TARGET).strip().upper()
+        if target_raw not in FINDING_TARGETS:
+            raise ValueError(
+                "patch target must be one of "
+                f"{sorted(FINDING_TARGETS)}; got {data.get('target')!r}."
+            )
         return cls(
             target_section=str(data.get("target_section") or ""),
             rationale=str(data.get("rationale") or ""),
@@ -213,6 +289,7 @@ class ProposalPatch:
             patch_instructions=str(data.get("patch_instructions") or ""),
             source_refs=[str(r) for r in refs_raw],
             confidence=confidence,
+            target=ProposalFindingTarget(target_raw),
         )
 
 
