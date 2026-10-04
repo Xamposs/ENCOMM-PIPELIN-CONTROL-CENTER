@@ -251,6 +251,7 @@ def run_integration(
     previous_findings: list[dict[str, Any]] | None = None,
     pre_review_version_path: str = "",
     orchestrator_agent_config: Optional[ProposalAgentConfig] = None,
+    extra_instructions: str = "",
 ) -> ProposalIntegrationExecutionReport:
     """Run ONE INTEGRATION operation — fail closed throughout.
 
@@ -270,6 +271,13 @@ def run_integration(
     driver's ``SessionRequest`` and the request's ``workspace_path`` is the
     ACTUAL proposal workspace.  Omitted (offline/unit callers) keeps the
     previous legacy request shape.
+
+    Session 019: ``extra_instructions`` (optional, bounded by the packet's
+    own section cap) is appended to the packet as an explicit PANEL CHAIR
+    CONTEXT section — the parallel panel's consensus matrix and advisory
+    readiness reach ASTRA through this seam WITHOUT changing the strict
+    integration parser contract.  Empty by default (byte-identical packets
+    for existing callers).
     """
     started = time.monotonic()
     workspace = Path(workspace)
@@ -404,6 +412,27 @@ def run_integration(
             ProposalIntegrationOutcome.DRIVER_FAILED,
             f"previous findings cannot be rendered for the integration "
             f"packet: {exc}",
+        )
+    if extra_instructions and extra_instructions.strip():
+        # Session 019: the panel-chair context (consensus matrix + advisory
+        # readiness) is an explicit, labelled packet section.  The packet's
+        # own section cap still bounds it (fail closed, never truncated).
+        panel_section = (
+            "PANEL CHAIR CONTEXT — structured consensus matrix and advisory "
+            "readiness from the parallel evaluator panel.  Address every "
+            "unresolved item explicitly.\n\n" + extra_instructions.strip()
+        )
+        if len(panel_section) > MAX_INTEGRATION_PACKET_SECTION_CHARS:
+            return _fail(
+                ProposalIntegrationOutcome.DRIVER_FAILED,
+                f"panel-chair context exceeds "
+                f"{MAX_INTEGRATION_PACKET_SECTION_CHARS} characters; "
+                "refusing to embed unbounded input.",
+            )
+        previous_findings_text = (
+            previous_findings_text + "\n\n" + panel_section
+            if previous_findings_text.strip()
+            else panel_section
         )
     source_lines: list[str] = []
     source_lines.append("### 00_SOURCE_OF_TRUTH/MASTER_BLUEPRINT.md")

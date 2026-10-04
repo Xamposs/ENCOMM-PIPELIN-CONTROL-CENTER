@@ -1884,3 +1884,168 @@ every Session 017/017A test and recovery path keeps its exact semantics;
 the structural isolation scan (`test_44`) exempts `app.py` as the bootstrap
 wiring site while explicitly banning proposal-package imports there, so the
 exemption cannot launder a domain leak.
+
+## D-071 — Source imports preserve ORIGINAL bytes; canonical normalized text is DERIVED, never converted in place
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** Proposal inputs arrive as real-world documents (`.md`, `.txt`,
+`.pdf`, `.docx`, `.rtf`). The workspace contract paths expect canonical
+Markdown; a destructive "convert and replace" import would destroy the
+operator's only copy and make audit impossible.
+
+**Decision.** `proposal/source_import.py` preserves the ORIGINAL bytes
+verbatim under the role's `IMPORTS/` directory and derives the canonical
+normalized Markdown as a SECOND artifact; every import appends one record to
+the atomic `05_CONTROL/SOURCE_IMPORT_MANIFEST.json` (original filename/path,
+SHA-256, size, media type, role, normalized path, extraction status/warning,
+replace flag, backup path). Replacing an existing non-empty canonical file
+requires the explicit `replace` flag AND freezes the old exact bytes into a
+backup first. Extraction is real (python-docx / pypdf / striprtf / UTF-8
+direct) and NEVER OCR; extraction that recovers no usable text fails
+visibly — an empty canonical source is never fabricated. The existing
+master proposal is never silently overwritten (`import_proposal` refuses
+when MASTER_PROPOSAL is non-empty).
+
+**Consequence.** The source of truth is always auditable back to the exact
+imported bytes; unsupported/corrupt documents fail closed; PyInstaller
+ships the lazy extraction dependencies (spec `hiddenimports`).
+
+## D-072 — Hermes selectors DISCOVER, NEVER INVENT: profiles/sessions via the real bridges, provider/model honestly profile-derived
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** The Proposal agent rows need Profile/Provider/Model/Session
+selectors backed by the installed Hermes CLI. The installed CLI (v0.21.5)
+exposes real profile listing and profile-scoped session listing, but NO
+authoritative provider/model listing command (`hermes model` is
+interactive-only; `model list` is an argument error).
+
+**Decision.** `proposal_runtime/hermes_selector_discovery.py` composes the
+production read-only bridges: profiles via `core.hermes_profiles`
+(CLI first, filesystem-scan fallback), sessions via the profile-scoped
+`HermesSessionDiscovery` (Priority A CLI, Priority B read-only store).
+Provider/model defaults are derived ONLY from the selected profile's own
+`config.yaml` (`model.provider` / `model.default` / the `providers:` map)
+when that file is readable, and are always labelled profile-derived — the
+UI keeps the combos EDITABLE so any other value remains operator-enterable.
+No model call is ever made during discovery; an unavailable surface returns
+an honest empty/unavailable result, never a fabricated list.
+
+**Consequence.** The operator selects from what actually exists; discovery
+regressions cannot fabricate options; Session 011's fail-soft discovery
+contract (pass the driver's own runner through composing helpers) carries
+over unchanged.
+
+## D-073 — The parallel evaluator panel is a RUNTIME concern; the proven phase graph advances deterministically AFTER the join
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** The sequential `run_review_cycle` is a proven fail-closed
+contract, but three evaluator calls executed one-after-another waste
+wall-clock in a multi-day campaign. Concurrency must not smear state-machine
+mutations across worker threads.
+
+**Decision.** `proposal_runtime/panel_runtime.run_parallel_panel_review_cycle`
+launches the three evaluator calls through a bounded `ThreadPoolExecutor`,
+each role owning its OWN driver instance (sharing one instance is refused as
+a panel-independence violation). The calls run through the machine-free core
+`review_executor.execute_review_call` (fingerprint → driver → strict parse →
+mutation guard — NO state-machine contact). Only after ALL calls return and
+the master re-fingerprints identical does the runtime walk the existing
+D-055 phase graph in canonical order (SCIENTIFIC → IMPLEMENTATION →
+RED_TEAM → INTEGRATION; a BLOCKED verdict parks the machine at the first
+blocked role's position and takes the explicit BLOCKED edge). One failed or
+unaligned call ⇒ NO aggregation, NO consensus, fail closed with per-role
+diagnostics. The sequential path stays available unchanged for partial-phase
+resume.
+
+**Consequence.** Concurrency is real (barrier tests prove the three calls
+overlap: all must start before any finishes) while durable advancement
+remains exactly as deterministic as the sequential cycle; `MUTATION_DETECTED`
+maps to `STALE_PROPOSAL` with nothing aggregated.
+
+## D-074 — The consensus round IS the controlled discussion: structured per-item judgements over a deterministic docket, never free-form chat
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** Evaluators must resolve disagreements without uncontrolled
+multi-agent chat or majority-vote "truth".
+
+**Decision.** After the independent first pass, the aggregated bundle
+becomes the deterministic PANEL DOCKET (stable ids `F001…`/`P001…` in the
+aggregation's severity → reviewer → original order,
+`04_REVIEWS/iteration_NNN/panel_docket.json`). The three evaluators are
+launched AGAIN in parallel; each judges EVERY docket item — exactly one of
+`AGREE | DISAGREE | PARTIAL | INSUFFICIENT_EVIDENCE` plus rationale,
+proposed resolution, source refs and a `blocks_acceptance` flag — through
+the STRICT-MANDATORY consensus envelope (`panel_contracts.py`; bare JSON is
+`missing_envelope`, the answer must echo the role, iteration and frozen
+proposal hash). The deterministic consensus matrix
+(`04_REVIEWS/iteration_NNN/panel_consensus.json`) reports votes, counts and
+an `unresolved` flag per item; it NEVER decides scientific truth. No
+evaluator sees another's consensus answer.
+
+**Consequence.** Disagreement structure is durable, bounded and auditable;
+ASTRA receives a complete written record instead of a chat log.
+
+## D-075 — ASTRA is PANEL CHAIR and SOLE EDITOR; the advisory readiness index is INTERNAL and never an EIC score
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** The chair needs the panel's full record; the operator wants a
+progress number; neither may create a second write authority or a fake
+compliance claim.
+
+**Decision.** `proposal_runtime/panel_chair.py` composes panel → consensus →
+`run_integration`, carrying the consensus matrix and readiness into the
+ORCHESTRATOR packet as an explicit bounded PANEL-CHAIR-CONTEXT section (new
+`extra_instructions` seam on `run_integration`; the strict integration
+parser contract is untouched). ASTRA remains the ONLY writer of
+MASTER_PROPOSAL through the runtime-owned atomic write, and must address
+every unresolved item. The displayed readiness is computed DETERMINISTICALLY
+(`proposal/readiness.py`): per-criterion MEDIAN over the three evaluators'
+bounded 0–100 assessments, weighted by the transparent persisted rubric
+(`05_CONTROL/READINESS_RUBRIC.json`), minus explicit penalties (unresolved
+critical/high findings, unverified claims, missing official/template
+source); the min/max spread is reported, never hidden. Every surface labels
+it `INTERNAL READINESS — NOT AN EIC SCORE`. Readiness NEVER overrides a
+hard gate; no single agent (including ASTRA) can declare a number.
+
+**Consequence.** The chair's context is complete and structured; the
+operator sees honest advisory progress; hard gates stay the only compliance
+authority.
+
+## D-076 — The autonomous campaign is a BOUNDED, restart-safe loop with boundary-only operator controls
+
+**Date:** 2026-10-03 (Session 019)
+**Status:** Accepted
+
+**Context.** Multi-hour/multi-day campaigns need autonomy WITHOUT an
+uncontrolled loop, unbounded spend, or state lost to a process restart.
+
+**Decision.** `proposal_runtime/campaign.py` drives initial generation (when
+the master is empty) then panel-chair iterations, checkpointing atomic
+durable state (`05_CONTROL/CAMPAIGN_CONFIG.json` bounds +
+`CAMPAIGN_STATE.json`: campaign id, iteration, stage, accumulated seconds,
+model-call count, readiness history, stop condition) after EVERY stage. Stop
+conditions: COMPLETE (gates), WAITING_FOR_OPERATOR (gate BLOCKED on missing
+operator evidence — no further model calls are burned), CONVERGED (readiness
+delta < 0.5 for `no_improvement_limit` consecutive iterations),
+BOUND_REACHED (max hours / iterations / model calls), PAUSED / STOPPED
+(operator flags sampled at stage boundaries only — a running model call
+always finishes first), FAILED. Every actual model call is counted (4 for
+initial generation, 7 per full iteration, 6 on the clean-pass bypass) and
+persisted. Recovery is READ-ONLY: `load_campaign_state` rebuilds the view
+and NOTHING auto-runs — resume is an explicit operator act, and the
+executors' own artifact contracts prevent any completed stage from running
+twice.
+
+**Consequence.** A crashed or closed application loses at most the
+in-flight stage; spend is capped by construction; the operator, not the
+machine, decides when AI runs again.

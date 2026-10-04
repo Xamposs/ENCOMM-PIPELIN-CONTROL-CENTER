@@ -259,7 +259,37 @@ def run_smoke_test() -> int:
             ):
                 raise AssertionError("internal navigation desynced the product tabs")
             steps.append("mode_tabs=2(coding,proposal)")
-            steps.append("main_window_constructed")
+            # Session 020: prove the Proposal Factory V2 production UI
+            # constructs (zero model calls): project-input controls, four
+            # agent rows, campaign controls, the readiness disclaimer, and
+            # the vertical scroll surface.
+            panel = window.proposal_panel
+            for attr in (
+                "ws_edit",
+                "import_blueprint_button",
+                "import_template_button",
+                "import_docs_button",
+                "import_proposal_button",
+                "generate_button",
+                "run_panel_button",
+                "run_iteration_button",
+                "run_gates_button",
+                "start_campaign_button",
+                "pause_campaign_button",
+                "resume_campaign_button",
+                "stop_campaign_button",
+            ):
+                if getattr(panel, attr, None) is None:
+                    raise AssertionError(f"proposal V2 control missing: {attr}")
+            if len(panel._role_rows) != 4:
+                raise AssertionError("proposal V2 agent rows != 4")
+            if not panel._scroll_area.widgetResizable():
+                raise AssertionError("proposal V2 panel is not scrollable")
+            if "NOT AN EIC SCORE" not in panel.readiness_disclaimer_label.text():
+                raise AssertionError("readiness disclaimer missing")
+            if panel.gate_table.rowCount() != 14:
+                raise AssertionError("hard-gate table rows != 14")
+            steps.append("proposal_v2_ui=ok")
             window.close()
             app.processEvents()
         finally:

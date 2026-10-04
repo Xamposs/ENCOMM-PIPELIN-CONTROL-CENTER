@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, ClassVar, Mapping
 
 from .enums import (
     HARD_GATE_IDS,
@@ -78,10 +78,30 @@ class ProposalAgentConfig:
     #: Optional externally-known session id to resume (real ids only; never
     #: fabricated — empty when none).
     session_id: str = ""
+    #: Session 019 (brief §11): how the driver session is obtained.
+    #: ``NEW_SESSION`` (default, recommended for independent evaluator work)
+    #: or ``RESUME_SELECTED_SESSION`` (requires a real ``session_id`` and a
+    #: driver whose capabilities expose ``supports_resume``).
+    session_mode: str = "NEW_SESSION"
+
+    #: The only accepted session modes (fail-closed whitelist).
+    SESSION_MODES: ClassVar[frozenset[str]] = frozenset(
+        {"NEW_SESSION", "RESUME_SELECTED_SESSION"}
+    )
 
     def __post_init__(self) -> None:
         if not isinstance(self.role, ProposalRole):
             self.role = ProposalRole(str(self.role))
+        if self.session_mode not in self.SESSION_MODES:
+            raise ValueError(
+                f"session_mode must be one of {sorted(self.SESSION_MODES)}; "
+                f"got {self.session_mode!r}."
+            )
+        if self.session_mode == "RESUME_SELECTED_SESSION" and not self.session_id.strip():
+            raise ValueError(
+                "session_mode RESUME_SELECTED_SESSION requires a real "
+                "session_id (never invented)."
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -92,6 +112,7 @@ class ProposalAgentConfig:
             "model": self.model,
             "session_policy": self.session_policy,
             "session_id": self.session_id,
+            "session_mode": self.session_mode,
         }
 
     @classmethod
@@ -104,6 +125,7 @@ class ProposalAgentConfig:
             model=str(data.get("model") or ""),
             session_policy=str(data.get("session_policy") or "persistent_optional"),
             session_id=str(data.get("session_id") or ""),
+            session_mode=str(data.get("session_mode") or "NEW_SESSION"),
         )
 
 

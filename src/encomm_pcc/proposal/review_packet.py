@@ -132,6 +132,11 @@ HARD OUTPUT RULES:
 - BLOCKED requires a finding (or summary) stating the concrete blocking
   reason.
 - Severity values are lowercase: critical, high, medium, low.
+- Each patch MUST carry content in EXACTLY ONE of 'replacement_text' /
+  'patch_instructions': put the full replacement text in 'replacement_text'
+  and leave 'patch_instructions' empty, OR vice versa — never fill both,
+  never leave both empty.  If you propose no patch, return an empty
+  'proposed_patches' list.
 - Numbers are plain JSON numbers; strings are bounded (keep every string
   under ~4000 characters; keep findings/patches/claims lists compact).
 - Use forward slashes in any path-like reference inside JSON strings;
@@ -255,10 +260,38 @@ def _section(title: str, body: Optional[str]) -> str:
     return f"## {title}\n\n{text.strip()}\n"
 
 
+def _section_with_cap(
+    title: str, body: Optional[str], *, max_chars: int
+) -> str:
+    """``_section`` with an explicit per-call cap (Session 019 budget seam).
+
+    ``max_chars=None`` callers use ``_section``; this helper applies the
+    given cap so a raised budget flows through without touching other
+    sections.
+    """
+    if body is None or not body.strip():
+        return _section(title, None)
+    if len(body) > max_chars:
+        raise ValueError(
+            f"packet section '{title}' exceeds {max_chars} characters "
+            f"({len(body)}); refusing to embed unbounded input."
+        )
+    return f"## {title}\n\n{body.strip()}\n"
+
+
 def build_review_packet(
-    role: ProposalRole, inputs: ProposalReviewInputs
+    role: ProposalRole,
+    inputs: ProposalReviewInputs,
+    *,
+    blueprint_max_chars: int | None = None,
 ) -> ProposalReviewPacket:
     """Render the deterministic review prompt for ``role``.
+
+    Session 019: ``blueprint_max_chars`` raises ONLY the MASTER BLUEPRINT
+    section's render cap (default: the historical 400,000 per-section cap)
+    so a large canonical blueprint reaches reviewers whole when the
+    configured source budget allows it.  Every other section keeps the
+    standard cap.
 
     Raises ``ValueError`` when the role is not one of the three reviewer
     roles (the ORCHESTRATOR is the integration authority, never a reviewer),
@@ -286,6 +319,11 @@ def build_review_packet(
             "official_requirements_available=True requires "
             "official_requirements_text."
         )
+    blueprint_cap = (
+        MAX_PACKET_SECTION_CHARS
+        if blueprint_max_chars is None
+        else max(1, int(blueprint_max_chars))
+    )
 
     previous = (
         "\n".join(f"- {line.strip()}" for line in inputs.previous_findings if line.strip())
@@ -310,7 +348,11 @@ def build_review_packet(
         "",
         inputs.proposal_text.strip(),
         "",
-        _section("SOURCE OF TRUTH — MASTER_BLUEPRINT.md", inputs.master_blueprint_text),
+        _section_with_cap(
+            "SOURCE OF TRUTH — MASTER_BLUEPRINT.md",
+            inputs.master_blueprint_text,
+            max_chars=blueprint_cap,
+        ),
         _section("SOURCE OF TRUTH — PROJECT_FACTS.md", inputs.project_facts_text),
         _section("SOURCE OF TRUTH — TEAM.md", inputs.team_text),
         _section("SOURCE OF TRUTH — ARCHITECTURE.md", inputs.architecture_text),

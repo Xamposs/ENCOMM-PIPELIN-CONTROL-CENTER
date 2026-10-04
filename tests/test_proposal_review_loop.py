@@ -1024,6 +1024,9 @@ class TestIsolation:
             # navigation affordance (brief §2: changes limited to it).
             SRC_ROOT / "encomm_pcc" / "ui" / "main_window.py",
             SRC_ROOT / "encomm_pcc" / "ui" / "simple_mode.py",
+            # Session 020: the readiness-disclaimer label module (imports
+            # ONLY proposal.readiness's constant; name-only exemption).
+            SRC_ROOT / "encomm_pcc" / "ui" / "readiness_disclaimer.py",
         }
         offending: list[str] = []
         for root in coding_roots:
