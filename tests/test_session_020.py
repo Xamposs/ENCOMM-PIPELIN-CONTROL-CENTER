@@ -613,7 +613,7 @@ class TestHermesSelectors:
                 profile_default_provider="zai",
                 profile_default_model="glm-x",
                 source=HERMES_CATALOG_SOURCE_INVENTORY,
-                exhaustive=True,
+                provider_catalog_authoritative=True,
             )
 
         panel = make_window(qapp).proposal_panel

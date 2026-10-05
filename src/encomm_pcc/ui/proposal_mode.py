@@ -257,6 +257,11 @@ class ProposalModePanel(QWidget):
         #: already auto-loaded (once per workspace selection; never re-read
         #: mid-run so operator edits are not clobbered).
         self._config_loaded_for: Path | None = None
+        #: Session 022A: the expensive inventory catalog is discovered ONCE
+        #: per (role, profile) and reused across provider switches; it is
+        #: invalidated on profile change, explicit REFRESH, and engine-away-
+        #: from-Hermes, and NEVER persisted into PROPOSAL_CONFIG.json.
+        self._catalog_cache: dict[tuple[ProposalRole, str], Any] = {}
         self._role_configs: dict[ProposalRole, ProposalAgentConfig] = {
             role: ProposalAgentConfig(role=role, engine="")
             for role in ProposalRole
@@ -415,7 +420,7 @@ class ProposalModePanel(QWidget):
             session.setText = session.setEditText  # type: ignore[method-assign]
             refresh = QPushButton("REFRESH")
             refresh.clicked.connect(
-                lambda _=False, r=role: self._on_refresh_hermes_selectors(r)
+                lambda _=False, r=role: self._on_refresh_agent_selectors(r)
             )
             agents_form.addWidget(label, row, 0)
             agents_form.addWidget(QLabel("Engine:"), row, 1)
@@ -904,7 +909,50 @@ class ProposalModePanel(QWidget):
                 self, "03_PROPOSAL", str(ws / "03_PROPOSAL")
             )
 
-    # -- Hermes selector discovery (Session 020 §8) ---------------------------------
+    def _invalidate_catalog_cache(self, role: ProposalRole) -> None:
+        """Session 022A: drop this role's cached catalogs (any profile).
+
+        The cache is keyed ``(role, profile)``; invalidation is per role
+        across profiles so a stale profile entry can never survive.
+        """
+        for key in [k for k in self._catalog_cache if k[0] == role]:
+            self._catalog_cache.pop(key, None)
+
+    # -- agent selector discovery (Session 020 §8; dispatch per engine, 022A) ------
+    def _on_refresh_agent_selectors(self, role: ProposalRole) -> None:
+        """Session 022A: ONE engine-aware REFRESH dispatcher per role row.
+
+        hermes: profiles + provider-model catalog + profile sessions.
+        codex:  real Codex sessions; the operator's model, reasoning, and
+                the disabled N/A profile/provider stay untouched; zero
+                model calls.
+        other:  an honest unavailable note (no capability-based discovery
+                surface exists for generic engines yet).
+        none:   no discovery call at all.
+        """
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        if engine == _HERMES_ENGINE_ID:
+            self._on_refresh_hermes_selectors(role)
+        elif engine == _CODEX_ENGINE_ID:
+            self._populate_codex_sessions(role)
+            self._on_role_config_text_changed(role)
+        elif not engine:
+            self._action_note = "Select an engine first."
+            self.refresh_status()
+        else:
+            caps = self._capabilities_for(engine)
+            if caps is not None and bool(caps.supports_sessions):
+                self._action_note = (
+                    f"{engine} exposes no selector discovery surface in "
+                    "this build; sessions/capabilities unchanged."
+                )
+            else:
+                self._action_note = (
+                    f"{engine} has no discoverable selector surface."
+                )
+            self.refresh_status()
+
     def _on_refresh_hermes_selectors(self, role: ProposalRole) -> None:
         row = self._role_rows[role]
         engine = str(row["engine"].currentData() or "")
@@ -912,6 +960,9 @@ class ProposalModePanel(QWidget):
             self._action_note = "Hermes discovery applies to the hermes engine."
             self.refresh_status()
             return
+        # Session 022A: an explicit REFRESH re-runs the inventory — drop
+        # this role's cached catalogs first (any profile).
+        self._invalidate_catalog_cache(role)
         profiles = discover_hermes_profile_names()
         profile_combo = row["profile"]
         current = profile_combo.currentText().strip()
@@ -954,7 +1005,11 @@ class ProposalModePanel(QWidget):
         row = self._role_rows[role]
         provider_combo = row["provider"]
         model_combo = row["model"]
-        catalog = discover_hermes_model_catalog(profile)
+        key = (role, str(profile or "").strip())
+        catalog = self._catalog_cache.get(key)
+        if catalog is None:
+            catalog = discover_hermes_model_catalog(profile)
+            self._catalog_cache[key] = catalog
         with QSignalBlocker(provider_combo), QSignalBlocker(model_combo):
             provider_combo.clear()
             model_combo.clear()
@@ -995,12 +1050,11 @@ class ProposalModePanel(QWidget):
             return
         provider = row["provider"].currentText().strip()
         previous_model = row["model"].currentText().strip()
-        catalog = discover_hermes_model_catalog(
-            row["profile"].currentText().strip()
-        )
+        key = (role, row["profile"].currentText().strip())
+        catalog = self._catalog_cache.get(key)
         models = (
             catalog.models_for_provider(provider)
-            if catalog.available
+            if catalog is not None and catalog.available
             else []
         )
         with QSignalBlocker(row["model"]):
@@ -1029,19 +1083,29 @@ class ProposalModePanel(QWidget):
         is_hermes = engine == _HERMES_ENGINE_ID
         requires_profile = True
         model_selectable = True
-        if engine and engine not in (_HERMES_ENGINE_ID, _CODEX_ENGINE_ID):
-            try:
-                caps = self.registry.capabilities(engine)
-                requires_profile = bool(caps.requires_profile)
-                model_selectable = bool(caps.supports_model_selection)
-            except KeyError:
-                requires_profile = True
-                model_selectable = True
-        elif is_hermes:
+        if not engine:
+            # Session 022A: no engine — EVERYTHING engine-specific goes
+            # neutral.  This is its own branch, never the Codex fallback.
+            for key in (
+                "profile", "provider", "model", "reasoning",
+                "session_mode", "session", "refresh",
+            ):
+                row[key].setEnabled(False)
+            return
+        caps = self._capabilities_for(engine)
+        if is_hermes:
             requires_profile = True
             model_selectable = True
-        else:  # codex
+        elif is_codex:
             requires_profile = False
+            model_selectable = True
+        elif caps is not None:
+            requires_profile = bool(caps.requires_profile)
+            model_selectable = bool(caps.supports_model_selection)
+            row["session_mode"].setEnabled(bool(caps.supports_sessions))
+            row["session"].setEnabled(bool(caps.supports_sessions))
+        else:  # unknown engine id: stay conservative
+            requires_profile = True
             model_selectable = True
         row["profile"].setEnabled(requires_profile)
         row["provider"].setEnabled(is_hermes)
@@ -1090,14 +1154,51 @@ class ProposalModePanel(QWidget):
             session_combo.addItem(session_id, session_id)
         # An honest empty/unavailable result leaves only NEW SESSION.
 
+    def _capabilities_for(self, engine: str):
+        """Session 022A: the engine's real DriverCapabilities (or None).
+
+        Unknown/empty engines resolve to None; callers decide the honest
+        fallback instead of this helper inventing capabilities.
+        """
+        engine = str(engine or "").strip()
+        if not engine:
+            return None
+        try:
+            return self.registry.capabilities(engine)
+        except KeyError:
+            return None
+
     def _on_role_engine_changed(self, role: ProposalRole) -> None:
         row = self._role_rows[role]
         engine = str(row["engine"].currentData() or "")
         is_hermes = engine == _HERMES_ENGINE_ID
         is_codex = engine == _CODEX_ENGINE_ID
-        for key in ("profile", "session_mode", "session", "refresh"):
-            widget = row[key]
-            widget.setEnabled(is_hermes or is_codex)
+        if not is_hermes:
+            # Session 022A: ANY engine change away from Hermes (codex,
+            # generic, none) invalidates this role's cached catalogs —
+            # including the codex branch below, which has no other pop.
+            self._invalidate_catalog_cache(role)
+        # Session 022A: session controls follow the REAL capabilities —
+        # never a hardcoded "Hermes or Codex" pair.  An engine that cannot
+        # keep sessions gets NEW_SESSION-only widgets; one that cannot
+        # resume gets NEW SESSION usable with RESUME not actionable.
+        caps = self._capabilities_for(engine)
+        supports_sessions = bool(caps.supports_sessions) if caps else False
+        supports_resume = bool(caps.supports_resume) if caps else False
+        row["session_mode"].setEnabled(supports_sessions)
+        row["session"].setEnabled(supports_sessions)
+        row["refresh"].setEnabled(is_hermes or is_codex)
+        if supports_sessions and not supports_resume:
+            # NEW SESSION stays usable; RESUME must not be actionable.
+            resume_index = row["session_mode"].findData(
+                "RESUME_SELECTED_SESSION"
+            )
+            if resume_index >= 0:
+                row["session_mode"].removeItem(resume_index)
+        elif row["session_mode"].findData("RESUME_SELECTED_SESSION") < 0:
+            row["session_mode"].addItem(
+                _SESSION_MODE_RESUME, "RESUME_SELECTED_SESSION"
+            )
         if is_codex:
             # Session 021: Codex carries NO profile/provider (N/A for the
             # engine contract) but an EDITABLE model and real session
@@ -1109,6 +1210,12 @@ class ProposalModePanel(QWidget):
             row["session"].setCurrentIndex(0)
             row["session_mode"].setCurrentIndex(0)
             self._populate_codex_sessions(role)
+        elif not supports_sessions:
+            # Session 022A: an engine that cannot keep sessions must not
+            # carry a session_mode/session binding (persisted NEW_SESSION/""
+            # below via the sync's own supports_sessions gate).
+            row["session"].setCurrentIndex(0)
+            row["session_mode"].setCurrentIndex(0)
         elif not is_hermes:
             # Engine away from Hermes: clear the incompatible Hermes session
             # binding AND the resume mode (a RESUME mode with no id would be
@@ -1118,6 +1225,7 @@ class ProposalModePanel(QWidget):
             row["session_mode"].setCurrentIndex(0)
             row["profile"].clear()
             row["model"].clear()
+            self._invalidate_catalog_cache(role)
         else:
             self._on_refresh_hermes_selectors(role)
             return
@@ -1193,6 +1301,7 @@ class ProposalModePanel(QWidget):
         # A profile switch invalidates the old session selection: sessions
         # are profile-scoped, so the previous profile's ids are gone.
         profile = row["profile"].currentText().strip()
+        self._invalidate_catalog_cache(role)
         self._populate_sessions(role, profile)
         self._populate_provider_model(role, profile)
         self._apply_selector_gating(role)

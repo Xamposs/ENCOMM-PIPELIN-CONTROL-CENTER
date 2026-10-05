@@ -182,7 +182,10 @@ class TestHermesModelCatalogUnit:
         assert cat.models_for_provider("deepseek") == [
             "deepseek-flash", "deepseek-v4-pro",
         ]
-        assert cat.exhaustive is True
+        # Session 022A honesty metadata: the provider list IS authoritative;
+        # the curated model lists are NOT claimed exhaustive.
+        assert cat.provider_catalog_authoritative is True
+        assert cat.model_lists_exhaustive is False
 
     def test_provider_dedup_is_deterministic(self, fake_hermes):
         cat = discover_hermes_model_catalog(
@@ -292,7 +295,7 @@ def catalog_panel(qapp, monkeypatch):
             profile_default_provider="zai",
             profile_default_model="glm-5.3-flash",
             source=HERMES_CATALOG_SOURCE_INVENTORY,
-            exhaustive=True,
+            provider_catalog_authoritative=True,
         )
 
     window = make_window(qapp)
@@ -630,3 +633,371 @@ def test_config_derived_provider_discovery_removed():
     assert "discover_hermes_provider_model" not in src
     assert "ProviderModelOptions" not in src
     assert "discover_hermes_model_catalog(" not in src
+
+
+# ---------------------------------------------------------------------------
+# Session 022A - refresh dispatch, catalog cache, gating, honesty metadata
+# ---------------------------------------------------------------------------
+
+
+class _CountingCatalog:
+    """A counted discovery stub standing in for the venv subprocess."""
+
+    def __init__(self):
+        self.calls = 0
+        self.providers = {
+            "alpha": ["alpha-1", "alpha-2"],
+            "beta": ["beta-1"],
+            "gamma": ["gamma-1"],
+        }
+
+    def __call__(self, profile, **kwargs):
+        self.calls += 1
+        entries = [
+            HermesProviderEntry(
+                slug=slug, name=slug, models=list(models),
+                total_models=len(models), source="built-in",
+            )
+            for slug, models in sorted(self.providers.items())
+        ]
+        return HermesModelCatalog(
+            profile=profile,
+            providers=entries,
+            models_by_provider={e.slug: list(e.models) for e in entries},
+            profile_default_provider="alpha",
+            profile_default_model="alpha-1",
+            source=HERMES_CATALOG_SOURCE_INVENTORY,
+            provider_catalog_authoritative=True,
+        )
+
+
+class TestRefreshDispatch:
+    """The ACTUAL REFRESH button signal drives the engine-aware dispatcher."""
+
+    def _click_refresh(self, panel, role) -> None:
+        row = panel._role_rows[role]
+        row["refresh"].click()
+
+    def test_refresh_button_dispatches_codex_sessions(self, qapp, monkeypatch):
+        """Brief proof: discovery returns A, then A+B; REFRESH shows B;
+        zero model calls."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.ORCHESTRATOR
+        row = panel._role_rows[role]
+        model_calls: list[str] = []
+        current = [
+            ExternalSessionDescriptor(
+                session_id="sess-A", driver_id="codex", title="A",
+                matches_workspace=True,
+            )
+        ]
+
+        def fake_discover(self, workspace_path=None, limit=25):
+            model_calls.append("discover")
+            return SessionDiscoveryResult(
+                ok=True,
+                driver_id="codex",
+                sessions=list(current),
+                mechanism="fixture",
+            )
+
+        monkeypatch.setattr(
+            "encomm_pcc.drivers.codex.CodexDriver.discover_sessions",
+            fake_discover,
+        )
+        row["engine"].setCurrentIndex(row["engine"].findData("codex"))
+        panel._on_role_engine_changed(role)
+        row["model"].setEditText("gpt-5.3-codex")
+        row["reasoning"].setCurrentIndex(row["reasoning"].findData("high"))
+        labels = [row["session"].itemText(i) for i in range(row["session"].count())]
+        assert any("sess-A" in t for t in labels)
+        # The backend "gains" session B.
+        current.append(
+            ExternalSessionDescriptor(
+                session_id="sess-B", driver_id="codex", title="B",
+                matches_workspace=True,
+            )
+        )
+        # Click the ACTUAL REFRESH button.
+        self._click_refresh(panel, role)
+        labels = [row["session"].itemText(i) for i in range(row["session"].count())]
+        assert any("sess-B" in t for t in labels), labels
+        # Operator state preserved; N/A display kept; zero model calls.
+        assert row["model"].currentText() == "gpt-5.3-codex"
+        assert row["reasoning"].currentData() == "high"
+        assert row["profile"].currentText() == "N/A"
+        assert row["provider"].currentText() == "N/A"
+        assert not row["profile"].isEnabled()
+        assert not row["provider"].isEnabled()
+        assert model_calls == ["discover", "discover"]  # discovery only
+
+    def test_refresh_button_dispatches_hermes_discovery(self, catalog_panel):
+        panel = catalog_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._catalog_cache.pop((role, "scientific"), None)
+        self._click_refresh(panel, role)
+        assert row["provider"].count() == 3
+        assert "Hermes discovery" in panel._action_note
+
+    def test_refresh_with_no_engine_calls_nothing(self, qapp, monkeypatch):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        called: list[str] = []
+
+        def fail(*a, **k):
+            called.append("x")
+
+        monkeypatch.setattr(panel, "_on_refresh_hermes_selectors", fail)
+        monkeypatch.setattr(panel, "_populate_codex_sessions", fail)
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        self._click_refresh(panel, role)
+        assert called == []
+        assert "Select an engine first." == panel._action_note
+
+    def test_refresh_unknown_engine_honest_note(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        engine = row["engine"]
+        engine.addItem("mystery", "mystery")
+        engine.setCurrentIndex(engine.findData("mystery"))
+        panel._apply_selector_gating(role)
+        self._click_refresh(panel, role)
+        assert "mystery" in panel._action_note
+
+
+class TestCatalogCache:
+    def test_provider_switches_reuse_the_cached_catalog(self, qapp, monkeypatch):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        counting = _CountingCatalog()
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            counting,
+        )
+        # Pre-seed is dropped by the explicit refresh (refresh = re-discover,
+        # by design); the CACHE benefit is proven across the provider
+        # switches below.
+        panel._catalog_cache[(role, "scientific")] = counting("scientific")
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_refresh_hermes_selectors(role)
+        calls_after_refresh = counting.calls
+        provider = row["provider"]
+        # A -> B -> C switching: still no new discovery.
+        provider.setCurrentIndex(provider.findText("beta"))
+        panel._on_role_provider_changed(role)
+        assert [row["model"].itemText(i) for i in range(row["model"].count())] == ["beta-1"]
+        provider.setCurrentIndex(provider.findText("gamma"))
+        panel._on_role_provider_changed(role)
+        assert [row["model"].itemText(i) for i in range(row["model"].count())] == ["gamma-1"]
+        provider.setCurrentIndex(provider.findText("alpha"))
+        panel._on_role_provider_changed(role)
+        assert [row["model"].itemText(i) for i in range(row["model"].count())] == [
+            "alpha-1", "alpha-2",
+        ]
+        assert counting.calls == calls_after_refresh  # cache served switches
+
+    def test_discovery_once_then_explicit_refresh_recounts(
+        self, qapp, monkeypatch
+    ):
+        """refresh/profile load => 1; provider A->B->C => still 1;
+        explicit REFRESH => 2."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        counting = _CountingCatalog()
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            counting,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_refresh_hermes_selectors(role)   # initial load
+        assert counting.calls == 1
+        provider = row["provider"]
+        provider.setCurrentIndex(provider.findText("beta"))
+        panel._on_role_provider_changed(role)
+        provider.setCurrentIndex(provider.findText("gamma"))
+        panel._on_role_provider_changed(role)
+        provider.setCurrentIndex(provider.findText("alpha"))
+        panel._on_role_provider_changed(role)
+        assert counting.calls == 1                 # cache served the switches
+        row["refresh"].click()                     # explicit REFRESH
+        assert counting.calls == 2                 # re-discovered once
+
+    def test_profile_change_invalidates_the_cache(self, qapp, monkeypatch):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        counting = _CountingCatalog()
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            counting,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_refresh_hermes_selectors(role)
+        assert counting.calls == 1
+        monkeypatch.setattr(panel, "_populate_sessions", lambda r, p: None)
+        row["profile"].setEditText("other-profile")
+        panel._on_role_profile_changed(role)
+        assert counting.calls == 2                 # new profile => new discovery
+
+    def test_engine_away_from_hermes_invalidates_the_cache(
+        self, qapp, monkeypatch
+    ):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        counting = _CountingCatalog()
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            counting,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_refresh_hermes_selectors(role)
+        assert counting.calls == 1
+        row["engine"].setCurrentIndex(row["engine"].findData("codex"))
+        panel._on_role_engine_changed(role)
+        assert panel._catalog_cache == {}          # invalidated on engine-away
+
+
+class TestNoEngineAndCapabilityGating:
+    def test_no_engine_disables_every_engine_specific_control(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        panel._apply_selector_gating(role)
+        panel._sync_reasoning_availability(role)
+        for key in (
+            "profile", "provider", "model", "reasoning",
+            "session_mode", "session", "refresh",
+        ):
+            assert not row[key].isEnabled(), key
+
+    def test_engine_change_with_no_engine_disables_refresh(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.ORCHESTRATOR
+        row = panel._role_rows[role]
+        # Start from Hermes (everything on), then clear the engine.
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_refresh_hermes_selectors(role)
+        engine = row["engine"]
+        engine.setCurrentIndex(0)  # "(select engine)"
+        panel._on_role_engine_changed(role)
+        panel._apply_selector_gating(role)
+        for key in ("profile", "provider", "model", "session_mode", "session"):
+            assert not row[key].isEnabled(), key
+        assert not row["refresh"].isEnabled()
+
+    def test_sessionless_engine_disables_session_controls(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        engine = row["engine"]
+        if engine.findData("scripted-s022") < 0:
+            engine.addItem("scripted-s022", "scripted-s022")
+        engine.setCurrentIndex(engine.findData("scripted-s022"))
+        panel._on_role_engine_changed(role)
+        # scripted: supports_sessions=False, supports_resume=False
+        assert not row["session_mode"].isEnabled()
+        assert not row["session"].isEnabled()
+        config = panel.role_configs()[role]
+        assert config.session_mode == "NEW_SESSION"
+        assert config.session_id == ""
+
+    def test_sessions_without_resume_hides_the_resume_option(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+
+        class _NoResume:
+            driver_id = "scripted-s022"
+
+            @classmethod
+            def capabilities(cls):
+                return DriverCapabilities(
+                    driver_id=cls.driver_id,
+                    display_name="NoResume",
+                    supports_sessions=True,
+                    supports_resume=False,
+                    supports_model_selection=True,
+                    requires_profile=False,
+                    implemented=True,
+                )
+
+        panel.registry.register(_NoResume)
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        engine = row["engine"]
+        if engine.findData("scripted-s022") < 0:
+            engine.addItem("scripted-s022", "scripted-s022")
+        engine.setCurrentIndex(engine.findData("scripted-s022"))
+        panel._on_role_engine_changed(role)
+        # NEW SESSION usable; RESUME not actionable (option removed).
+        assert row["session_mode"].isEnabled()
+        assert row["session"].isEnabled()
+        assert row["session_mode"].findData("RESUME_SELECTED_SESSION") < 0
+        assert row["session_mode"].currentData() == "NEW_SESSION"
+
+    def test_hermes_codex_production_gating_unchanged(self, qapp):
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._on_role_engine_changed(role)
+        assert row["session_mode"].isEnabled()
+        assert row["session"].isEnabled()
+        assert row["session_mode"].findData("RESUME_SELECTED_SESSION") >= 0
+        assert row["refresh"].isEnabled()
+        row["engine"].setCurrentIndex(row["engine"].findData("codex"))
+        panel._on_role_engine_changed(role)
+        assert row["session_mode"].isEnabled()
+        assert row["session"].isEnabled()
+        assert row["session_mode"].findData("RESUME_SELECTED_SESSION") >= 0
+        assert row["refresh"].isEnabled()
+        assert not row["profile"].isEnabled()
+        assert not row["provider"].isEnabled()
+
+
+class TestCatalogHonestyMetadata:
+    def test_no_false_completeness_claim(self):
+        cat = discover_hermes_model_catalog(
+            "scientific",
+            environ={
+                "HERMES_AGENT_DIR": "X:/nope",
+                "HERMES_HOME": "X:/nope-home",
+            },
+            runner=_CatalogScriptRunner(json.dumps(_CATALOG_JSON)),
+        )
+        # Even in failure, the metadata is honest (never "exhaustive").
+        assert cat.provider_catalog_authoritative is False
+        assert cat.model_lists_exhaustive is False
+
+    def test_success_claims_authoritative_providers_only(self, tmp_path):
+        agent = tmp_path / "hermes-agent"
+        (agent / "venv" / "Scripts").mkdir(parents=True)
+        (agent / "venv" / "Scripts" / "python.exe").write_text("", encoding="utf-8")
+        home = tmp_path / "profiles" / "scientific"
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text("model:\n", encoding="utf-8")
+        cat = discover_hermes_model_catalog(
+            "scientific",
+            environ={
+                "HERMES_AGENT_DIR": str(agent),
+                "HERMES_HOME": str(home),
+            },
+            runner=_catalog_runner(),
+        )
+        assert cat.provider_catalog_authoritative is True
+        assert cat.model_lists_exhaustive is False

@@ -115,16 +115,21 @@ see GIT_STATUS below for the executed result.
 
 ## GIT_STATUS
 
-* Commit: `c68280567238483da71b70603b5497716c18c15b`
+* Code feature commit (S022):
+  `c68280567238483da71b70603b5497716c18c15b`
   (`fix(proposal-ui): complete Hermes provider-model discovery and engine
   selectors`)
-* Remote head `origin/proposal-selector-discovery-session-022`:
-  `c68280567238483da71b70603b5497716c18c15b` (verified via
-  `git ls-remote`; local HEAD == remote head)
+* Docs/report commit (S022):
+  `7dabbaa254a1e1429e4f6d46c4eaaf3d2c220a6c`
+  (`docs: fill SESSION_022 report git status and limitations`)
 * Build: `BUILD OK: dist\ENCOMM-PCC\ENCOMM-PCC.exe`
 * Packaged smoke: `SMOKE OK version=1.5.1 app_data_writable=…
   sqlite_ok=schema_v5 controller_constructed drivers=codex,generic_cli,hermes
   mode_tabs=2(coding,proposal) proposal_v2_ui=ok clean_shutdown` — exit 0.
+* (An earlier revision of this section named `c682805…` as the remote head;
+  that was stale the moment the docs commit landed — the S022 remote head
+  was `7dabbaa…`.  Final remote head after the 022A corrective commit is
+  recorded in the corrective note below.)
 
 ## Known limitations
 
@@ -137,3 +142,49 @@ see GIT_STATUS below for the executed result.
   fabricated list.
 * Codex model discovery remains impossible by design (no CLI listing);
   the field is editable with a display-only placeholder.
+
+> **Session 022A corrective note:** the discovery ARCHITECTURE is unchanged.
+> Corrections, all on this same branch (`proposal-selector-discovery-
+> session-022`), version stays 1.5.1:
+>
+> 1. **REFRESH dispatches by engine** — every row's REFRESH button now goes
+>    through `_on_refresh_agent_selectors(role)`: hermes → profiles+catalog+
+>    sessions; codex → real Codex sessions (operator model/reasoning/N-A
+>    display preserved, zero model calls); other → honest unavailable note;
+>    no engine → "Select an engine first." with no discovery call.  Proven
+>    by clicking the ACTUAL button in tests (discovery returns A, backend
+>    gains B, click, B appears).
+> 2. **Catalog cached per (role, profile)** — discovery runs once on
+>    Hermes-engine refresh/profile load; provider A→B→C switching serves
+>    from the cache (counted-stub proof: 1 call across switches, 2 after an
+>    explicit REFRESH); invalidated on profile change, explicit REFRESH, and
+>    ANY engine change away from Hermes (including the codex branch — a gap
+>    the first fix missed and the tests caught).  Never persisted into
+>    PROPOSAL_CONFIG.json.  Real-host timings: 4.4s cold → 1.4s warm.
+> 3. **No-engine gating is its own branch** — engine=="" disables profile,
+>    provider, model, reasoning, session mode, session AND refresh (never
+>    the Codex fallback).  Session controls now follow the real
+>    DriverCapabilities for every engine (`supports_sessions` /
+>    `supports_resume`; a sessions-without-resume engine loses the RESUME
+>    option entirely).  Hermes/Codex production behavior unchanged.
+> 4. **Codex N/A reconfirmed display-only** — profile/provider disabled
+>    "N/A", persisted `""`; REFRESH never touches an operator-entered Codex
+>    model (button-click test pins it).
+> 5. **Honesty metadata fixed** — `exhaustive=True` was contradictory with
+>    the documented limitation; replaced with
+>    `provider_catalog_authoritative=True` +
+>    `model_lists_exhaustive=False`.  No runtime behavior reads a
+>    completeness claim.
+> 6. **Live-caught defect (real-host probe):** the DEFAULT profile's home is
+>    the Hermes ROOT itself (`%LOCALAPPDATA%\hermes`), which the two-
+>    candidate walk missed — `default` discovered NO catalog.  `_profile_home_dir`
+>    now resolves a root-level `config.yaml` as the default profile's home.
+>    (Real-host default profile: 8 providers incl. nous; defaults
+>    zai/glm-5.3-flash.)
+>
+> Tests: **1284 passed, 0 failed** (S022 baseline 1269; +15).
+> Packaged smoke rebuilt: `SMOKE OK version=1.5.1 … proposal_v2_ui=ok`,
+> exit 0.
+> 022A corrective commit: `fix(proposal-ui): finalize selector refresh and
+> catalog caching` — pushed; **final remote head is that commit** (verified
+> via `git ls-remote` at handoff time).  DO NOT MERGE YET.

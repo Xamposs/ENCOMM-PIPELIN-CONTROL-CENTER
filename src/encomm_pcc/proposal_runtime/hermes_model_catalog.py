@@ -144,11 +144,14 @@ class HermesProviderEntry:
 class HermesModelCatalog:
     """The real provider/model catalog for ONE Hermes profile.
 
-    ``exhaustive`` mirrors what the source can honestly claim: the inventory
-    is Hermes' own authoritative picker substrate, but a provider may still
-    expose models the curated list omits, so the UI keeps every combo
-    EDITABLE.  Discovery failures degrade to ``source="unavailable"`` with
-    ``error`` populated — never a fabricated list.
+    Honesty metadata (Session 022A): ``provider_catalog_authoritative`` means
+    the PROVIDER LIST comes from Hermes' own picker substrate (which providers
+    are configured is a fact about the installation).  ``model_lists_exhaustive``
+    is False by design: a provider may expose models its curated list omits,
+    so the UI keeps every combo EDITABLE and no runtime behavior may treat a
+    model list as complete.  Discovery failures degrade to
+    ``source="unavailable"`` with ``error`` populated — never a fabricated
+    list.
     """
 
     profile: str = ""
@@ -157,7 +160,10 @@ class HermesModelCatalog:
     profile_default_provider: str = ""
     profile_default_model: str = ""
     source: str = HERMES_CATALOG_SOURCE_NONE
-    exhaustive: bool = False
+    #: The provider list is Hermes' own authoritative picker substrate.
+    provider_catalog_authoritative: bool = False
+    #: Curated per-provider model lists can lag a provider's newest models.
+    model_lists_exhaustive: bool = False
     error: str = ""
 
     @property
@@ -233,6 +239,12 @@ def _profile_home_dir(profile: str, environ: dict[str, str] | None) -> str:
         for candidate in (root / "profiles" / name, root / name):
             if (candidate / "config.yaml").is_file():
                 return str(candidate)
+        # Session 022A: a root-level config.yaml IS the DEFAULT profile's
+        # home (the classic single-home layout — the profile id stays
+        # "default" even when renamed for display).  Without this, the
+        # default profile discovered no catalog at all.
+        if name == "default" and (root / "config.yaml").is_file():
+            return str(root)
     return ""
 
 
@@ -378,5 +390,6 @@ def _parse_inventory_payload(stdout: str, *, profile: str) -> HermesModelCatalog
         profile_default_provider=str(data.get("profile_default_provider") or "").strip(),
         profile_default_model=str(data.get("profile_default_model") or "").strip(),
         source=HERMES_CATALOG_SOURCE_INVENTORY,
-        exhaustive=True,
+        provider_catalog_authoritative=True,
+        model_lists_exhaustive=False,
     )
