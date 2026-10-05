@@ -115,4 +115,25 @@ see GIT_STATUS below for the executed result.
 
 ## GIT_STATUS
 
-( filled at commit time — see the handoff message )
+* Commit: `c68280567238483da71b70603b5497716c18c15b`
+  (`fix(proposal-ui): complete Hermes provider-model discovery and engine
+  selectors`)
+* Remote head `origin/proposal-selector-discovery-session-022`:
+  `c68280567238483da71b70603b5497716c18c15b` (verified via
+  `git ls-remote`; local HEAD == remote head)
+* Build: `BUILD OK: dist\ENCOMM-PCC\ENCOMM-PCC.exe`
+* Packaged smoke: `SMOKE OK version=1.5.1 app_data_writable=…
+  sqlite_ok=schema_v5 controller_constructed drivers=codex,generic_cli,hermes
+  mode_tabs=2(coding,proposal) proposal_v2_ui=ok clean_shutdown` — exit 0.
+
+## Known limitations
+
+* The inventory's curated per-provider model lists can lag a provider's
+  newest models; the combos stay EDITABLE so any exact id remains
+  operator-enterable (discovery is a suggestion, never a cage).
+* The catalog child imports the installed Hermes package's inventory API; a
+  future Hermes update that renames it fails SOFT to "unavailable" (typed
+  import guard) — the UI then shows empty-but-editable combos, never a
+  fabricated list.
+* Codex model discovery remains impossible by design (no CLI listing);
+  the field is editable with a display-only placeholder.
