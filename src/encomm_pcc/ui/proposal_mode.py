@@ -11,8 +11,10 @@ A. PROJECT INPUTS  — workspace + the REAL ``source_import`` importers
    replace confirmation; extraction warnings surfaced; source budget shown
    BEFORE any AI action);
 B. AGENTS          — the four proposal roles with REAL Hermes selector
-   discovery (profiles / profile-derived provider+model / profile-scoped
-   sessions; combos stay EDITABLE — nothing is invented);
+   discovery (profiles / the authoritative provider-model inventory /
+   profile-scoped sessions; combos stay EDITABLE — nothing is invented).
+   Session 022: selecting a provider repopulates its models immediately;
+   controls an engine cannot use are disabled N/A (capability-gated);
 C. PANEL / CAMPAIGN— GENERATE INITIAL PROPOSAL, RUN PANEL ITERATION (the
    REAL panel-chair path, never the legacy sequential cycle), RUN HARD
    GATES, and the bounded AUTONOMOUS PANEL CAMPAIGN with boundary-only
@@ -39,7 +41,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSignalBlocker
 from PySide6.QtGui import QBrush, QColor
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -94,10 +96,11 @@ from ..proposal_runtime.campaign import (
     CampaignStatus,
     load_campaign_state,
 )
+from ..proposal_runtime.hermes_model_catalog import (
+    discover_hermes_model_catalog,
+)
 from ..proposal_runtime.hermes_selector_discovery import (
-    HERMES_DISCOVERY_SOURCE_CONFIG,
     discover_hermes_profile_names,
-    discover_hermes_provider_model,
     discover_hermes_sessions,
 )
 from ..proposal.panel_matrix import PanelConsensusMatrix
@@ -160,6 +163,12 @@ _ITERATION_RUN_PHASES: frozenset[ProposalPhase] = frozenset(
 #: plain editable fields).
 _HERMES_ENGINE_ID = "hermes"
 _CODEX_ENGINE_ID = "codex"
+
+#: Session 022: Codex exposes NO model-listing command (verified against the
+#: installed CLI), so its model field stays EDITABLE and this placeholder
+#: tells the operator exactly what to enter.  It is display-only: the sync
+#: never persists the placeholder text as a model value.
+_CODEX_MODEL_PLACEHOLDER = "Enter exact Codex model id available to this account"
 
 #: Operator-facing role labels (brief §7 — ASTRA is the panel chair label).
 _ROLE_LABELS: dict[ProposalRole, str] = {
@@ -376,11 +385,15 @@ class ProposalModePanel(QWidget):
             provider = QComboBox()
             provider.setEditable(True)
             provider.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            provider.setToolTip("Profile-derived provider (editable)")
+            provider.setToolTip(
+                "Real Hermes providers (discovered inventory; editable)"
+            )
             model = QComboBox()
             model.setEditable(True)
             model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            model.setToolTip("Profile-derived model (editable)")
+            model.setToolTip(
+                "Real models for the selected provider (editable)"
+            )
             reasoning = QComboBox()
             reasoning.addItem("DEFAULT", "")
             for level in ("minimal", "low", "medium", "high", "xhigh"):
@@ -425,6 +438,9 @@ class ProposalModePanel(QWidget):
             )
             profile.activated.connect(
                 lambda _idx, r=role: self._on_role_profile_changed(r)
+            )
+            provider.activated.connect(
+                lambda _idx, r=role: self._on_role_provider_changed(r)
             )
             provider.editTextChanged.connect(
                 lambda _t, r=role: self._on_role_config_text_changed(r)
@@ -909,32 +925,160 @@ class ProposalModePanel(QWidget):
                     profile_combo.setCurrentIndex(idx)
         # An honest empty result stays empty — never a fabricated list.
         selected_profile = profile_combo.currentText().strip()
+        catalog_note = ""
         if selected_profile:
-            self._populate_provider_model(role, selected_profile)
+            catalog_note = self._populate_provider_model(role, selected_profile)
             self._populate_sessions(role, selected_profile)
+        self._apply_selector_gating(role)
+        self._sync_reasoning_availability(role)
         self._on_role_config_text_changed(role)
         self._action_note = (
             f"Hermes discovery: {len(profiles.profiles)} profile(s) "
-            f"({profiles.source or profiles.error or 'unavailable'})."
+            f"({profiles.source or profiles.error or 'unavailable'})"
+            + (f"; {catalog_note}" if catalog_note else "")
+            + "."
         )
         self.refresh_status()
 
-    def _populate_provider_model(self, role: ProposalRole, profile: str) -> None:
+    def _populate_provider_model(self, role: ProposalRole, profile: str) -> str:
+        """Session 022: populate provider + models from the REAL inventory.
+
+        Provider items = every provider the authoritative catalog lists
+        (deterministic inventory order); the profile's default provider is
+        selected when present.  Models belong to the SELECTED provider —
+        the profile's default model is preselected only when it belongs to
+        that provider.  Combos stay EDITABLE either way (discovery is a
+        suggestion, never a cage).  Returns a short honest note for the
+        action line.
+        """
         row = self._role_rows[role]
-        options = discover_hermes_provider_model(profile)
         provider_combo = row["provider"]
         model_combo = row["model"]
-        provider_combo.clear()
-        model_combo.clear()
-        if options.available:
-            if options.current_provider:
-                provider_combo.addItem(options.current_provider)
-            for name in options.known_providers:
-                if provider_combo.findText(name) < 0:
-                    provider_combo.addItem(name)
-            if options.current_model:
-                model_combo.addItem(options.current_model)
-        # Honest source label; combos remain EDITABLE either way.
+        catalog = discover_hermes_model_catalog(profile)
+        with QSignalBlocker(provider_combo), QSignalBlocker(model_combo):
+            provider_combo.clear()
+            model_combo.clear()
+            if catalog.available:
+                for name in catalog.provider_names():
+                    provider_combo.addItem(name, name)
+                default_provider = catalog.profile_default_provider
+                if default_provider:
+                    idx = provider_combo.findText(default_provider)
+                    if idx >= 0:
+                        provider_combo.setCurrentIndex(idx)
+                selected_provider = provider_combo.currentText().strip()
+                for model_id in catalog.models_for_provider(selected_provider):
+                    model_combo.addItem(model_id, model_id)
+                default_model = catalog.profile_default_model
+                if default_model and model_combo.findText(default_model) >= 0:
+                    model_combo.setCurrentIndex(
+                        model_combo.findText(default_model)
+                    )
+        if catalog.available:
+            return (
+                f"{len(catalog.providers)} provider(s) via "
+                f"{catalog.source} (editable)"
+            )
+        return f"provider/model catalog unavailable ({catalog.error})"
+
+    def _on_role_provider_changed(self, role: ProposalRole) -> None:
+        """Session 022: provider selection repopulates models IMMEDIATELY.
+
+        The manually-entered model is preserved only when it already
+        belongs to the newly selected provider (item match); otherwise the
+        provider's real models replace the list — an unrelated provider's
+        model is never silently kept or substituted.
+        """
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        if engine != _HERMES_ENGINE_ID:
+            return
+        provider = row["provider"].currentText().strip()
+        previous_model = row["model"].currentText().strip()
+        catalog = discover_hermes_model_catalog(
+            row["profile"].currentText().strip()
+        )
+        models = (
+            catalog.models_for_provider(provider)
+            if catalog.available
+            else []
+        )
+        with QSignalBlocker(row["model"]):
+            row["model"].clear()
+            for model_id in models:
+                row["model"].addItem(model_id, model_id)
+            if previous_model and row["model"].findText(previous_model) >= 0:
+                row["model"].setCurrentIndex(
+                    row["model"].findText(previous_model)
+                )
+        self._on_role_config_text_changed(role)
+
+    def _apply_selector_gating(self, role: ProposalRole) -> None:
+        """Session 022: enable only the controls the engine can actually use.
+
+        Capability-driven (brief §5): a profile is enabled only when the
+        engine ``requires_profile``; the provider selector is Hermes-only;
+        the model field is enabled only when the engine
+        ``supports_model_selection``.  Codex has NO Hermes profile/provider
+        contract: those combos are DISABLED showing "N/A" (never a
+        misleading empty editable box).
+        """
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        is_codex = engine == _CODEX_ENGINE_ID
+        is_hermes = engine == _HERMES_ENGINE_ID
+        requires_profile = True
+        model_selectable = True
+        if engine and engine not in (_HERMES_ENGINE_ID, _CODEX_ENGINE_ID):
+            try:
+                caps = self.registry.capabilities(engine)
+                requires_profile = bool(caps.requires_profile)
+                model_selectable = bool(caps.supports_model_selection)
+            except KeyError:
+                requires_profile = True
+                model_selectable = True
+        elif is_hermes:
+            requires_profile = True
+            model_selectable = True
+        else:  # codex
+            requires_profile = False
+            model_selectable = True
+        row["profile"].setEnabled(requires_profile)
+        row["provider"].setEnabled(is_hermes)
+        row["model"].setEnabled(model_selectable)
+        if is_codex:
+            with QSignalBlocker(row["profile"]), QSignalBlocker(row["provider"]):
+                row["profile"].setEditText("N/A")
+                row["provider"].setEditText("N/A")
+            self._populate_codex_model(role)
+
+    def _populate_codex_model(self, role: ProposalRole) -> None:
+        """Codex model display: placeholder ONLY when the field is empty.
+
+        There is NO verified Codex model listing (the installed CLI exposes
+        no model-listing command), so NOTHING is ever put into the list and
+        the Hermes inventory is never copied across engines.  An
+        operator-entered or persisted model id is never overwritten.
+        """
+        row = self._role_rows[role]
+        with QSignalBlocker(row["model"]):
+            if not row["model"].currentText().strip():
+                row["model"].setEditText(_CODEX_MODEL_PLACEHOLDER)
+
+    def _sync_reasoning_availability(self, role: ProposalRole) -> None:
+        """Session 022: reasoning is a VERIFIED Codex-only contract.
+
+        On non-Codex engines the combo is disabled and shows "N/A"; the
+        underlying selection stays DEFAULT (data "") so a persisted config
+        never carries a reasoning effort for a non-Codex engine.
+        """
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        is_codex = engine == _CODEX_ENGINE_ID
+        row["reasoning"].setEnabled(is_codex)
+        row["reasoning"].setItemText(0, "DEFAULT" if is_codex else "N/A")
+        if not is_codex:
+            row["reasoning"].setCurrentIndex(0)
 
     def _populate_sessions(self, role: ProposalRole, profile: str) -> None:
         row = self._role_rows[role]
@@ -973,9 +1117,12 @@ class ProposalModePanel(QWidget):
             row["session"].setCurrentIndex(0)
             row["session_mode"].setCurrentIndex(0)
             row["profile"].clear()
+            row["model"].clear()
         else:
             self._on_refresh_hermes_selectors(role)
             return
+        self._apply_selector_gating(role)
+        self._sync_reasoning_availability(role)
         self._on_role_config_text_changed(role)
 
     def _populate_codex_sessions(self, role: ProposalRole) -> None:
@@ -1045,8 +1192,11 @@ class ProposalModePanel(QWidget):
         row = self._role_rows[role]
         # A profile switch invalidates the old session selection: sessions
         # are profile-scoped, so the previous profile's ids are gone.
-        self._populate_sessions(role, row["profile"].currentText().strip())
-        self._populate_provider_model(role, row["profile"].currentText().strip())
+        profile = row["profile"].currentText().strip()
+        self._populate_sessions(role, profile)
+        self._populate_provider_model(role, profile)
+        self._apply_selector_gating(role)
+        self._sync_reasoning_availability(role)
         # The selection AND the mode RESET: sessions are profile-scoped, so
         # the previous profile's resume binding is meaningless — leaving
         # RESUME_SELECTED_SESSION armed with no id would be an unconstructable
@@ -1094,12 +1244,27 @@ class ProposalModePanel(QWidget):
             # The reasoning setting is meaningful ONLY for Codex (the
             # verified CLI contract); other engines always persist "".
             reasoning = str(row["reasoning"].currentData() or "")
+        # Session 022: Codex carries NO Hermes profile/provider (persisted
+        # empty, per the engine contract) and its placeholder is display-
+        # only; Hermes never persists a reasoning effort (Codex-only).
+        is_codex_engine = engine == _CODEX_ENGINE_ID
+        model_text = row["model"].currentText().strip()
         self._role_configs[role] = ProposalAgentConfig(
             role=role,
             engine=engine,
-            project_profile=row["profile"].currentText().strip(),
-            provider=row["provider"].currentText().strip(),
-            model=row["model"].currentText().strip(),
+            project_profile=(
+                "" if is_codex_engine
+                else row["profile"].currentText().strip()
+            ),
+            provider=(
+                "" if is_codex_engine
+                else row["provider"].currentText().strip()
+            ),
+            model=(
+                ""
+                if is_codex_engine and model_text == _CODEX_MODEL_PLACEHOLDER
+                else model_text
+            ),
             session_policy="persistent_optional",
             session_id=session_text,
             session_mode=session_mode,
@@ -1146,6 +1311,9 @@ class ProposalModePanel(QWidget):
             row["reasoning"].setCurrentIndex(
                 reasoning_index if reasoning_index >= 0 else 0
             )
+            # Session 022: restore the engine-honest selector state.
+            self._sync_reasoning_availability(role)
+            self._apply_selector_gating(role)
             if config.session_id:
                 if row["session"].findData(config.session_id) < 0:
                     row["session"].addItem(config.session_id, config.session_id)
@@ -2165,6 +2333,9 @@ class ProposalModePanel(QWidget):
                 1 if config.session_mode == "RESUME_SELECTED_SESSION" else 0
             )
             row["session_mode"].setCurrentIndex(mode_index)
+            # Session 022: keep the engine-honest selector state in sync.
+            self._sync_reasoning_availability(role)
+            self._apply_selector_gating(role)
             if config.session_id:
                 if row["session"].findData(config.session_id) < 0:
                     row["session"].addItem(config.session_id, config.session_id)

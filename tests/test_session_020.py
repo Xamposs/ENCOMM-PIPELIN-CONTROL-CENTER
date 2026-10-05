@@ -584,27 +584,52 @@ class TestHermesSelectors:
     def test_provider_model_populated_from_profile_config_only(
         self, qapp, tmp_path, monkeypatch
     ):
-        from encomm_pcc.proposal_runtime.hermes_selector_discovery import (
-            ProviderModelOptions,
-            HERMES_DISCOVERY_SOURCE_CONFIG,
+        # Session 022: the catalog contract replaced the config-derived
+        # suggestion.  The provider list carries EVERY discovered provider
+        # (deduped, inventory order); models belong to the SELECTED
+        # provider; the profile defaults preselect when they belong.
+        from encomm_pcc.proposal_runtime.hermes_model_catalog import (
+            HERMES_CATALOG_SOURCE_INVENTORY,
+            HermesModelCatalog,
+            HermesProviderEntry,
         )
+
+        def fake_catalog(profile, **kwargs):
+            entries = [
+                HermesProviderEntry(
+                    slug="zai", name="Z.AI / GLM",
+                    models=["glm-x", "glm-5.3"], total_models=2,
+                    source="built-in",
+                ),
+                HermesProviderEntry(
+                    slug="openrouter", name="OpenRouter",
+                    models=["or/a"], total_models=1, source="built-in",
+                ),
+            ]
+            return HermesModelCatalog(
+                profile=profile,
+                providers=entries,
+                models_by_provider={e.slug: list(e.models) for e in entries},
+                profile_default_provider="zai",
+                profile_default_model="glm-x",
+                source=HERMES_CATALOG_SOURCE_INVENTORY,
+                exhaustive=True,
+            )
 
         panel = make_window(qapp).proposal_panel
         role = ProposalRole.SCIENTIFIC_REVIEWER
         row = panel._role_rows[role]
         monkeypatch.setattr(
-            "encomm_pcc.ui.proposal_mode.discover_hermes_provider_model",
-            lambda profile: ProviderModelOptions(
-                current_provider="zai",
-                current_model="glm-x",
-                known_providers=["zai", "openrouter"],
-                source=HERMES_DISCOVERY_SOURCE_CONFIG,
-            ),
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            fake_catalog,
         )
         panel._populate_provider_model(role, "alpha")
         assert row["provider"].currentText() == "zai"
         assert row["model"].currentText() == "glm-x"
-        assert row["provider"].count() == 2  # current + known, nothing invented
+        assert row["provider"].count() == 2  # every discovered provider
+        assert [row["model"].itemText(i) for i in range(row["model"].count())] == [
+            "glm-x", "glm-5.3",
+        ]
         # Still editable: an operator-entered value sticks.
         row["model"].setEditText("custom-model")
         assert row["model"].currentText() == "custom-model"
