@@ -279,6 +279,14 @@ class ProposalModePanel(QWidget):
         #: §A/§J: one friendly operator note per role (e.g. the
         #: catalogue-unavailable message); shown in the role card.
         self._role_notes: dict[ProposalRole, str] = {}
+        #: Session 023A: per-role marker that the provider/model combo
+        #: values are an OPERATOR (or persisted) override.  Discovery
+        #: NEVER sets this: a profile default shown in a combo stays
+        #: metadata only and is never synced into the config.
+        self._combo_overrides: dict[ProposalRole, bool] = {}
+        #: Re-entrancy guard: True while populate rebuilds combos, so the
+        #: editTextChanged storm it emits never arms the override marker.
+        self._in_programmatic_populate = False
         self._role_configs: dict[ProposalRole, ProposalAgentConfig] = {
             role: ProposalAgentConfig(role=role, engine="")
             for role in ProposalRole
@@ -1325,35 +1333,6 @@ class ProposalModePanel(QWidget):
     def _role_note(self, role: ProposalRole) -> str:
         return str(self._role_notes.get(role) or "")
 
-    def _update_role_defaults_label(self, role: ProposalRole, profile: str) -> None:
-        """§D: refresh one role's read-only profile-defaults status line."""
-        label = self._defaults_labels.get(role)
-        if label is None:
-            return
-        engine = str(self._role_rows[role]["engine"].currentData() or "")
-        if engine != _HERMES_ENGINE_ID or not profile:
-            label.setText("")
-            return
-        note = self._role_note(role)
-        catalog = self._catalog_cache.get((role, profile))
-        defaults_text = ""
-        if (
-            catalog is not None
-            and catalog.available
-            and catalog.profile_default_provider
-        ):
-            defaults_text = (
-                "Using profile defaults: "
-                f"{catalog.profile_default_provider} / "
-                f"{catalog.profile_default_model}"
-            )
-        if note and defaults_text:
-            label.setText(f"{note}\n{defaults_text}")
-        elif note:
-            label.setText(note)
-        else:
-            label.setText(defaults_text)
-
     def _populate_provider_model(self, role: ProposalRole, profile: str) -> str:
         """Session 022: populate provider + models from the REAL inventory.
 
@@ -1374,25 +1353,18 @@ class ProposalModePanel(QWidget):
         if catalog is None:
             catalog = discover_hermes_model_catalog(profile)
             self._catalog_cache[key] = catalog
-        with QSignalBlocker(provider_combo), QSignalBlocker(model_combo):
-            provider_combo.clear()
-            model_combo.clear()
-            if catalog.available:
-                for name in catalog.provider_names():
-                    provider_combo.addItem(name, name)
-                default_provider = catalog.profile_default_provider
-                if default_provider:
-                    idx = provider_combo.findText(default_provider)
-                    if idx >= 0:
-                        provider_combo.setCurrentIndex(idx)
-                selected_provider = provider_combo.currentText().strip()
-                for model_id in catalog.models_for_provider(selected_provider):
-                    model_combo.addItem(model_id, model_id)
-                default_model = catalog.profile_default_model
-                if default_model and model_combo.findText(default_model) >= 0:
-                    model_combo.setCurrentIndex(
-                        model_combo.findText(default_model)
-                    )
+        saved_override = bool(self._combo_overrides.get(role, False))
+        self._in_programmatic_populate = True
+        try:
+            self._populate_provider_model_impl(
+                role, profile, catalog, provider_combo, model_combo,
+                saved_override,
+            )
+        finally:
+            self._in_programmatic_populate = False
+        # Session 023A: the read-only defaults line is THE display for the
+        # discovered defaults — refresh it right after the combos.
+        self._update_role_defaults_label(role, str(profile or "").strip())
         if catalog.available:
             if catalog.source == HERMES_CATALOG_SOURCE_INVENTORY:
                 return (
@@ -1411,6 +1383,62 @@ class ProposalModePanel(QWidget):
             return f"profile defaults via {catalog.source} (editable)"
         return f"provider/model catalog unavailable ({catalog.error})"
 
+    def _populate_provider_model_impl(
+        self,
+        role: ProposalRole,
+        profile: str,
+        catalog: Any,
+        provider_combo: Any,
+        model_combo: Any,
+        saved_override: bool,
+    ) -> None:
+        """Rebuild the ADVANCED combos (Session 022), Session 023A
+        semantics: discovery is DISPLAY-ONLY.  The profile's default
+        provider/model appear ONLY in the read-only defaults line — they
+        are never auto-selected into the combos, because the widget sync
+        would otherwise persist them as an explicit override the operator
+        never chose.  A persisted/operator override restores its combo
+        text instead (a refresh must not erase a legitimate override).
+        """
+        override_provider = ""
+        override_model = ""
+        with QSignalBlocker(provider_combo), QSignalBlocker(model_combo):
+            provider_combo.clear()
+            model_combo.clear()
+            if catalog.available:
+                for name in catalog.provider_names():
+                    provider_combo.addItem(name, name)
+                if saved_override:
+                    override_provider = self._role_configs[
+                        role
+                    ].provider.strip()
+                    override_model = self._role_configs[role].model.strip()
+                    if override_provider:
+                        idx = provider_combo.findText(override_provider)
+                        if idx >= 0:
+                            provider_combo.setCurrentIndex(idx)
+                        else:
+                            provider_combo.setEditText(override_provider)
+                if not saved_override:
+                    # An editable QComboBox auto-selects its first item
+                    # after clear()+addItem(); discovery must select
+                    # NOTHING — force the empty display (S022A lesson).
+                    provider_combo.setCurrentIndex(-1)
+                selected_provider = (
+                    override_provider if saved_override else ""
+                )
+                for model_id in catalog.models_for_provider(selected_provider):
+                    model_combo.addItem(model_id, model_id)
+                if saved_override and override_model:
+                    if model_combo.findText(override_model) >= 0:
+                        model_combo.setCurrentIndex(
+                            model_combo.findText(override_model)
+                        )
+                    else:
+                        model_combo.setEditText(override_model)
+                elif not saved_override:
+                    model_combo.setCurrentIndex(-1)
+
     def _on_role_provider_changed(self, role: ProposalRole) -> None:
         """Session 022: provider selection repopulates models IMMEDIATELY.
 
@@ -1423,6 +1451,9 @@ class ProposalModePanel(QWidget):
         engine = str(row["engine"].currentData() or "")
         if engine != _HERMES_ENGINE_ID:
             return
+        # Session 023A: the ACTIVATED signal fires on operator choice —
+        # this is the ONLY path that arms the override marker.
+        self._combo_overrides[role] = True
         provider = row["provider"].currentText().strip()
         previous_model = row["model"].currentText().strip()
         key = (role, row["profile"].currentText().strip())
@@ -1687,6 +1718,15 @@ class ProposalModePanel(QWidget):
         profile = row["profile"].currentText().strip()
         self._invalidate_catalog_cache(role)
         self._role_notes.pop(role, None)
+        # Session 023A: the OLD profile's display values must not leak —
+        # with NO persisted override the combos carry nothing implicit,
+        # so an implicit/discovered provider/model can never transfer.
+        # A PERSISTED override stays (the config keeps it; existing
+        # contract) and the operator may clear it in ADVANCED.
+        if not self._combo_overrides.get(role, False):
+            with QSignalBlocker(row["provider"]), QSignalBlocker(row["model"]):
+                row["provider"].clear()
+                row["model"].clear()
         self._populate_sessions(role, profile)
         self._populate_provider_model(role, profile)
         self._apply_selector_gating(role)
@@ -1707,6 +1747,14 @@ class ProposalModePanel(QWidget):
         self._on_role_config_text_changed(role)
 
     def _on_role_config_text_changed(self, role: ProposalRole) -> None:
+        # Session 023A: an operator edit of the provider/model text IS an
+        # explicit override.  Programmatic repopulation runs under
+        # QSignalBlocker + the guard flag, so this arms only for real
+        # operator edits.
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        if engine == _HERMES_ENGINE_ID and not self._in_programmatic_populate:
+            self._combo_overrides[role] = True
         self._sync_role_config_from_widgets(role)
         self._persist_config_if_workspace()
 
@@ -1743,6 +1791,19 @@ class ProposalModePanel(QWidget):
         # only; Hermes never persists a reasoning effort (Codex-only).
         is_codex_engine = engine == _CODEX_ENGINE_ID
         model_text = row["model"].currentText().strip()
+        # Session 023A: discovery-only combos carry NO override — the
+        # config keeps the PROFILE DEFAULTS semantics (provider/model
+        # empty) unless the operator explicitly chose a value.
+        provider_text = (
+            "" if is_codex_engine
+            else row["provider"].currentText().strip()
+        )
+        if (
+            engine == _HERMES_ENGINE_ID
+            and not self._combo_overrides.get(role, False)
+        ):
+            provider_text = ""
+            model_text = ""
         self._role_configs[role] = ProposalAgentConfig(
             role=role,
             engine=engine,
@@ -1750,10 +1811,7 @@ class ProposalModePanel(QWidget):
                 "" if is_codex_engine
                 else row["profile"].currentText().strip()
             ),
-            provider=(
-                "" if is_codex_engine
-                else row["provider"].currentText().strip()
-            ),
+            provider=provider_text,
             model=(
                 ""
                 if is_codex_engine and model_text == _CODEX_MODEL_PLACEHOLDER
@@ -1791,6 +1849,12 @@ class ProposalModePanel(QWidget):
             index = row["engine"].findData(config.engine)
             row["engine"].setCurrentIndex(index if index >= 0 else 0)
             is_codex_engine = config.engine == _CODEX_ENGINE_ID
+            # Session 023A: a PERSISTED provider/model is an override —
+            # re-arm the marker so a refresh restores (never erases) it.
+            self._combo_overrides[role] = bool(
+                (not is_codex_engine)
+                and (config.provider.strip() or config.model.strip())
+            )
             self._set_editable_text(
                 row["profile"],
                 "" if is_codex_engine else config.project_profile,
@@ -2987,6 +3051,12 @@ class ProposalModePanel(QWidget):
             # engine contract) — its widgets show N/A, the config persists
             # empty exactly as the sync writes it.
             is_codex_engine = config.engine == _CODEX_ENGINE_ID
+            # Session 023A: a PERSISTED provider/model is an override —
+            # re-arm the marker so a refresh restores (never erases) it.
+            self._combo_overrides[role] = bool(
+                (not is_codex_engine)
+                and (config.provider.strip() or config.model.strip())
+            )
             self._set_editable_text(
                 row["profile"],
                 "" if is_codex_engine else config.project_profile,

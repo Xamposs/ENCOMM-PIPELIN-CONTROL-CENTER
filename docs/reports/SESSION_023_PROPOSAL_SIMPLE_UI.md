@@ -164,3 +164,27 @@ detached widgets (never parentless). Pinned by the stress regression.
   stays editable with the exact-id placeholder.
 - The §I preselection is a UI convenience; it never persists until a
   sync runs and never overrides operator/saved choices.
+
+> **Session 023A corrective note** (same branch, same version 1.6.0):
+> Live review found that a normal Simple Mode REFRESH auto-selected the
+> discovered profile defaults into the ADVANCED provider/model combos,
+> and the widget sync then PERSISTED them — silently converting profile
+> defaults into an explicit override. Fixed: discovery is DISPLAY-ONLY
+> (`_populate_provider_model_impl` lists the catalogue and selects
+> NOTHING; editable-combo auto-first-item suppressed via
+> `setCurrentIndex(-1)`); the read-only defaults line is the only place
+> the defaults appear; `_combo_overrides[role]` + `_in_programmatic_populate`
+> distinguish operator/persisted overrides from discovered values
+> (activated provider / edited text arm the marker; programmatic
+> repopulation never does; sync persists provider/model ONLY when the
+> marker is armed; both restore sites re-arm it from the PERSISTED
+> config, so a saved override survives refresh and a profile switch
+> never transfers an implicit value). Duplicate shadowed
+> `_update_role_defaults_label` removed (the `_role_state_text`-based
+> one wins). Suite: **1312 passed** (6 new TestProfileDefaultsAreNotOverrides
+> tests pinning the six brief behaviors); S022/S020 catalog-display pins
+> SHARPENED by design. Live-host proof: real inventory → display
+> `Using profile defaults: zai / glm-5.3-flash — READY`, config
+> `hermes/scientific/''/''`, real argv `-p scientific` with NO `-m`
+> and NO `--provider`. Packaged rebuild + smoke: `SMOKE OK version=1.6.0
+> proposal_v2_ui=ok`, exit 0.

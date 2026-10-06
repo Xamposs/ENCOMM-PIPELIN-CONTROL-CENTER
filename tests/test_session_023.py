@@ -33,6 +33,7 @@ from encomm_pcc.proposal_runtime.hermes_model_catalog import (
     HERMES_CATALOG_SOURCE_NONE,
     HERMES_CATALOG_SOURCE_PROFILE_CONFIG,
     HermesModelCatalog,
+    HermesProviderEntry,
     discover_hermes_model_catalog,
 )
 from encomm_pcc.proposal_runtime.hermes_profile_defaults import (
@@ -343,8 +344,15 @@ class TestSimpleRoleCards:
         row["profile"].setEditText("scientific")
         _select_hermes(panel, role)
         label = panel._defaults_labels[role]
-        assert label.text() == "Using profile defaults: zai / glm-5.3-flash"
+        # S023A: the read-only line carries the defaults AND the honest
+        # READY state (the simple card's operator-facing status).
+        assert label.text() == (
+            "Using profile defaults: zai / glm-5.3-flash — READY"
+        )
         assert panel._role_note(role) == ""
+        # ...and the config keeps NO override (S023A core semantics):
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
 
     def test_simple_project_rows_exist(self, qapp):
         """§C: the Simple PROJECT rows exist with their names."""
@@ -595,6 +603,233 @@ class TestAdvancedToggleStress:
         panel._set_advanced_visible(False)
         qapp.processEvents()
         assert panel.advanced_container.isHidden()
+
+
+# ---------------------------------------------------------------------------
+# Session 023A — profile defaults are NEVER overrides (semantic contract)
+# ---------------------------------------------------------------------------
+
+
+class TestProfileDefaultsAreNotOverrides:
+    """The S023A corrective brief's six pinned behaviors."""
+
+    def test_1_inventory_success_displays_defaults_config_stays_empty(
+        self, qapp, monkeypatch
+    ):
+        """INVENTORY SUCCESS: the card displays 'Using profile defaults:
+        zai / glm-5.3-flash' BUT the role config keeps provider/model
+        EMPTY (profile defaults run at runtime — no silent override)."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        entries = [
+            HermesProviderEntry(
+                slug="zai", name="Z.AI / GLM",
+                models=["glm-5.3-flash", "glm-5.3"],
+                total_models=2, source="built-in",
+            ),
+        ]
+        catalog = HermesModelCatalog(
+            profile="scientific",
+            providers=entries,
+            models_by_provider={"zai": ["glm-5.3-flash", "glm-5.3"]},
+            profile_default_provider="zai",
+            profile_default_model="glm-5.3-flash",
+            source=HERMES_CATALOG_SOURCE_INVENTORY,
+            provider_catalog_authoritative=True,
+        )
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            lambda profile, **kw: catalog,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["profile"].setEditText("scientific")
+        _select_hermes(panel, role)
+        assert "Using profile defaults: zai / glm-5.3-flash" in (
+            panel._defaults_labels[role].text()
+        )
+        cfg = panel.role_configs()[role]
+        assert cfg.engine == "hermes"
+        assert cfg.project_profile == "scientific"
+        assert cfg.provider == ""
+        assert cfg.model == ""
+
+    def test_2_fallback_success_keeps_empty_semantics(self, qapp, monkeypatch):
+        """FALLBACK: the §A profile-config fallback shows the same
+        display and keeps provider/model empty (no regression)."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+
+        def fallback_catalog(profile, **kwargs):
+            return HermesModelCatalog(
+                profile=profile,
+                providers=[],
+                models_by_provider={},
+                profile_default_provider="zai",
+                profile_default_model="glm-5.3-flash",
+                source=HERMES_CATALOG_SOURCE_PROFILE_CONFIG,
+                provider_catalog_authoritative=False,
+            )
+
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            fallback_catalog,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["profile"].setEditText("scientific")
+        _select_hermes(panel, role)
+        assert "Using profile defaults: zai / glm-5.3-flash" in (
+            panel._defaults_labels[role].text()
+        )
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
+
+    def test_3_explicit_advanced_override_persists(self, qapp, monkeypatch):
+        """EXPLICIT OVERRIDE: an operator choice in ADVANCED (activated
+        provider + edited model) IS persisted."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._sync_role_config_from_widgets(role)
+        row["provider"].setEditText("openrouter")
+        panel._on_role_provider_changed(role)  # operator ACTIVATION
+        row["model"].setEditText("some-model")
+        panel._on_role_config_text_changed(role)  # operator EDIT
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "openrouter"
+        assert cfg.model == "some-model"
+        assert panel._combo_overrides[role] is True
+
+    def test_4_saved_override_restores_and_survives_refresh(
+        self, qapp, tmp_path, monkeypatch
+    ):
+        """SAVED OVERRIDE: a PROPOSAL_CONFIG with an explicit provider/
+        model restores — and a REFRESH does not erase it."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        entries = [
+            HermesProviderEntry(
+                slug="openrouter", name="OpenRouter",
+                models=["or/a"], total_models=1, source="built-in",
+            ),
+        ]
+        catalog = HermesModelCatalog(
+            profile="scientific",
+            providers=entries,
+            models_by_provider={"openrouter": ["or/a"]},
+            profile_default_provider="zai",
+            profile_default_model="glm-5.3-flash",
+            source=HERMES_CATALOG_SOURCE_INVENTORY,
+            provider_catalog_authoritative=True,
+        )
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            lambda profile, **kw: catalog,
+        )
+        ws = tmp_path / "s23a-ws"
+        seed_workspace(ws)
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        row["profile"].setEditText("scientific")
+        row["provider"].setEditText("openrouter")
+        panel._on_role_provider_changed(role)
+        row["model"].setEditText("or/a")
+        panel._on_role_config_text_changed(role)
+        panel._sync_role_config_from_widgets(role)
+        panel.save_role_config(ws)
+        # A FRESH panel restores the persisted override...
+        panel2 = ProposalModePanel(panel.registry)
+        assert panel2.load_role_config(ws) is True
+        cfg2 = panel2.role_configs()[role]
+        assert cfg2.provider == "openrouter"
+        assert cfg2.model == "or/a"
+        # ...and a REFRESH restores (never erases) it.
+        panel2._populate_provider_model(role, "scientific")
+        assert panel2.role_configs()[role].provider == "openrouter"
+        assert panel2.role_configs()[role].model == "or/a"
+        assert panel2._combo_overrides[role] is True
+        assert row_provider_text(panel2, role) == "openrouter"
+
+    def test_5_profile_default_change_does_not_carry_over(
+        self, qapp, monkeypatch
+    ):
+        """PROFILE DEFAULT CHANGE: with NO explicit override, a profile
+        switch leaves the config empty and the display follows the NEW
+        profile's defaults.  A persisted override DOES transfer (the
+        existing config-loading contract keeps it)."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+
+        def catalog_by_profile(profile, **kwargs):
+            defaults = {
+                "scientific": ("zai", "glm-5.3-flash"),
+                "scientific-v2": ("deepseek", "deepseek-v4-pro"),
+            }
+            provider, model = defaults.get(profile, ("zai", "glm-5.3-flash"))
+            entries = [
+                HermesProviderEntry(
+                    slug=provider, name=provider, models=[model],
+                    total_models=1, source="built-in",
+                ),
+            ]
+            return HermesModelCatalog(
+                profile=profile,
+                providers=entries,
+                models_by_provider={provider: [model]},
+                profile_default_provider=provider,
+                profile_default_model=model,
+                source=HERMES_CATALOG_SOURCE_INVENTORY,
+                provider_catalog_authoritative=True,
+            )
+
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            catalog_by_profile,
+        )
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        row = panel._role_rows[role]
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        row["profile"].setEditText("scientific")
+        panel._sync_role_config_from_widgets(role)
+        panel._populate_provider_model(role, "scientific")
+        assert "Using profile defaults: zai / glm-5.3-flash" in (
+            panel._defaults_labels[role].text()
+        )
+        assert panel.role_configs()[role].provider == ""
+        # Profile switch: display follows the NEW defaults; config stays
+        # empty (no implicit transfer).
+        row["profile"].setEditText("scientific-v2")
+        panel._on_role_profile_changed(role)
+        assert "Using profile defaults: deepseek / deepseek-v4-pro" in (
+            panel._defaults_labels[role].text()
+        )
+        cfg = panel.role_configs()[role]
+        assert cfg.project_profile == "scientific-v2"
+        assert cfg.provider == "" and cfg.model == ""
+
+    def test_6_real_argv_profile_with_no_override(self):
+        """REAL ARGV: profile + empty provider/model emits -p <profile>
+        with NO -m and NO --provider (the profile defaults run)."""
+        from encomm_pcc.drivers.hermes_cli import build_chat_argv
+
+        argv = build_chat_argv(
+            executable="hermes",
+            query_file="q.txt",
+            profile="scientific",
+            model="",
+            provider="",
+        )
+        assert argv[argv.index("-p") + 1] == "scientific"
+        assert "-m" not in argv
+        assert "--provider" not in argv
+
+
+def row_provider_text(panel: ProposalModePanel, role: ProposalRole) -> str:
+    return panel._role_rows[role]["provider"].currentText().strip()
 
 
 # ---------------------------------------------------------------------------
