@@ -743,6 +743,10 @@ class TestRefreshDispatch:
         assert "Hermes discovery" in panel._action_note
 
     def test_refresh_with_no_engine_calls_nothing(self, qapp, monkeypatch):
+        """S023 SHARPENED contract: with NO profiles discoverable, the
+        fresh-card REFRESH still calls nothing and reports honestly.  (A
+        fresh card with REAL discoverable profiles now preselects the §I
+        defaults and re-dispatches — pinned in test_session_023.)"""
         window = make_window(qapp)
         panel = window.proposal_panel
         called: list[str] = []
@@ -752,6 +756,12 @@ class TestRefreshDispatch:
 
         monkeypatch.setattr(panel, "_on_refresh_hermes_selectors", fail)
         monkeypatch.setattr(panel, "_populate_codex_sessions", fail)
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_profile_names",
+            lambda *a, **k: type(
+                "P", (), {"ok": False, "profiles": [], "error": "x"}
+            )(),
+        )
         role = ProposalRole.SCIENTIFIC_REVIEWER
         self._click_refresh(panel, role)
         assert called == []

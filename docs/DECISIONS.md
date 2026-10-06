@@ -2095,3 +2095,51 @@ no half-committed pair may ever be accepted durable state.
 round (byte-identical is a valid outcome); the campaign can never continue
 from a half-committed pair; the UI renders living-Blueprint and
 document-pair state from durable artifacts only.
+
+## D-078 — Proposal Mode Simple UI: three operator sections; ADVANCED holds every technical surface; discovery fails soft to the profile's own defaults (Session 023, v1.6.0)
+
+**Context.** Packaged 1.5.1 surfaced a raw `PermissionError [WinError 5]`
+from an unreadable optional plugin (`plugins/<name>/plugin.yaml` scanned
+at `hermes_cli.config` import) as a dead provider/model catalog, and the
+operator surface had grown a dense 16-column agent grid plus 8 run
+buttons.
+
+**Decision.**
+1. The Proposal Mode UI is a THREE-section operator workflow — 1. PROJECT
+   (plain status rows + SELECT WORKSPACE / MANAGE SOURCES), 2. AI TEAM
+   (four simple role cards), 3. RUN (state-gated primary controls) — plus
+   a Simple PROGRESS strip. EVERY technical surface (source importers,
+   provider/model/session-mode overrides, campaign limits, legacy RUN
+   ITERATION, RUN HARD GATES, hash/state detail, panel results,
+   consensus, the 14-gate table, evidence) remains, owned by ONE
+   collapsible ADVANCED SETTINGS container (collapsed by default).
+   Nothing is deleted; the runtime contracts of Sessions 012–022 are
+   untouched.
+2. Final Simple card contract: a Hermes evaluator card shows ONLY
+   Engine, Profile, a read-only defaults/READY line, and Refresh —
+   Provider, Model override, Session Mode and Session are ADVANCED
+   controls. The ASTRA / Codex card shows Engine, Model, Reasoning,
+   Session, Refresh (operator-relevant for the Codex chair) and NO
+   Profile/Provider.
+3. Hermes discovery fails soft down a fixed chain: authoritative
+   in-package inventory → the SELECTED PROFILE's own configured defaults
+   (`proposal_runtime/hermes_profile_defaults.py`, a child that NEVER
+   imports `hermes_cli` — the plugin-scan failure class cannot reach it)
+   → manual override in ADVANCED. An unrelated unreadable plugin can
+   never make the catalog or the panel unusable, and no provider/model
+   name is ever invented (the fallback claims only the profile's own
+   pair; the provider LIST stays honestly empty).
+4. An empty provider/model on a Hermes role is the NORMAL runtime shape:
+   the driver's argv contract emits `-p <profile>` and no override, so
+   the profile's real defaults run. The UI never forces an override.
+5. Default role preconfiguration (scientific / implementation /
+   red-team; ASTRA → codex) is a UI convenience from REAL discovered
+   profiles only, never persisted by itself, and never overrides
+   operator/saved choices.
+
+**Consequences.** Qt layout discipline is now a pinned contract: a
+widget belongs to EXACTLY ONE layout, placement into per-role grids is
+DEFERRED until those grids are installed (floating layouts never adopt
+widgets — a parentless widget crashes natively on show), and detached
+widgets are parked under a hidden panel-owned container. All pinned by
+the Session 023 native-Qt stress regression (`tests/test_session_023.py`).

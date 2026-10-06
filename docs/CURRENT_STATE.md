@@ -29,7 +29,28 @@ append an entry to `DECISIONS.md` before you finish.
 
 ## 1. Version
 
-`1.5.0` — Session 021 (branch `proposal-living-blueprint-session-021`, NOT
+`1.6.0` — Session 023 (branch `proposal-simple-ui-session-023`, NOT yet
+merged): Proposal Mode becomes a SIMPLE operator surface — three
+sections (1. PROJECT with READY/MISSING status rows + SELECT
+WORKSPACE / MANAGE SOURCES, 2. AI TEAM with four simple role cards,
+3. RUN with state-gated primary controls) plus a PROGRESS strip; EVERY
+technical surface (source importers, provider/model/session-mode
+overrides, campaign limits, legacy RUN ITERATION, RUN HARD GATES,
+hash, panel results, consensus, the 14-gate table, evidence,
+diagnostics) remains available behind the explicit ADVANCED SETTINGS
+toggle. Hermes discovery is resilient: an unreadable optional plugin
+can no longer kill the provider/model catalog — discovery fails soft
+to the SELECTED PROFILE's own configured defaults
+(`hermes_profile_defaults.py`, a NEVER-hermes_cli child reading the
+profile's config.yaml under the Hermes venv python), the role card
+shows a friendly note instead of a raw exception, and the runtime
+runs the profile's real defaults when provider/model are empty
+(`build_chat_argv` emits `-p <profile>` and NO override).
+Default role preconfiguration (§I): scientific/implementation/
+red-team preselect their matching real profiles; ASTRA defaults to
+Codex; operator choices are never overridden.
+
+Previous: `1.5.0` — Session 021 (branch `proposal-living-blueprint-session-021`, NOT
 yet merged): the Blueprint/Proposal become a VERSIONED PAIR. The immutable
 original `MASTER_BLUEPRINT.md` is never touched by an AI run;
 `CURRENT_BLUEPRINT.md` (the LIVING design, ASTRA-write-only) evolves
