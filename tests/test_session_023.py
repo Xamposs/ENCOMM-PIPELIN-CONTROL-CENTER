@@ -28,6 +28,7 @@ from test_session_020 import make_window, seed_workspace
 
 from encomm_pcc.drivers.process import ProcessResult, ProcessSpec
 from encomm_pcc.proposal.enums import ProposalRole
+from encomm_pcc.proposal.models import ProposalAgentConfig
 from encomm_pcc.proposal_runtime.hermes_model_catalog import (
     HERMES_CATALOG_SOURCE_INVENTORY,
     HERMES_CATALOG_SOURCE_NONE,
@@ -830,6 +831,140 @@ class TestProfileDefaultsAreNotOverrides:
 
 def row_provider_text(panel: ProposalModePanel, role: ProposalRole) -> str:
     return panel._role_rows[role]["provider"].currentText().strip()
+
+
+# ---------------------------------------------------------------------------
+# Session 023B — programmatic restore must NEVER arm the override marker
+# ---------------------------------------------------------------------------
+
+
+class TestProgrammaticRestoreNeverArmsOverrides:
+    """The S023B corrective brief's exact workflow (SAME panel instance)."""
+
+    @pytest.fixture()
+    def catalog_panel_s23b(self, qapp, monkeypatch):
+        """Inventory catalogue available; defaults zai / glm-5.3-flash."""
+        window = make_window(qapp)
+        panel = window.proposal_panel
+        entries = [
+            HermesProviderEntry(
+                slug="openrouter", name="OpenRouter",
+                models=["or/a"], total_models=1, source="built-in",
+            ),
+            HermesProviderEntry(
+                slug="zai", name="Z.AI / GLM",
+                models=["glm-5.3-flash"], total_models=1, source="built-in",
+            ),
+        ]
+        catalog = HermesModelCatalog(
+            profile="scientific",
+            providers=entries,
+            models_by_provider={
+                "openrouter": ["or/a"],
+                "zai": ["glm-5.3-flash"],
+            },
+            profile_default_provider="zai",
+            profile_default_model="glm-5.3-flash",
+            source=HERMES_CATALOG_SOURCE_INVENTORY,
+            provider_catalog_authoritative=True,
+        )
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
+            lambda profile, **kw: catalog,
+        )
+        return panel
+
+    @staticmethod
+    def _config(provider: str, model: str) -> ProposalAgentConfig:
+        return ProposalAgentConfig(
+            role=ProposalRole.SCIENTIFIC_REVIEWER,
+            engine="hermes",
+            project_profile="scientific",
+            provider=provider,
+            model=model,
+        )
+
+    def test_workspace_switch_a_to_b_never_rearms_from_restore(
+        self, catalog_panel_s23b
+    ):
+        """A(override) -> B(empty): the programmatic EMPTY restore must
+        leave the marker OFF even though the restoration itself emits
+        editTextChanged storms."""
+        panel = catalog_panel_s23b
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        # 1-3. Load A: override marker True, values restored.
+        panel.apply_role_configs({role: self._config("openrouter", "or/a")})
+        assert panel._combo_overrides[role] is True
+        cfg_a = panel.role_configs()[role]
+        assert cfg_a.provider == "openrouter" and cfg_a.model == "or/a"
+        # 4-5. Switch the SAME panel to B (empty): marker must stay OFF.
+        panel.apply_role_configs({role: self._config("", "")})
+        assert panel._combo_overrides[role] is False
+        cfg_b = panel.role_configs()[role]
+        assert cfg_b.provider == "" and cfg_b.model == ""
+        row = panel._role_rows[role]
+        assert row["provider"].currentText().strip() == ""
+        assert row["model"].currentText().strip() == ""
+        # 6. REFRESH with the inventory: defaults DISPLAYED, config stays
+        # empty, marker stays OFF.
+        panel._populate_provider_model(role, "scientific")
+        assert "Using profile defaults: zai / glm-5.3-flash" in (
+            panel._defaults_labels[role].text()
+        )
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
+        assert panel._combo_overrides[role] is False
+        # 7. Real argv: profile only, NO override flags.
+        from encomm_pcc.drivers.hermes_cli import build_chat_argv
+
+        argv = build_chat_argv(
+            executable="hermes",
+            query_file="q.txt",
+            profile=cfg.project_profile,
+            model=cfg.model,
+            provider=cfg.provider,
+        )
+        assert argv[argv.index("-p") + 1] == "scientific"
+        assert "-m" not in argv and "--provider" not in argv
+
+    def test_workspace_switch_b_to_a_restores_saved_override(
+        self, catalog_panel_s23b
+    ):
+        """B(empty) -> A(override): the persisted override restores, the
+        marker becomes True, and a refresh preserves it."""
+        panel = catalog_panel_s23b
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        panel.apply_role_configs({role: self._config("", "")})
+        assert panel._combo_overrides[role] is False
+        # Switch to A (explicit saved override).
+        panel.apply_role_configs({role: self._config("openrouter", "or/a")})
+        assert panel._combo_overrides[role] is True
+        row = panel._role_rows[role]
+        assert row["provider"].currentText().strip() == "openrouter"
+        assert row["model"].currentText().strip() == "or/a"
+        # A refresh restores (never erases) the override.
+        panel._populate_provider_model(role, "scientific")
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "openrouter" and cfg.model == "or/a"
+        assert panel._combo_overrides[role] is True
+
+    def test_sync_role_rows_is_also_signal_safe(self, catalog_panel_s23b):
+        """_sync_role_rows (the other config→widget helper) also never
+        arms the marker from its own restoration writes."""
+        panel = catalog_panel_s23b
+        role = ProposalRole.SCIENTIFIC_REVIEWER
+        panel.apply_role_configs({role: self._config("openrouter", "or/a")})
+        assert panel._combo_overrides[role] is True
+        # Sync an EMPTY config through the OTHER restoration helper.
+        panel._role_configs[role] = self._config("", "")
+        panel._sync_role_rows()
+        assert panel._combo_overrides[role] is False
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
+        # And an override config through it re-arms explicitly.
+        panel._role_configs[role] = self._config("openrouter", "or/a")
+        panel._sync_role_rows()
+        assert panel._combo_overrides[role] is True
 
 
 # ---------------------------------------------------------------------------

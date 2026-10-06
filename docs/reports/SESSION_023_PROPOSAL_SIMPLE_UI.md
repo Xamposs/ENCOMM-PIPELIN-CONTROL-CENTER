@@ -188,3 +188,20 @@ detached widgets (never parentless). Pinned by the stress regression.
 > `hermes/scientific/''/''`, real argv `-p scientific` with NO `-m`
 > and NO `--provider`. Packaged rebuild + smoke: `SMOKE OK version=1.6.0
 > proposal_v2_ui=ok`, exit 0.
+
+> **Session 023B corrective note** (same branch, same version 1.6.0):
+> Live review found the restore path could RE-ARM the override marker:
+> `apply_role_configs` computed the marker correctly, but its own
+> programmatic `_set_editable_text` calls emitted `editTextChanged`,
+> which `_on_role_config_text_changed` (unguarded on that path)
+> interpreted as an OPERATOR edit — so restoring an EMPTY config
+> (workspace switch A→B) flipped the marker back ON. Fixed: BOTH
+> config→widget helpers (`apply_role_configs` AND `_sync_role_rows`)
+> run restoration under `_in_programmatic_populate` (try/finally) with
+> `QSignalBlocker` on the editable profile/provider/model combos, and
+> the marker is set EXPLICITLY from the config AFTER restoration
+> (armed iff Hermes AND provider/model non-empty) — never from emitted
+> signals. Suite: **1315 passed** (3 new tests: the exact A→B→REFRESH→
+> argv workflow, the reverse B→A restore, and a `_sync_role_rows`
+> signal-safety pin). Packaged rebuild + smoke: `SMOKE OK version=1.6.0
+> proposal_v2_ui=ok`, exit 0.

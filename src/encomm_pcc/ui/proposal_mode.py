@@ -1849,20 +1849,31 @@ class ProposalModePanel(QWidget):
             index = row["engine"].findData(config.engine)
             row["engine"].setCurrentIndex(index if index >= 0 else 0)
             is_codex_engine = config.engine == _CODEX_ENGINE_ID
-            # Session 023A: a PERSISTED provider/model is an override —
-            # re-arm the marker so a refresh restores (never erases) it.
+            # Session 023B: restoration is programmatic — guard the whole
+            # widget-restore block so emitted editTextChanged storms can
+            # never arm the override marker (an EMPTY restore must stay
+            # unarmed).  The marker is set EXPLICITLY from the config
+            # afterwards.
+            self._in_programmatic_populate = True
+            try:
+                with QSignalBlocker(row["profile"]), QSignalBlocker(
+                    row["provider"]
+                ), QSignalBlocker(row["model"]):
+                    self._set_editable_text(
+                        row["profile"],
+                        "" if is_codex_engine else config.project_profile,
+                    )
+                    self._set_editable_text(
+                        row["provider"],
+                        "" if is_codex_engine else config.provider,
+                    )
+                    self._set_editable_text(row["model"], config.model)
+            finally:
+                self._in_programmatic_populate = False
             self._combo_overrides[role] = bool(
                 (not is_codex_engine)
                 and (config.provider.strip() or config.model.strip())
             )
-            self._set_editable_text(
-                row["profile"],
-                "" if is_codex_engine else config.project_profile,
-            )
-            self._set_editable_text(
-                row["provider"], "" if is_codex_engine else config.provider
-            )
-            self._set_editable_text(row["model"], config.model)
             mode_index = (
                 1
                 if config.session_mode == "RESUME_SELECTED_SESSION"
@@ -3041,7 +3052,15 @@ class ProposalModePanel(QWidget):
         return {"_note": required}
 
     def _sync_role_rows(self) -> None:
-        """Push ``self._role_configs`` into the AGENTS widgets (no signals)."""
+        """Push ``self._role_configs`` into the AGENTS widgets (no signals).
+
+        Session 023B: programmatic restoration NEVER arms the override
+        marker — every widget write here runs under the programmatic
+        guard (and QSignalBlocker for the editable combos), so emitted
+        editTextChanged storms cannot masquerade as operator edits.  The
+        marker is set EXPLICITLY from the persisted config AFTER the
+        widgets are restored: armed iff Hermes AND (provider or model).
+        """
         for role in ProposalRole:
             config = self._role_configs[role]
             row = self._role_rows[role]
@@ -3051,20 +3070,28 @@ class ProposalModePanel(QWidget):
             # engine contract) — its widgets show N/A, the config persists
             # empty exactly as the sync writes it.
             is_codex_engine = config.engine == _CODEX_ENGINE_ID
-            # Session 023A: a PERSISTED provider/model is an override —
-            # re-arm the marker so a refresh restores (never erases) it.
+            self._in_programmatic_populate = True
+            try:
+                with QSignalBlocker(row["profile"]), QSignalBlocker(
+                    row["provider"]
+                ), QSignalBlocker(row["model"]):
+                    self._set_editable_text(
+                        row["profile"],
+                        "" if is_codex_engine else config.project_profile,
+                    )
+                    self._set_editable_text(
+                        row["provider"],
+                        "" if is_codex_engine else config.provider,
+                    )
+                    self._set_editable_text(row["model"], config.model)
+            finally:
+                self._in_programmatic_populate = False
+            # Session 023A/B: set the marker EXPLICITLY from the config
+            # AFTER restoration — never from emitted signals.
             self._combo_overrides[role] = bool(
                 (not is_codex_engine)
                 and (config.provider.strip() or config.model.strip())
             )
-            self._set_editable_text(
-                row["profile"],
-                "" if is_codex_engine else config.project_profile,
-            )
-            self._set_editable_text(
-                row["provider"], "" if is_codex_engine else config.provider
-            )
-            self._set_editable_text(row["model"], config.model)
             mode_index = (
                 1 if config.session_mode == "RESUME_SELECTED_SESSION" else 0
             )
