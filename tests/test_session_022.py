@@ -315,6 +315,10 @@ def _select_hermes(panel: ProposalModePanel, role: ProposalRole) -> None:
 
 class TestHermesSelectorUI:
     def test_refresh_populates_full_catalog_with_defaults(self, catalog_panel):
+        """S023A SHARPENED: the catalogue populates but discovery selects
+        NOTHING — the profile defaults stay display-only (read-only line),
+        and the role config keeps provider/model EMPTY (profile defaults
+        run at runtime; no silent override)."""
         panel = catalog_panel
         role = ProposalRole.SCIENTIFIC_REVIEWER
         row = panel._role_rows[role]
@@ -323,13 +327,18 @@ class TestHermesSelectorUI:
         assert [provider.itemText(i) for i in range(provider.count())] == [
             "openrouter", "zai", "deepseek",
         ]
-        assert provider.currentText() == "zai"  # profile default selected
+        # DISCOVERY IS NOT A SELECTION: no auto-selected profile default.
+        assert provider.currentText() == ""
         model = row["model"]
-        assert [model.itemText(i) for i in range(model.count())] == [
-            "glm-5.3-flash", "glm-5.3",
-        ]
-        assert model.currentText() == "glm-5.3-flash"  # zai's default model
+        assert model.count() == 0  # no provider chosen -> no model list
+        assert model.currentText() == ""
         assert "hermes-inventory" in panel._action_note
+        # The defaults remain VISIBLE as read-only metadata:
+        label = panel._defaults_labels[role]
+        assert "Using profile defaults: zai / glm-5.3-flash" in label.text()
+        # ...and the CONFIG carries NO override:
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
 
     def test_provider_change_repopulates_models_without_refresh(
         self, catalog_panel
@@ -743,6 +752,10 @@ class TestRefreshDispatch:
         assert "Hermes discovery" in panel._action_note
 
     def test_refresh_with_no_engine_calls_nothing(self, qapp, monkeypatch):
+        """S023 SHARPENED contract: with NO profiles discoverable, the
+        fresh-card REFRESH still calls nothing and reports honestly.  (A
+        fresh card with REAL discoverable profiles now preselects the §I
+        defaults and re-dispatches — pinned in test_session_023.)"""
         window = make_window(qapp)
         panel = window.proposal_panel
         called: list[str] = []
@@ -752,6 +765,12 @@ class TestRefreshDispatch:
 
         monkeypatch.setattr(panel, "_on_refresh_hermes_selectors", fail)
         monkeypatch.setattr(panel, "_populate_codex_sessions", fail)
+        monkeypatch.setattr(
+            "encomm_pcc.ui.proposal_mode.discover_hermes_profile_names",
+            lambda *a, **k: type(
+                "P", (), {"ok": False, "profiles": [], "error": "x"}
+            )(),
+        )
         role = ProposalRole.SCIENTIFIC_REVIEWER
         self._click_refresh(panel, role)
         assert called == []

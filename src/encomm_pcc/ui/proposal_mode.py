@@ -27,6 +27,19 @@ E. PANEL RESULTS   — per-evaluator first-pass verdicts + the persisted
 F. HARD GATES      — the 14-gate renderer (unchanged semantics);
 G. EVIDENCE        — the six operator-authored evidence surfaces.
 
+Session 023 SIMPLE MODE (this layout): the operator surface is THREE
+sections - 1. PROJECT (status rows + SELECT WORKSPACE / MANAGE SOURCES),
+2. AI TEAM (four simple role cards: engine, profile, read-only profile
+defaults status, session), 3. RUN (state-gated GENERATE / RUN PANEL REVIEW
+/ START AUTONOMOUS REFINEMENT + PAUSE/RESUME/STOP) - plus a Simple PROGRESS
+strip.  EVERY technical surface (provider/model/session-mode overrides,
+per-source importers, campaign limits, legacy RUN ITERATION, RUN HARD
+GATES, hash, panel results, consensus, the 14-gate table, evidence,
+diagnostics) remains available behind the explicit ADVANCED SETTINGS
+toggle (§H) - nothing is deleted.  An unavailable Hermes model catalogue
+degrades to the profile's own configured defaults (§A/§D) with a friendly
+note, never a raw exception (§J).
+
 Honesty rule: every status rendered traces to a real durable artifact;
 WARN renders INCOMPLETE, BLOCKED renders BLOCKED, nothing is ever faked
 green.  Recovery is READ-ONLY: a restart never auto-runs AI.
@@ -97,6 +110,7 @@ from ..proposal_runtime.campaign import (
     load_campaign_state,
 )
 from ..proposal_runtime.hermes_model_catalog import (
+    HERMES_CATALOG_SOURCE_INVENTORY,
     discover_hermes_model_catalog,
 )
 from ..proposal_runtime.hermes_selector_discovery import (
@@ -262,6 +276,17 @@ class ProposalModePanel(QWidget):
         #: invalidated on profile change, explicit REFRESH, and engine-away-
         #: from-Hermes, and NEVER persisted into PROPOSAL_CONFIG.json.
         self._catalog_cache: dict[tuple[ProposalRole, str], Any] = {}
+        #: §A/§J: one friendly operator note per role (e.g. the
+        #: catalogue-unavailable message); shown in the role card.
+        self._role_notes: dict[ProposalRole, str] = {}
+        #: Session 023A: per-role marker that the provider/model combo
+        #: values are an OPERATOR (or persisted) override.  Discovery
+        #: NEVER sets this: a profile default shown in a combo stays
+        #: metadata only and is never synced into the config.
+        self._combo_overrides: dict[ProposalRole, bool] = {}
+        #: Re-entrancy guard: True while populate rebuilds combos, so the
+        #: editTextChanged storm it emits never arms the override marker.
+        self._in_programmatic_populate = False
         self._role_configs: dict[ProposalRole, ProposalAgentConfig] = {
             role: ProposalAgentConfig(role=role, engine="")
             for role in ProposalRole
@@ -279,7 +304,12 @@ class ProposalModePanel(QWidget):
         #: by refresh — the S017 lesson: route feedback through panel state).
         self._action_note: str = ""
 
-        # -- scrollable production layout (Session 020 §23) ----------------
+        # -- scrollable Simple production layout (Session 023) ---------------
+        # Three operator sections (PROJECT / AI TEAM / RUN) + a Simple
+        # PROGRESS strip; every technical surface (provider/model overrides,
+        # session modes, campaign limits, hash, full tables, diagnostics)
+        # remains available inside ONE collapsible ADVANCED container.
+        # All Session 017-022 widget attributes keep their names/semantics.
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         scroll = QScrollArea()
@@ -300,117 +330,133 @@ class ProposalModePanel(QWidget):
         nav_row.addStretch(1)
         layout.addLayout(nav_row)
 
-        # -- A. PROJECT INPUTS (Session 020 §4) -------------------------------
-        inputs_box = QGroupBox("PROJECT INPUTS")
-        inputs_form = QGridLayout(inputs_box)
-        self.ws_edit = QLineEdit()
-        if self.workspace_root is not None:
-            self.ws_edit.setText(str(self.workspace_root))
-        self.ws_edit.setPlaceholderText(r"C:\proposals\my-proposal-workspace")
-        browse = QPushButton("BROWSE")
-        browse.clicked.connect(self._on_browse)
-        self.init_button = QPushButton("INITIALIZE")
-        self.init_button.clicked.connect(self._on_initialize)
-        self.refresh_button = QPushButton("REFRESH")
-        self.refresh_button.clicked.connect(self._on_refresh)
-        inputs_form.addWidget(QLabel("Workspace:"), 0, 0)
-        inputs_form.addWidget(self.ws_edit, 0, 1)
-        inputs_form.addWidget(browse, 0, 2)
-        inputs_form.addWidget(self.init_button, 0, 3)
-        inputs_form.addWidget(self.refresh_button, 0, 4)
+        self._build_project_section(layout)
+        self._build_ai_team_section(layout)
+        self._build_run_section(layout)
+        self._build_progress_section(layout)
+        self._build_advanced_section(layout)
 
-        self.blueprint_label = QLabel("MASTER BLUEPRINT: MISSING")
-        self.import_blueprint_button = QPushButton("IMPORT BLUEPRINT")
-        self.import_blueprint_button.clicked.connect(self._on_import_blueprint)
-        inputs_form.addWidget(self.blueprint_label, 1, 0, 1, 2)
-        inputs_form.addWidget(self.import_blueprint_button, 1, 2, 1, 3)
+        # The 14-gate table structure exists from construction (NOT_RUN
+        # rows); a workspace refresh overwrites with real artifact values.
+        self.gate_table.setRowCount(len(HARD_GATE_IDS_TUPLE))
+        for r, gate_id in enumerate(HARD_GATE_IDS_TUPLE):
+            self.gate_table.setItem(r, 0, QTableWidgetItem(gate_id))
+            self.gate_table.setItem(r, 1, QTableWidgetItem("NOT_RUN"))
+            self.gate_table.setItem(r, 2, QTableWidgetItem(""))
+        self._set_advanced_visible(False)
+        self._set_running(False)
+        self.refresh_status()
 
-        # Session 021: LIVING Blueprint + DOCUMENT PAIR status labels.
-        self.current_blueprint_label = QLabel(
-            "CURRENT / LIVING BLUEPRINT: MISSING"
-        )
-        self.current_blueprint_label.setWordWrap(True)
-        inputs_form.addWidget(self.current_blueprint_label, 8, 0, 1, 5)
-        self.pair_state_label = QLabel("DOCUMENT PAIR: not committed")
-        self.pair_state_label.setWordWrap(True)
-        inputs_form.addWidget(self.pair_state_label, 9, 0, 1, 5)
+    # -- Simple sections (Session 023) -----------------------------------------
+    def _build_project_section(self, layout: QVBoxLayout) -> None:
+        """§C PROJECT: simple status rows + the two primary actions.
 
-        self.template_label = QLabel("OFFICIAL TEMPLATE: MISSING")
-        self.import_template_button = QPushButton("IMPORT TEMPLATE")
-        self.import_template_button.clicked.connect(self._on_import_template)
-        inputs_form.addWidget(self.template_label, 2, 0, 1, 2)
-        inputs_form.addWidget(self.import_template_button, 2, 2, 1, 3)
+        The per-source import buttons and the technical budget/diagnostic
+        lines remain in the ADVANCED container (never deleted).
+        """
+        box = QGroupBox("1. PROJECT")
+        form = QGridLayout(box)
+        self.project_status_labels: dict[str, QLabel] = {}
 
-        self.official_docs_label = QLabel("OFFICIAL DOCUMENTS: 0 files loaded")
-        self.import_docs_button = QPushButton("ADD OFFICIAL DOCS")
-        self.import_docs_button.clicked.connect(self._on_import_official_docs)
-        self.open_imports_button = QPushButton("OPEN FOLDER")
-        self.open_imports_button.clicked.connect(self._on_open_official_folder)
-        inputs_form.addWidget(self.official_docs_label, 3, 0, 1, 2)
-        inputs_form.addWidget(self.import_docs_button, 3, 2)
-        inputs_form.addWidget(self.open_imports_button, 3, 3, 1, 2)
+        def _status_row(row: int, name: str, text: str) -> None:
+            label = QLabel(name)
+            value = QLabel(text)
+            value.setWordWrap(True)
+            self.project_status_labels[name] = value
+            form.addWidget(label, row, 0)
+            form.addWidget(value, row, 1, 1, 3)
 
-        self.existing_proposal_label = QLabel("EXISTING PROPOSAL: EMPTY")
-        self.import_proposal_button = QPushButton("IMPORT PROPOSAL")
-        self.import_proposal_button.clicked.connect(self._on_import_existing_proposal)
-        inputs_form.addWidget(self.existing_proposal_label, 4, 0, 1, 2)
-        inputs_form.addWidget(self.import_proposal_button, 4, 2, 1, 3)
+        # NOTE: the ws_edit QLineEdit itself is created ONCE, inside the
+        # ADVANCED inputs grid (a widget added to TWO layouts leaves a
+        # stale QLayoutItem behind and crashes the layout engine when the
+        # hidden container becomes visible).  The Simple row keeps the
+        # operator actions; SELECT WORKSPACE fills the ADVANCED field.
+        self.browse_button = QPushButton("SELECT WORKSPACE")
+        self.browse_button.clicked.connect(self._on_browse)
+        self.manage_sources_button = QPushButton("MANAGE SOURCES")
+        self.manage_sources_button.clicked.connect(self._toggle_advanced)
+        form.addWidget(self.browse_button, 0, 0)
+        form.addWidget(self.manage_sources_button, 0, 1)
 
-        self.master_label = QLabel("MASTER PROPOSAL: EMPTY")
-        self.open_master_button = QPushButton("OPEN FOLDER")
-        self.open_master_button.clicked.connect(self._on_open_master_folder)
-        inputs_form.addWidget(self.master_label, 5, 0, 1, 2)
-        inputs_form.addWidget(self.open_master_button, 5, 2, 1, 3)
+        _status_row(1, "Workspace", "NOT SELECTED")
+        _status_row(2, "Master Blueprint", "CHECKING…")
+        _status_row(3, "Living Blueprint", "CHECKING…")
+        _status_row(4, "Official Template", "CHECKING…")
+        _status_row(5, "Official Documents", "0 loaded")
+        _status_row(6, "Master Proposal", "EMPTY")
+        layout.addWidget(box)
 
-        self.source_budget_label = QLabel(
-            f"Source pack: 0 / {DEFAULT_SOURCE_BUDGET_CHARS} chars"
-        )
-        self.source_budget_label.setWordWrap(True)
-        inputs_form.addWidget(self.source_budget_label, 6, 0, 1, 5)
-        self.ws_status_label = QLabel("Workspace not initialised.")
-        self.ws_status_label.setWordWrap(True)
-        inputs_form.addWidget(self.ws_status_label, 7, 0, 1, 5)
-        layout.addWidget(inputs_box)
+    def _build_ai_team_section(self, layout: QVBoxLayout) -> None:
+        """§D AI TEAM: four simple role cards (engine, profile/model, session).
 
-        # -- B. AGENTS (Session 020 §7/§8) -------------------------------------
-        agents_box = QGroupBox("AGENTS")
-        agents_form = QGridLayout(agents_box)
+        The per-role provider/model/session-mode/reasoning override widgets
+        live in the ADVANCED agents grid and are re-parented per engine by
+        ``_place_role_widgets`` (Codex keeps Model+Reasoning in its simple
+        card; Hermes shows Profile + read-only defaults status).
+        """
+        box = QGroupBox("2. AI TEAM")
+        team = QVBoxLayout(box)
         engine_ids = self.registry.driver_ids()
         self._role_rows: dict[ProposalRole, dict[str, Any]] = {}
-        for row, role in enumerate(ProposalRole):
-            label = QLabel(_ROLE_LABELS[role])
+        self._defaults_labels: dict[ProposalRole, QLabel] = {}
+        #: Hidden parking container: widgets detached from a role card are
+        #: re-parented HERE (never left parentless — a parentless QWidget
+        #: transfers to Python ownership and its native GC crashes the
+        #: suite when a later placement/layout touches the freed object).
+        self._parked_widgets = QWidget(self)
+        self._parked_widgets.hide()
+        self._advanced_role_grids: dict[ProposalRole, QGridLayout] = {}
+        self._simple_role_bodies: dict[ProposalRole, QGridLayout] = {}
+        #: §D: persistent card labels (Model/Reasoning/Profile) — the
+        #: SAME label object moves between the simple card and the
+        #: ADVANCED grid instead of stacking fresh ones per placement.
+        self._role_card_labels: dict[ProposalRole, dict[str, QLabel]] = {}
+        for role in ProposalRole:
+            card = QGroupBox(_ROLE_LABELS[role])
+            card_form = QGridLayout(card)
             engine = QComboBox()
             engine.addItem("(select engine)", "")
             for driver_id in engine_ids:
                 engine.addItem(driver_id, driver_id)
+            engine.activated.connect(
+                lambda _idx, r=role: self._on_role_engine_changed(r)
+            )
+            # NOTE: the engine selector belongs to the BODY grid only —
+            # a card_form row here duplicated the label (the body's
+            # addWidget re-parents the combo, orphaning this label).
+
             profile = QComboBox()
             profile.setEditable(True)
             profile.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
             profile.setToolTip("Real Hermes profiles (discovered; never invented)")
-            provider = QComboBox()
-            provider.setEditable(True)
-            provider.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            provider.setToolTip(
-                "Real Hermes providers (discovered inventory; editable)"
+            profile.activated.connect(
+                lambda _idx, r=role: self._on_role_profile_changed(r)
             )
             model = QComboBox()
             model.setEditable(True)
             model.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-            model.setToolTip(
-                "Real models for the selected provider (editable)"
+            model.setToolTip("Real models for the selected provider (editable)")
+            model.editTextChanged.connect(
+                lambda _t, r=role: self._on_role_config_text_changed(r)
             )
             reasoning = QComboBox()
             reasoning.addItem("DEFAULT", "")
             for level in ("minimal", "low", "medium", "high", "xhigh"):
                 reasoning.addItem(level.upper(), level)
             reasoning.setToolTip(
-                "Per-invocation reasoning effort — meaningful ONLY for the "
+                "Per-invocation reasoning effort - meaningful ONLY for the "
                 "codex engine (verified CLI contract). DEFAULT lets Codex "
                 "use its own default."
+            )
+            reasoning.activated.connect(
+                lambda _idx, r=role: self._on_role_config_text_changed(r)
             )
             session_mode = QComboBox()
             session_mode.addItem(_SESSION_MODE_NEW, "NEW_SESSION")
             session_mode.addItem(_SESSION_MODE_RESUME, "RESUME_SELECTED_SESSION")
+            session_mode.activated.connect(
+                lambda _idx, r=role: self._on_role_session_mode_changed(r)
+            )
             session = QComboBox()
             session.setEditable(False)
             session.addItem("NEW SESSION", "")
@@ -418,31 +464,14 @@ class ProposalModePanel(QWidget):
             # S017 seam: the legacy test drives the session field through
             # setText(); expose the editable mirror used by that contract.
             session.setText = session.setEditText  # type: ignore[method-assign]
-            refresh = QPushButton("REFRESH")
-            refresh.clicked.connect(
-                lambda _=False, r=role: self._on_refresh_agent_selectors(r)
+            session.activated.connect(
+                lambda _idx, r=role: self._on_role_session_changed(r)
             )
-            agents_form.addWidget(label, row, 0)
-            agents_form.addWidget(QLabel("Engine:"), row, 1)
-            agents_form.addWidget(engine, row, 2)
-            agents_form.addWidget(QLabel("Profile:"), row, 3)
-            agents_form.addWidget(profile, row, 4)
-            agents_form.addWidget(QLabel("Provider:"), row, 5)
-            agents_form.addWidget(provider, row, 6)
-            agents_form.addWidget(QLabel("Model:"), row, 7)
-            agents_form.addWidget(model, row, 8)
-            agents_form.addWidget(QLabel("Reasoning:"), row, 9)
-            agents_form.addWidget(reasoning, row, 10)
-            agents_form.addWidget(QLabel("Session Mode:"), row, 11)
-            agents_form.addWidget(session_mode, row, 12)
-            agents_form.addWidget(QLabel("Session:"), row, 13)
-            agents_form.addWidget(session, row, 14)
-            agents_form.addWidget(refresh, row, 15)
-            engine.activated.connect(
-                lambda _idx, r=role: self._on_role_engine_changed(r)
-            )
-            profile.activated.connect(
-                lambda _idx, r=role: self._on_role_profile_changed(r)
+            provider = QComboBox()
+            provider.setEditable(True)
+            provider.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+            provider.setToolTip(
+                "Real Hermes providers (discovered inventory; editable)"
             )
             provider.activated.connect(
                 lambda _idx, r=role: self._on_role_provider_changed(r)
@@ -450,18 +479,44 @@ class ProposalModePanel(QWidget):
             provider.editTextChanged.connect(
                 lambda _t, r=role: self._on_role_config_text_changed(r)
             )
-            model.editTextChanged.connect(
-                lambda _t, r=role: self._on_role_config_text_changed(r)
+            refresh = QPushButton("REFRESH")
+            refresh.clicked.connect(
+                lambda _=False, r=role: self._on_refresh_agent_selectors(r)
             )
-            reasoning.activated.connect(
-                lambda _idx, r=role: self._on_role_config_text_changed(r)
-            )
-            session_mode.activated.connect(
-                lambda _idx, r=role: self._on_role_session_mode_changed(r)
-            )
-            session.activated.connect(
-                lambda _idx, r=role: self._on_role_session_changed(r)
-            )
+
+            defaults_label = QLabel("")
+            self._role_card_labels[role] = {
+                "model": QLabel("Model:"),
+                "reasoning": QLabel("Reasoning:"),
+                "profile": QLabel("Profile:"),
+                "session": QLabel("Session:"),
+            }
+
+            defaults_label.setWordWrap(True)
+            self._defaults_labels[role] = defaults_label
+            body = self._simple_role_bodies[role] = QGridLayout()
+            body.setColumnStretch(1, 1)
+            body.addWidget(QLabel("Engine:"), 0, 0)
+            body.addWidget(engine, 0, 1)
+            body.addWidget(self._role_card_labels[role]["profile"], 1, 0)
+            body.addWidget(profile, 1, 1)
+            body.addWidget(defaults_label, 2, 1)
+            card_form.addLayout(body, 1, 0, 1, 2)
+            team.addWidget(card)
+
+            # The ADVANCED per-role grid (Session 022 layout contract):
+            # provider / model / reasoning / session-mode live here unless
+            # _place_role_widgets re-parents them into the simple card.
+            grid = QGridLayout()
+            grid.addWidget(QLabel("Provider:"), 0, 0)
+            grid.addWidget(provider, 0, 1)
+            grid.addWidget(self._role_card_labels[role]["model"], 1, 0)
+            grid.addWidget(model, 1, 1)
+            grid.addWidget(self._role_card_labels[role]["reasoning"], 2, 0)
+            grid.addWidget(reasoning, 2, 1)
+            grid.addWidget(QLabel("Session Mode:"), 3, 0)
+            grid.addWidget(session_mode, 3, 1)
+            self._advanced_role_grids[role] = grid
             self._role_rows[role] = {
                 "engine": engine,
                 "profile": profile,
@@ -472,31 +527,272 @@ class ProposalModePanel(QWidget):
                 "session": session,
                 "refresh": refresh,
             }
-        layout.addWidget(agents_box)
+        layout.addWidget(box)
 
-        # -- C. PANEL / CAMPAIGN (Session 020 §10) -------------------------------
-        run_box = QGroupBox("PANEL / CAMPAIGN")
-        run_form = QVBoxLayout(run_box)
-        actions_row = QHBoxLayout()
+    def _place_role_widgets(self, role: ProposalRole) -> None:
+        """Re-parent per-role widgets between the simple card and ADVANCED.
+
+        Final Simple contract (Session 023): a HERMES evaluator card shows
+        ONLY Engine, Profile, the read-only defaults/READY line and
+        Refresh — Provider, Model override, Session Mode and Session are
+        advanced technical controls and stay in the ADVANCED grid (the
+        resume contract keeps working there; nothing is deleted).  The
+        ASTRA / Codex card shows Engine, Model, Reasoning, Session and
+        Refresh (operator-relevant for the Codex chair) and carries NO
+        Profile/Provider.
+
+        Placement is IDEMPOTENT and DEFERRED until the ADVANCED grids are
+        installed (floating layouts never adopt widgets — placing earlier
+        leaves widgets parentless and crashes on show).
+        """
+        row = self._role_rows[role]
+        body = self._simple_role_bodies[role]
+        grid = self._advanced_role_grids[role]
+        labels = self._role_card_labels[role]
+        engine = str(row["engine"].currentData() or "")
+        is_codex = engine == _CODEX_ENGINE_ID
+
+        def detach(widget: QWidget) -> None:
+            body.removeWidget(widget)
+            grid.removeWidget(widget)
+
+        def park(widget: QWidget, label: QWidget | None = None) -> None:
+            detach(widget)
+            if label is not None:
+                detach(label)
+                label.setParent(self._parked_widgets)
+            widget.setParent(self._parked_widgets)
+
+        def place(
+            widget: QWidget, label: QWidget | None,
+            where: QGridLayout, row_i: int,
+        ) -> None:
+            detach(widget)
+            if label is not None:
+                detach(label)
+                where.addWidget(label, row_i, 0)
+            where.addWidget(widget, row_i, 1)
+
+        if is_codex:
+            # §D: ASTRA / Codex — Model, Reasoning, Session, Refresh.
+            place(row["model"], labels["model"], body, 1)
+            place(row["reasoning"], labels["reasoning"], body, 2)
+            place(row["session"], labels["session"], body, 3)
+            detach(row["refresh"])
+            body.addWidget(row["refresh"], 3, 2)
+            park(row["profile"], labels["profile"])
+            park(self._defaults_labels[role])
+        else:
+            # Hermes evaluators — Engine, Profile, defaults/READY, Refresh
+            # ONLY.  Session AND its label move to ADVANCED (row 4, beside
+            # Session Mode in row 3); Model/Reasoning overrides stay there.
+            place(row["profile"], labels["profile"], body, 1)
+            detach(self._defaults_labels[role])
+            body.addWidget(self._defaults_labels[role], 2, 1)
+            detach(row["refresh"])
+            body.addWidget(row["refresh"], 3, 0)
+            place(row["model"], labels["model"], grid, 1)
+            place(row["reasoning"], labels["reasoning"], grid, 2)
+            place(row["session"], labels["session"], grid, 4)
+
+    def _role_state_text(self, role: ProposalRole, profile: str) -> str:
+        """The Simple card's read-only state line (defaults + READY/warn)."""
+        note = self._role_note(role)
+        catalog = self._catalog_cache.get((role, profile))
+        defaults_text = ""
+        if (
+            catalog is not None
+            and catalog.available
+            and catalog.profile_default_provider
+        ):
+            defaults_text = (
+                "Using profile defaults: "
+                f"{catalog.profile_default_provider} / "
+                f"{catalog.profile_default_model}"
+            )
+        if note and defaults_text:
+            return f"{note}\n{defaults_text}"
+        if note:
+            return note
+        if defaults_text:
+            return f"{defaults_text} — READY"
+        if profile:
+            return "READY — profile defaults apply"
+        return ""
+
+    def _update_role_defaults_label(self, role: ProposalRole, profile: str) -> None:
+        """§D: refresh one role's read-only defaults/READY status line."""
+        label = self._defaults_labels.get(role)
+        if label is None:
+            return
+        engine = str(self._role_rows[role]["engine"].currentData() or "")
+        if engine != _HERMES_ENGINE_ID or not profile:
+            label.setText("")
+            return
+        label.setText(self._role_state_text(role, profile))
+
+    def _build_run_section(self, layout: QVBoxLayout) -> None:
+        """§F RUN: state-gated primary/secondary controls.
+
+        RUN ITERATION (legacy sequential) and RUN HARD GATES stay real and
+        wired but live ONLY in the ADVANCED container (recovery/diagnostics).
+        """
+        box = QGroupBox("3. RUN")
+        run_form = QVBoxLayout(box)
+        self.run_primary_row = QHBoxLayout()
         self.generate_button = QPushButton("GENERATE INITIAL PROPOSAL")
         self.generate_button.clicked.connect(self._on_generate_initial)
-        self.run_panel_button = QPushButton("RUN PANEL ITERATION")
+        self.run_panel_button = QPushButton("RUN PANEL REVIEW")
         self.run_panel_button.clicked.connect(self._on_run_panel)
-        self.run_iteration_button = QPushButton("RUN ITERATION")
+        self.start_campaign_button = QPushButton("START AUTONOMOUS REFINEMENT")
+        self.start_campaign_button.clicked.connect(self._on_start_campaign)
+        for btn in (self.generate_button, self.run_panel_button,
+                    self.start_campaign_button):
+            self.run_primary_row.addWidget(btn)
+        run_form.addLayout(self.run_primary_row)
+
+        self.run_control_row = QHBoxLayout()
+        self.pause_campaign_button = QPushButton("PAUSE")
+        self.pause_campaign_button.clicked.connect(self._on_pause_campaign)
+        self.resume_campaign_button = QPushButton("RESUME")
+        self.resume_campaign_button.clicked.connect(self._on_resume_campaign)
+        self.stop_campaign_button = QPushButton("STOP")
+        self.stop_campaign_button.clicked.connect(self._on_stop_campaign)
+        for btn in (self.pause_campaign_button, self.resume_campaign_button,
+                    self.stop_campaign_button):
+            self.run_control_row.addWidget(btn)
+        run_form.addLayout(self.run_control_row)
+        self.campaign_note_label = QLabel("")
+        self.campaign_note_label.setWordWrap(True)
+        run_form.addWidget(self.campaign_note_label)
+        layout.addWidget(box)
+
+    def _build_progress_section(self, layout: QVBoxLayout) -> None:
+        """§G Simple progress: only meaningful operator state."""
+        box = QGroupBox("PROGRESS")
+        form = QGridLayout(box)
+        self.proposal_state_label = QLabel("NOT GENERATED")
+        self.simple_iteration_label = QLabel("0")
+        self.simple_readiness_label = QLabel("-")
+        self.simple_gates_label = QLabel("NOT RUN")
+        self.simple_panel_label = QLabel("READY")
+        self.activity_label = QLabel("Ready.")
+        self.activity_label.setWordWrap(True)
+        for row, (name, widget) in enumerate((
+            ("Proposal", self.proposal_state_label),
+            ("Iteration", self.simple_iteration_label),
+            ("Internal readiness", self.simple_readiness_label),
+            ("Hard Gates", self.simple_gates_label),
+            ("Panel", self.simple_panel_label),
+        )):
+            form.addWidget(QLabel(name + ":"), row, 0)
+            form.addWidget(widget, row, 1)
+        form.addWidget(QLabel("Current activity:"), 5, 0)
+        form.addWidget(self.activity_label, 5, 1)
+        # The disclaimer is ALWAYS displayed (brief §14 - never omitted).
+        self.readiness_disclaimer_label = QLabel(READINESS_DISCLAIMER_LABEL)
+        self.readiness_disclaimer_label.setWordWrap(True)
+        form.addWidget(self.readiness_disclaimer_label, 6, 0, 1, 2)
+        layout.addWidget(box)
+
+    def _build_advanced_section(self, layout: QVBoxLayout) -> None:
+        """§H ADVANCED: every technical surface, one explicit toggle.
+
+        Nothing is deleted: per-source importers, provider/model/session
+        overrides, campaign limits, legacy RUN ITERATION, RUN HARD GATES,
+        hashes, budget, panel results, consensus, the 14-gate table and
+        the evidence surfaces all remain exactly as wired in Session 020.
+        """
+        self.advanced_toggle_button = QPushButton("ADVANCED SETTINGS / VIEW DETAILS")
+        self.advanced_toggle_button.setCheckable(True)
+        self.advanced_toggle_button.toggled.connect(self._set_advanced_visible)
+        layout.addWidget(self.advanced_toggle_button)
+
+        self.advanced_container = QWidget()
+        adv = QVBoxLayout(self.advanced_container)
+        adv.setContentsMargins(0, 0, 0, 0)
+
+        # -- A. PROJECT INPUTS (S020 §4: source importers + diagnostics) -----
+        inputs_box = QGroupBox("PROJECT INPUTS (SOURCES & DIAGNOSTICS)")
+        inputs_form = QGridLayout(inputs_box)
+        self.init_button = QPushButton("INITIALIZE")
+        self.init_button.clicked.connect(self._on_initialize)
+        self.refresh_button = QPushButton("REFRESH")
+        self.ws_edit = QLineEdit()
+        if self.workspace_root is not None:
+            self.ws_edit.setText(str(self.workspace_root))
+        self.ws_edit.setPlaceholderText(r"C:\proposals\my-proposal-workspace")
+        self.refresh_button.clicked.connect(self._on_refresh)
+        inputs_form.addWidget(QLabel("Workspace:"), 0, 0)
+        inputs_form.addWidget(self.ws_edit, 0, 1)
+        inputs_form.addWidget(self.init_button, 0, 2)
+        inputs_form.addWidget(self.refresh_button, 0, 3)
+        self.blueprint_label = QLabel("MASTER BLUEPRINT: MISSING")
+        self.import_blueprint_button = QPushButton("IMPORT BLUEPRINT")
+        self.import_blueprint_button.clicked.connect(self._on_import_blueprint)
+        inputs_form.addWidget(self.blueprint_label, 1, 0, 1, 2)
+        inputs_form.addWidget(self.import_blueprint_button, 1, 2, 1, 2)
+        self.current_blueprint_label = QLabel(
+            "CURRENT / LIVING BLUEPRINT: MISSING"
+        )
+        self.current_blueprint_label.setWordWrap(True)
+        inputs_form.addWidget(self.current_blueprint_label, 8, 0, 1, 4)
+        self.pair_state_label = QLabel("DOCUMENT PAIR: not committed")
+        self.pair_state_label.setWordWrap(True)
+        inputs_form.addWidget(self.pair_state_label, 9, 0, 1, 4)
+        self.template_label = QLabel("OFFICIAL TEMPLATE: MISSING")
+        self.import_template_button = QPushButton("IMPORT TEMPLATE")
+        self.import_template_button.clicked.connect(self._on_import_template)
+        inputs_form.addWidget(self.template_label, 2, 0, 1, 2)
+        inputs_form.addWidget(self.import_template_button, 2, 2, 1, 2)
+        self.official_docs_label = QLabel("OFFICIAL DOCUMENTS: 0 files loaded")
+        self.import_docs_button = QPushButton("ADD OFFICIAL DOCS")
+        self.import_docs_button.clicked.connect(self._on_import_official_docs)
+        self.open_imports_button = QPushButton("OPEN FOLDER")
+        self.open_imports_button.clicked.connect(self._on_open_official_folder)
+        inputs_form.addWidget(self.official_docs_label, 3, 0, 1, 2)
+        inputs_form.addWidget(self.import_docs_button, 3, 2)
+        inputs_form.addWidget(self.open_imports_button, 3, 3)
+        self.existing_proposal_label = QLabel("EXISTING PROPOSAL: EMPTY")
+        self.import_proposal_button = QPushButton("IMPORT PROPOSAL")
+        self.import_proposal_button.clicked.connect(self._on_import_existing_proposal)
+        inputs_form.addWidget(self.existing_proposal_label, 4, 0, 1, 2)
+        inputs_form.addWidget(self.import_proposal_button, 4, 2, 1, 2)
+        self.master_label = QLabel("MASTER PROPOSAL: EMPTY")
+        self.open_master_button = QPushButton("OPEN FOLDER")
+        self.open_master_button.clicked.connect(self._on_open_master_folder)
+        inputs_form.addWidget(self.master_label, 5, 0, 1, 2)
+        inputs_form.addWidget(self.open_master_button, 5, 2, 1, 2)
+        self.source_budget_label = QLabel(
+            f"Source pack: 0 / {DEFAULT_SOURCE_BUDGET_CHARS} chars"
+        )
+        self.source_budget_label.setWordWrap(True)
+        inputs_form.addWidget(self.source_budget_label, 6, 0, 1, 4)
+        self.ws_status_label = QLabel("Workspace not initialised.")
+        self.ws_status_label.setWordWrap(True)
+        inputs_form.addWidget(self.ws_status_label, 7, 0, 1, 4)
+        adv.addWidget(inputs_box)
+
+        # -- B. AGENTS advanced grid (S020 §7/§8 overrides) --------------------
+        agents_box = QGroupBox("AGENT OVERRIDES (PER ROLE)")
+        agents_host = QVBoxLayout(agents_box)
+        for role in ProposalRole:
+            role_row = QHBoxLayout()
+            role_row.addWidget(QLabel(_ROLE_LABELS[role]))
+            role_row.addStretch(1)
+            agents_host.addLayout(role_row)
+            agents_host.addLayout(self._advanced_role_grids[role])
+        adv.addWidget(agents_box)
+
+        # -- C. legacy + advanced run controls (S020 §10) ----------------------
+        adv_run_box = QGroupBox("ADVANCED RUN CONTROLS")
+        adv_run_form = QGridLayout(adv_run_box)
+        self.run_iteration_button = QPushButton("RUN ITERATION (LEGACY SEQUENTIAL)")
         self.run_iteration_button.clicked.connect(self._on_run_iteration)
         self.run_gates_button = QPushButton("RUN HARD GATES")
         self.run_gates_button.clicked.connect(self._on_run_hard_gates)
-        for btn in (
-            self.generate_button,
-            self.run_panel_button,
-            self.run_iteration_button,
-            self.run_gates_button,
-        ):
-            actions_row.addWidget(btn)
-        run_form.addLayout(actions_row)
-
-        campaign_box = QGroupBox("AUTONOMOUS PANEL CAMPAIGN")
-        campaign_form = QGridLayout(campaign_box)
+        adv_run_form.addWidget(self.run_iteration_button, 0, 0)
+        adv_run_form.addWidget(self.run_gates_button, 0, 1)
         self.campaign_hours = QDoubleSpinBox()
         self.campaign_hours.setRange(1.0, 120.0)
         self.campaign_hours.setValue(24.0)
@@ -512,41 +808,20 @@ class ProposalModePanel(QWidget):
         self.campaign_no_improvement = QSpinBox()
         self.campaign_no_improvement.setRange(1, 10)
         self.campaign_no_improvement.setValue(3)
-        campaign_form.addWidget(QLabel("Max hours:"), 0, 0)
-        campaign_form.addWidget(self.campaign_hours, 0, 1)
-        campaign_form.addWidget(QLabel("Max iterations:"), 0, 2)
-        campaign_form.addWidget(self.campaign_iterations, 0, 3)
-        campaign_form.addWidget(QLabel("Target readiness:"), 1, 0)
-        campaign_form.addWidget(self.campaign_target_readiness, 1, 1)
-        campaign_form.addWidget(QLabel("Max model calls:"), 1, 2)
-        campaign_form.addWidget(self.campaign_max_model_calls, 1, 3)
-        campaign_form.addWidget(QLabel("No-improvement limit:"), 2, 0)
-        campaign_form.addWidget(self.campaign_no_improvement, 2, 1)
-        controls_row = QHBoxLayout()
-        self.start_campaign_button = QPushButton("START CAMPAIGN")
-        self.start_campaign_button.clicked.connect(self._on_start_campaign)
-        self.pause_campaign_button = QPushButton("PAUSE")
-        self.pause_campaign_button.clicked.connect(self._on_pause_campaign)
-        self.resume_campaign_button = QPushButton("RESUME")
-        self.resume_campaign_button.clicked.connect(self._on_resume_campaign)
-        self.stop_campaign_button = QPushButton("STOP")
-        self.stop_campaign_button.clicked.connect(self._on_stop_campaign)
-        for btn in (
-            self.start_campaign_button,
-            self.pause_campaign_button,
-            self.resume_campaign_button,
-            self.stop_campaign_button,
-        ):
-            controls_row.addWidget(btn)
-        campaign_form.addLayout(controls_row, 3, 0, 1, 4)
-        self.campaign_note_label = QLabel("")
-        self.campaign_note_label.setWordWrap(True)
-        campaign_form.addWidget(self.campaign_note_label, 4, 0, 1, 4)
-        run_form.addWidget(campaign_box)
-        layout.addWidget(run_box)
+        adv_run_form.addWidget(QLabel("Max hours:"), 1, 0)
+        adv_run_form.addWidget(self.campaign_hours, 1, 1)
+        adv_run_form.addWidget(QLabel("Max iterations:"), 1, 2)
+        adv_run_form.addWidget(self.campaign_iterations, 1, 3)
+        adv_run_form.addWidget(QLabel("Target readiness:"), 2, 0)
+        adv_run_form.addWidget(self.campaign_target_readiness, 2, 1)
+        adv_run_form.addWidget(QLabel("Max model calls:"), 2, 2)
+        adv_run_form.addWidget(self.campaign_max_model_calls, 2, 3)
+        adv_run_form.addWidget(QLabel("No-improvement limit:"), 3, 0)
+        adv_run_form.addWidget(self.campaign_no_improvement, 3, 1)
+        adv.addWidget(adv_run_box)
 
-        # -- D. CURRENT STATE & READINESS (Session 020 §14) ----------------------
-        state_box = QGroupBox("CURRENT STATE & READINESS")
+        # -- D. CURRENT STATE & READINESS (S020 §14, technical) -----------------
+        state_box = QGroupBox("CURRENT STATE & READINESS (DETAIL)")
         state_layout = QVBoxLayout(state_box)
         self.campaign_status_label = QLabel("Campaign: NOT STARTED")
         self.campaign_status_label.setWordWrap(True)
@@ -561,10 +836,6 @@ class ProposalModePanel(QWidget):
         self.elapsed_label = QLabel("Elapsed campaign time: —")
         self.readiness_label = QLabel("Internal readiness: —")
         self.readiness_label.setWordWrap(True)
-        #: The disclaimer is ALWAYS displayed directly under the readiness
-        #: (brief §14 — never omitted).
-        self.readiness_disclaimer_label = QLabel(READINESS_DISCLAIMER_LABEL)
-        self.readiness_disclaimer_label.setWordWrap(True)
         self.readiness_history_table = QTableWidget(0, 2)
         self.readiness_history_table.setHorizontalHeaderLabels(
             ["Iteration", "Internal readiness"]
@@ -590,13 +861,12 @@ class ProposalModePanel(QWidget):
         state_layout.addWidget(self.model_calls_label)
         state_layout.addWidget(self.elapsed_label)
         state_layout.addWidget(self.readiness_label)
-        state_layout.addWidget(self.readiness_disclaimer_label)
         state_layout.addWidget(self.readiness_history_table)
         state_layout.addWidget(self.detail_label)
-        layout.addWidget(state_box)
+        adv.addWidget(state_box)
 
-        # -- E. PANEL RESULTS (Session 020 §15/§16) ------------------------------
-        results_box = QGroupBox("PANEL RESULTS")
+        # -- E. PANEL RESULTS (S020 §15/§16) -------------------------------------
+        results_box = QGroupBox("PANEL RESULTS (DETAIL)")
         results_layout = QVBoxLayout(results_box)
         self.review_table = QTableWidget(0, 4)
         self.review_table.setHorizontalHeaderLabels(
@@ -627,20 +897,20 @@ class ProposalModePanel(QWidget):
         self.consensus_summary_label = QLabel("Unresolved disagreements: —")
         self.consensus_summary_label.setWordWrap(True)
         results_layout.addWidget(self.consensus_summary_label)
-        layout.addWidget(results_box)
+        adv.addWidget(results_box)
 
         # -- F. HARD GATES (§11) ---------------------------------------------------
-        gates_box = QGroupBox("HARD GATES")
+        gates_box = QGroupBox("HARD GATES (DETAIL)")
         gates_layout = QVBoxLayout(gates_box)
         self.gate_table = QTableWidget(0, 3)
         self.gate_table.setHorizontalHeaderLabels(["Gate", "Status", "Message"])
         self.gate_table.verticalHeader().setVisible(False)
         self.gate_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         gates_layout.addWidget(self.gate_table)
-        layout.addWidget(gates_box)
+        adv.addWidget(gates_box)
 
         # -- G. EVIDENCE (§12) -------------------------------------------------------
-        evidence_box = QGroupBox("EVIDENCE")
+        evidence_box = QGroupBox("EVIDENCE (DETAIL)")
         evidence_layout = QVBoxLayout(evidence_box)
         self.evidence_table = QTableWidget(0, 3)
         self.evidence_table.setHorizontalHeaderLabels(
@@ -654,18 +924,61 @@ class ProposalModePanel(QWidget):
         self.skeleton_button = QPushButton("CREATE EVIDENCE SKELETON")
         self.skeleton_button.clicked.connect(self._on_create_skeleton)
         evidence_layout.addWidget(self.skeleton_button)
-        layout.addWidget(evidence_box)
+        adv.addWidget(evidence_box)
 
+        layout.addWidget(self.advanced_container)
         layout.addStretch(1)
-        # The 14-gate table structure exists from construction (NOT_RUN
-        # rows); a workspace refresh overwrites with real artifact values.
-        self.gate_table.setRowCount(len(HARD_GATE_IDS_TUPLE))
-        for r, gate_id in enumerate(HARD_GATE_IDS_TUPLE):
-            self.gate_table.setItem(r, 0, QTableWidgetItem(gate_id))
-            self.gate_table.setItem(r, 1, QTableWidgetItem("NOT_RUN"))
-            self.gate_table.setItem(r, 2, QTableWidgetItem(""))
-        self._set_running(False)
-        self.refresh_status()
+        # Deferred placement (bisect-proven): the per-role grids are
+        # only NOW installed layouts — placing earlier would leave the
+        # re-parented widgets parentless (floating layouts never
+        # adopt), and showing a parentless widget crashes natively.
+        for role in ProposalRole:
+            self._place_role_widgets(role)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        """§B: ADVANCED is collapsed by default; the toggle reveals it."""
+        self.advanced_container.setVisible(bool(visible))
+        self.advanced_toggle_button.setChecked(bool(visible))
+
+    def _toggle_advanced(self) -> None:
+        self._set_advanced_visible(not self.advanced_container.isVisible())
+
+    def _apply_default_role_preselection(self, profiles: list[str]) -> None:
+        """§I: preselect the matching real profiles + ASTRA's Codex default.
+
+        UI convenience ONLY (never persisted until the operator acts): the
+        three evaluator roles preselect their matching profile when that
+        profile really exists; ASTRA defaults to Codex.  Unrelated profiles
+        are never preselected, and nothing is written until a sync runs.
+        """
+        defaults = {
+            ProposalRole.ORCHESTRATOR: (_CODEX_ENGINE_ID, ""),
+            ProposalRole.SCIENTIFIC_REVIEWER: (_HERMES_ENGINE_ID, "scientific"),
+            ProposalRole.PROPOSAL_ENGINEER: (_HERMES_ENGINE_ID, "implementation"),
+            ProposalRole.RED_TEAM_REVIEWER: (_HERMES_ENGINE_ID, "red-team"),
+        }
+        for role, (engine_id, profile_name) in defaults.items():
+            config = self._role_configs[role]
+            row = self._role_rows[role]
+            # An operator/saved choice is never overridden - and the
+            # WIDGET is checked beside the config, because a combo set
+            # without its activated signal (tests, programmatic paths)
+            # has not synced into the config yet.
+            if config.engine or str(row["engine"].currentData() or ""):
+                continue
+            if (
+                engine_id == _HERMES_ENGINE_ID
+                and profile_name not in profiles
+            ):
+                continue  # §I: only REAL profiles are preselected
+            index = row["engine"].findData(engine_id)
+            if index < 0:
+                continue
+            row["engine"].setCurrentIndex(index)
+            if profile_name:
+                row["profile"].setEditText(profile_name)
+            self._place_role_widgets(role)
+            self._sync_role_config_from_widgets(role)
 
     # -- workspace helpers ----------------------------------------------------
     def _workspace(self) -> Path | None:
@@ -938,6 +1251,24 @@ class ProposalModePanel(QWidget):
             self._populate_codex_sessions(role)
             self._on_role_config_text_changed(role)
         elif not engine:
+            # Session 023 §I: a FRESH, unconfigured panel preselects the
+            # defaults from the REAL discovered profiles (ASTRA -> codex;
+            # each evaluator -> its matching profile when that profile
+            # exists).  UI convenience only — operator choices are never
+            # overridden.  The clicked role then re-dispatches through its
+            # now-selected engine's discovery.
+            profiles = discover_hermes_profile_names()
+            if profiles.ok and profiles.profiles:
+                self._apply_default_role_preselection(profiles.profiles)
+                engine = str(row["engine"].currentData() or "")
+                if engine == _HERMES_ENGINE_ID:
+                    self._on_refresh_hermes_selectors(role)
+                    return
+                if engine == _CODEX_ENGINE_ID:
+                    self._populate_codex_sessions(role)
+                    self._on_role_config_text_changed(role)
+                    self.refresh_status()
+                    return
             self._action_note = "Select an engine first."
             self.refresh_status()
         else:
@@ -967,6 +1298,9 @@ class ProposalModePanel(QWidget):
         profile_combo = row["profile"]
         current = profile_combo.currentText().strip()
         profile_combo.clear()
+        # §I: preselect the matching real profiles + ASTRA's Codex default
+        # (roles with no operator/saved engine choice only).
+        self._apply_default_role_preselection(profiles.profiles)
         if profiles.ok and profiles.profiles:
             for name in profiles.profiles:
                 profile_combo.addItem(name, name)
@@ -982,6 +1316,9 @@ class ProposalModePanel(QWidget):
             self._populate_sessions(role, selected_profile)
         self._apply_selector_gating(role)
         self._sync_reasoning_availability(role)
+        selected_after = profile_combo.currentText().strip()
+        if selected_after:
+            self._update_role_defaults_label(role, selected_after)
         self._on_role_config_text_changed(role)
         self._action_note = (
             f"Hermes discovery: {len(profiles.profiles)} profile(s) "
@@ -989,7 +1326,12 @@ class ProposalModePanel(QWidget):
             + (f"; {catalog_note}" if catalog_note else "")
             + "."
         )
+        if self._role_note(role):
+            self._action_note = f"{self._action_note} {self._role_note(role)}"
         self.refresh_status()
+
+    def _role_note(self, role: ProposalRole) -> str:
+        return str(self._role_notes.get(role) or "")
 
     def _populate_provider_model(self, role: ProposalRole, profile: str) -> str:
         """Session 022: populate provider + models from the REAL inventory.
@@ -1005,36 +1347,97 @@ class ProposalModePanel(QWidget):
         row = self._role_rows[role]
         provider_combo = row["provider"]
         model_combo = row["model"]
+        self._role_notes[role] = ""
         key = (role, str(profile or "").strip())
         catalog = self._catalog_cache.get(key)
         if catalog is None:
             catalog = discover_hermes_model_catalog(profile)
             self._catalog_cache[key] = catalog
+        saved_override = bool(self._combo_overrides.get(role, False))
+        self._in_programmatic_populate = True
+        try:
+            self._populate_provider_model_impl(
+                role, profile, catalog, provider_combo, model_combo,
+                saved_override,
+            )
+        finally:
+            self._in_programmatic_populate = False
+        # Session 023A: the read-only defaults line is THE display for the
+        # discovered defaults — refresh it right after the combos.
+        self._update_role_defaults_label(role, str(profile or "").strip())
+        if catalog.available:
+            if catalog.source == HERMES_CATALOG_SOURCE_INVENTORY:
+                return (
+                    f"{len(catalog.providers)} provider(s) via "
+                    f"{catalog.source} (editable)"
+                )
+            # §A/§J profile-config fallback: the provider LIST is unknown,
+            # the profile's own defaults ARE known and the runtime uses
+            # them (empty provider/model = profile defaults).  A friendly
+            # note replaces the raw exception (§J).
+            self._role_notes[role] = (
+                "Hermes model catalogue unavailable.\n"
+                "Profile defaults will be used."
+            )
+            self._update_role_defaults_label(role, str(profile or "").strip())
+            return f"profile defaults via {catalog.source} (editable)"
+        return f"provider/model catalog unavailable ({catalog.error})"
+
+    def _populate_provider_model_impl(
+        self,
+        role: ProposalRole,
+        profile: str,
+        catalog: Any,
+        provider_combo: Any,
+        model_combo: Any,
+        saved_override: bool,
+    ) -> None:
+        """Rebuild the ADVANCED combos (Session 022), Session 023A
+        semantics: discovery is DISPLAY-ONLY.  The profile's default
+        provider/model appear ONLY in the read-only defaults line — they
+        are never auto-selected into the combos, because the widget sync
+        would otherwise persist them as an explicit override the operator
+        never chose.  A persisted/operator override restores its combo
+        text instead (a refresh must not erase a legitimate override).
+        """
+        override_provider = ""
+        override_model = ""
         with QSignalBlocker(provider_combo), QSignalBlocker(model_combo):
             provider_combo.clear()
             model_combo.clear()
             if catalog.available:
                 for name in catalog.provider_names():
                     provider_combo.addItem(name, name)
-                default_provider = catalog.profile_default_provider
-                if default_provider:
-                    idx = provider_combo.findText(default_provider)
-                    if idx >= 0:
-                        provider_combo.setCurrentIndex(idx)
-                selected_provider = provider_combo.currentText().strip()
+                if saved_override:
+                    override_provider = self._role_configs[
+                        role
+                    ].provider.strip()
+                    override_model = self._role_configs[role].model.strip()
+                    if override_provider:
+                        idx = provider_combo.findText(override_provider)
+                        if idx >= 0:
+                            provider_combo.setCurrentIndex(idx)
+                        else:
+                            provider_combo.setEditText(override_provider)
+                if not saved_override:
+                    # An editable QComboBox auto-selects its first item
+                    # after clear()+addItem(); discovery must select
+                    # NOTHING — force the empty display (S022A lesson).
+                    provider_combo.setCurrentIndex(-1)
+                selected_provider = (
+                    override_provider if saved_override else ""
+                )
                 for model_id in catalog.models_for_provider(selected_provider):
                     model_combo.addItem(model_id, model_id)
-                default_model = catalog.profile_default_model
-                if default_model and model_combo.findText(default_model) >= 0:
-                    model_combo.setCurrentIndex(
-                        model_combo.findText(default_model)
-                    )
-        if catalog.available:
-            return (
-                f"{len(catalog.providers)} provider(s) via "
-                f"{catalog.source} (editable)"
-            )
-        return f"provider/model catalog unavailable ({catalog.error})"
+                if saved_override and override_model:
+                    if model_combo.findText(override_model) >= 0:
+                        model_combo.setCurrentIndex(
+                            model_combo.findText(override_model)
+                        )
+                    else:
+                        model_combo.setEditText(override_model)
+                elif not saved_override:
+                    model_combo.setCurrentIndex(-1)
 
     def _on_role_provider_changed(self, role: ProposalRole) -> None:
         """Session 022: provider selection repopulates models IMMEDIATELY.
@@ -1048,6 +1451,9 @@ class ProposalModePanel(QWidget):
         engine = str(row["engine"].currentData() or "")
         if engine != _HERMES_ENGINE_ID:
             return
+        # Session 023A: the ACTIVATED signal fires on operator choice —
+        # this is the ONLY path that arms the override marker.
+        self._combo_overrides[role] = True
         provider = row["provider"].currentText().strip()
         previous_model = row["model"].currentText().strip()
         key = (role, row["profile"].currentText().strip())
@@ -1110,6 +1516,14 @@ class ProposalModePanel(QWidget):
         row["profile"].setEnabled(requires_profile)
         row["provider"].setEnabled(is_hermes)
         row["model"].setEnabled(model_selectable)
+        # §B/§D: role-card placement follows the engine (Codex carries
+        # Model+Reasoning in its simple card; Hermes keeps provider/model
+        # overrides in ADVANCED and shows the read-only defaults status).
+        self._place_role_widgets(role)
+        if is_hermes:
+            self._update_role_defaults_label(
+                role, row["profile"].currentText().strip()
+            )
         if is_codex:
             with QSignalBlocker(row["profile"]), QSignalBlocker(row["provider"]):
                 row["profile"].setEditText("N/A")
@@ -1178,6 +1592,7 @@ class ProposalModePanel(QWidget):
             # generic, none) invalidates this role's cached catalogs —
             # including the codex branch below, which has no other pop.
             self._invalidate_catalog_cache(role)
+            self._role_notes.pop(role, None)
         # Session 022A: session controls follow the REAL capabilities —
         # never a hardcoded "Hermes or Codex" pair.  An engine that cannot
         # keep sessions gets NEW_SESSION-only widgets; one that cannot
@@ -1302,6 +1717,16 @@ class ProposalModePanel(QWidget):
         # are profile-scoped, so the previous profile's ids are gone.
         profile = row["profile"].currentText().strip()
         self._invalidate_catalog_cache(role)
+        self._role_notes.pop(role, None)
+        # Session 023A: the OLD profile's display values must not leak —
+        # with NO persisted override the combos carry nothing implicit,
+        # so an implicit/discovered provider/model can never transfer.
+        # A PERSISTED override stays (the config keeps it; existing
+        # contract) and the operator may clear it in ADVANCED.
+        if not self._combo_overrides.get(role, False):
+            with QSignalBlocker(row["provider"]), QSignalBlocker(row["model"]):
+                row["provider"].clear()
+                row["model"].clear()
         self._populate_sessions(role, profile)
         self._populate_provider_model(role, profile)
         self._apply_selector_gating(role)
@@ -1322,6 +1747,14 @@ class ProposalModePanel(QWidget):
         self._on_role_config_text_changed(role)
 
     def _on_role_config_text_changed(self, role: ProposalRole) -> None:
+        # Session 023A: an operator edit of the provider/model text IS an
+        # explicit override.  Programmatic repopulation runs under
+        # QSignalBlocker + the guard flag, so this arms only for real
+        # operator edits.
+        row = self._role_rows[role]
+        engine = str(row["engine"].currentData() or "")
+        if engine == _HERMES_ENGINE_ID and not self._in_programmatic_populate:
+            self._combo_overrides[role] = True
         self._sync_role_config_from_widgets(role)
         self._persist_config_if_workspace()
 
@@ -1358,6 +1791,19 @@ class ProposalModePanel(QWidget):
         # only; Hermes never persists a reasoning effort (Codex-only).
         is_codex_engine = engine == _CODEX_ENGINE_ID
         model_text = row["model"].currentText().strip()
+        # Session 023A: discovery-only combos carry NO override — the
+        # config keeps the PROFILE DEFAULTS semantics (provider/model
+        # empty) unless the operator explicitly chose a value.
+        provider_text = (
+            "" if is_codex_engine
+            else row["provider"].currentText().strip()
+        )
+        if (
+            engine == _HERMES_ENGINE_ID
+            and not self._combo_overrides.get(role, False)
+        ):
+            provider_text = ""
+            model_text = ""
         self._role_configs[role] = ProposalAgentConfig(
             role=role,
             engine=engine,
@@ -1365,10 +1811,7 @@ class ProposalModePanel(QWidget):
                 "" if is_codex_engine
                 else row["profile"].currentText().strip()
             ),
-            provider=(
-                "" if is_codex_engine
-                else row["provider"].currentText().strip()
-            ),
+            provider=provider_text,
             model=(
                 ""
                 if is_codex_engine and model_text == _CODEX_MODEL_PLACEHOLDER
@@ -1405,9 +1848,32 @@ class ProposalModePanel(QWidget):
             row = self._role_rows[role]
             index = row["engine"].findData(config.engine)
             row["engine"].setCurrentIndex(index if index >= 0 else 0)
-            self._set_editable_text(row["profile"], config.project_profile)
-            self._set_editable_text(row["provider"], config.provider)
-            self._set_editable_text(row["model"], config.model)
+            is_codex_engine = config.engine == _CODEX_ENGINE_ID
+            # Session 023B: restoration is programmatic — guard the whole
+            # widget-restore block so emitted editTextChanged storms can
+            # never arm the override marker (an EMPTY restore must stay
+            # unarmed).  The marker is set EXPLICITLY from the config
+            # afterwards.
+            self._in_programmatic_populate = True
+            try:
+                with QSignalBlocker(row["profile"]), QSignalBlocker(
+                    row["provider"]
+                ), QSignalBlocker(row["model"]):
+                    self._set_editable_text(
+                        row["profile"],
+                        "" if is_codex_engine else config.project_profile,
+                    )
+                    self._set_editable_text(
+                        row["provider"],
+                        "" if is_codex_engine else config.provider,
+                    )
+                    self._set_editable_text(row["model"], config.model)
+            finally:
+                self._in_programmatic_populate = False
+            self._combo_overrides[role] = bool(
+                (not is_codex_engine)
+                and (config.provider.strip() or config.model.strip())
+            )
             mode_index = (
                 1
                 if config.session_mode == "RESUME_SELECTED_SESSION"
@@ -1570,6 +2036,18 @@ class ProposalModePanel(QWidget):
                 iteration_ok = phase in _ITERATION_RUN_PHASES
                 gates_ok = phase is ProposalPhase.HARD_GATE_VALIDATION
             start_ok = configs_ok and budget_ok
+            # Simple Mode (S023): START AUTONOMOUS REFINEMENT doubles as the
+            # campaign RESUME affordance (the same real handler; a
+            # recoverable campaign state enables it exactly like RESUME).
+            state = self._load_campaign_state_safe(ws)
+            if state is not None and state.status in (
+                CampaignStatus.PAUSED,
+                CampaignStatus.WAITING_FOR_OPERATOR,
+                CampaignStatus.STOPPED,
+                CampaignStatus.BOUND_REACHED,
+                CampaignStatus.CONVERGED,
+            ):
+                start_ok = True
 
         if running:
             if self._campaign_running and self._campaign_control is not None:
@@ -1595,6 +2073,16 @@ class ProposalModePanel(QWidget):
         self.pause_campaign_button.setEnabled(pause_ok)
         self.stop_campaign_button.setEnabled(stop_ok)
         self.resume_campaign_button.setEnabled(resume_ok)
+        # §F/§G: the primary row follows the operator state; the legacy
+        # sequential RUN ITERATION stays wired in ADVANCED only.
+        if running:
+            activity = f"Running: {self._running_action}…"
+        elif generate_ok:
+            activity = "Ready to generate the initial proposal."
+        else:
+            activity = ""
+        if activity:
+            self.activity_label.setText(activity)
 
     def _load_campaign_state_safe(self, ws: Path):
         try:
@@ -2008,6 +2496,18 @@ class ProposalModePanel(QWidget):
             self.ws_status_label.setText("Workspace directory does not exist yet.")
             self.state_label.setText("Phase: IDLE")
             self.campaign_status_label.setText("Campaign: NOT STARTED")
+            self.proposal_state_label.setText("NOT GENERATED")
+            self.simple_iteration_label.setText("0")
+            self.simple_readiness_label.setText("-")
+            self.simple_gates_label.setText("NOT RUN")
+            self.simple_panel_label.setText("READY")
+            self.activity_label.setText("Select a workspace folder to begin.")
+            self.project_status_labels["Workspace"].setText("MISSING")
+            self.project_status_labels["Master Blueprint"].setText("MISSING")
+            self.project_status_labels["Living Blueprint"].setText("MISSING")
+            self.project_status_labels["Official Template"].setText("MISSING")
+            self.project_status_labels["Official Documents"].setText("0 loaded")
+            self.project_status_labels["Master Proposal"].setText("EMPTY")
             self._apply_phase_gating(ws)
             return
         # -- §9: config auto-load, ONCE per selected workspace ----------------
@@ -2081,6 +2581,7 @@ class ProposalModePanel(QWidget):
         self._render_gates(ws, status)
         self._render_evidence(ws)
         self._render_project_inputs(ws)
+        self._render_simple_status(ws, status)
         self._apply_phase_gating(ws)
 
     def _render_project_inputs(self, ws: Path) -> None:
@@ -2156,6 +2657,128 @@ class ProposalModePanel(QWidget):
         except ValueError:
             pass
         self.source_budget_label.setText(budget_text)
+        self._render_project_status_rows(ws)
+        self._render_role_defaults_labels()
+
+    def _render_project_status_rows(self, ws: Path) -> None:
+        """§C: the Simple PROJECT rows mirror the real durable statuses."""
+        bp = blueprint_status(ws)
+        from ..proposal.source_import import template_status
+
+        tpl = template_status(ws)
+        from ..proposal.living_blueprint import blueprint_pair_status
+
+        pair_status = blueprint_pair_status(ws)
+        _, master_nonempty = self._master_state(ws)
+        rows = {
+            "Workspace": "READY",
+            "Master Blueprint": bp,
+            "Living Blueprint": str(pair_status.get("current", "MISSING")),
+            "Official Template": tpl,
+            "Master Proposal": "READY" if master_nonempty else "EMPTY",
+        }
+        for name, value in rows.items():
+            self.project_status_labels[name].setText(value)
+
+    def _render_role_defaults_labels(self) -> None:
+        """§D: read-only 'Using profile defaults:' status per Hermes role."""
+        for role, label in self._defaults_labels.items():
+            row = self._role_rows[role]
+            engine = str(row["engine"].currentData() or "")
+            profile = row["profile"].currentText().strip()
+            if engine != _HERMES_ENGINE_ID or not profile:
+                label.setText("")
+                continue
+            note = str(self._role_notes.get(role) or "")
+            catalog = self._catalog_cache.get((role, profile))
+            defaults_text = ""
+            if (
+                catalog is not None
+                and catalog.available
+                and catalog.profile_default_provider
+            ):
+                defaults_text = (
+                    "Using profile defaults: "
+                    f"{catalog.profile_default_provider} / "
+                    f"{catalog.profile_default_model}"
+                )
+            if note and defaults_text:
+                label.setText(f"{note}\n{defaults_text}")
+            elif note:
+                label.setText(note)
+            else:
+                label.setText(defaults_text)
+
+    def _render_simple_status(self, ws: Path, status: Any) -> None:
+        """§G: the Simple PROGRESS strip - meaningful operator state only."""
+        _, master_nonempty = self._master_state(ws)
+        normalized = ws / "01_OFFICIAL" / "NORMALIZED"
+        doc_count = 0
+        if normalized.is_dir():
+            doc_count = sum(
+                1 for p in normalized.iterdir() if p.is_file() and p.suffix == ".md"
+            )
+        self.project_status_labels["Official Documents"].setText(
+            f"{doc_count} loaded"
+        )
+        self.proposal_state_label.setText(
+            "READY" if master_nonempty else "NOT GENERATED"
+        )
+        next_n = status.detail.get("next_iteration_number")
+        if isinstance(next_n, int) and next_n >= 1:
+            self.simple_iteration_label.setText(str(next_n))
+        else:
+            self.simple_iteration_label.setText(str(status.latest_iteration))
+        readiness = "-"
+        state = self._load_campaign_state_safe(ws)
+        if state is not None and state.last_readiness is not None:
+            readiness = f"{round(float(state.last_readiness))}%"
+        self.simple_readiness_label.setText(readiness)
+        gates_text = "NOT RUN"
+        gates_path = ws / "05_CONTROL" / HARD_GATES_SNAPSHOT_FILENAME
+        try:
+            if gates_path.is_file():
+                data = json.loads(gates_path.read_text(encoding="utf-8"))
+                evals = data.get("evaluations")
+                if isinstance(evals, list) and evals:
+                    passed = sum(
+                        1 for e in evals
+                        if isinstance(e, dict)
+                        and e.get("status") in ("PASS", "NOT_APPLICABLE")
+                    )
+                    gates_text = f"{passed} / {len(evals)}"
+                    disposition = str(data.get("disposition") or "")
+                    if disposition == "COMPLETE":
+                        gates_text = "PASS"
+                    elif disposition == "REVISION_REQUIRED":
+                        gates_text = "BLOCKED"
+        except (OSError, json.JSONDecodeError, ValueError):
+            gates_text = "NOT RUN"
+        self.simple_gates_label.setText(gates_text)
+        panel_text = "READY"
+        if master_nonempty:
+            phase_value = (
+                self._machine.phase.value
+                if self._machine is not None
+                else status.phase.value
+            )
+            if phase_value in (
+                "SCIENTIFIC_REVIEW", "IMPLEMENTATION_REVIEW",
+                "RED_TEAM_REVIEW", "INTEGRATION",
+            ):
+                panel_text = "REVIEWING"
+            elif phase_value == "REVISION_REQUIRED":
+                panel_text = "REVISION REQUIRED"
+        self.simple_panel_label.setText(panel_text)
+        if self._running_action:
+            activity = f"Running: {self._running_action}…"
+        elif status.ambiguous:
+            activity = "Recovery requires operator confirmation."
+        elif not master_nonempty:
+            activity = "Ready to generate the initial proposal."
+        else:
+            activity = "Ready for a panel review."
+        self.activity_label.setText(activity)
 
     def _render_campaign_and_readiness(self, ws: Path, status: Any) -> None:
         state = self._load_campaign_state_safe(ws)
@@ -2429,15 +3052,46 @@ class ProposalModePanel(QWidget):
         return {"_note": required}
 
     def _sync_role_rows(self) -> None:
-        """Push ``self._role_configs`` into the AGENTS widgets (no signals)."""
+        """Push ``self._role_configs`` into the AGENTS widgets (no signals).
+
+        Session 023B: programmatic restoration NEVER arms the override
+        marker — every widget write here runs under the programmatic
+        guard (and QSignalBlocker for the editable combos), so emitted
+        editTextChanged storms cannot masquerade as operator edits.  The
+        marker is set EXPLICITLY from the persisted config AFTER the
+        widgets are restored: armed iff Hermes AND (provider or model).
+        """
         for role in ProposalRole:
             config = self._role_configs[role]
             row = self._role_rows[role]
             index = row["engine"].findData(config.engine)
             row["engine"].setCurrentIndex(index if index >= 0 else 0)
-            self._set_editable_text(row["profile"], config.project_profile)
-            self._set_editable_text(row["provider"], config.provider)
-            self._set_editable_text(row["model"], config.model)
+            # Session 023: Codex carries NO Hermes profile/provider (the
+            # engine contract) — its widgets show N/A, the config persists
+            # empty exactly as the sync writes it.
+            is_codex_engine = config.engine == _CODEX_ENGINE_ID
+            self._in_programmatic_populate = True
+            try:
+                with QSignalBlocker(row["profile"]), QSignalBlocker(
+                    row["provider"]
+                ), QSignalBlocker(row["model"]):
+                    self._set_editable_text(
+                        row["profile"],
+                        "" if is_codex_engine else config.project_profile,
+                    )
+                    self._set_editable_text(
+                        row["provider"],
+                        "" if is_codex_engine else config.provider,
+                    )
+                    self._set_editable_text(row["model"], config.model)
+            finally:
+                self._in_programmatic_populate = False
+            # Session 023A/B: set the marker EXPLICITLY from the config
+            # AFTER restoration — never from emitted signals.
+            self._combo_overrides[role] = bool(
+                (not is_codex_engine)
+                and (config.provider.strip() or config.model.strip())
+            )
             mode_index = (
                 1 if config.session_mode == "RESUME_SELECTED_SESSION" else 0
             )

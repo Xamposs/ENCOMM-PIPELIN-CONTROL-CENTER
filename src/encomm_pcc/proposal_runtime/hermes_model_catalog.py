@@ -21,6 +21,16 @@ Fail-soft everywhere: a missing venv, a Hermes update that renames the
 inventory API, a broken child, or malformed output yields an honest
 "unavailable" result — never a fabricated catalog.  The UI combos stay
 EDITABLE either way (discovery is a suggestion, never a cage).
+
+Session 023 (§A fallback chain): when the inventory path fails for ANY
+reason — e.g. ONE unreadable optional plugin makes ``load_picker_context()``
+raise ``PermissionError`` — discovery degrades to the SELECTED PROFILE's
+own configured defaults (``source="profile-config"``,
+``profile_default_provider`` / ``profile_default_model`` populated from the
+profile's real ``config.yaml``).  The provider LIST stays honestly empty in
+that mode (only the profile's defaults are known); a runtime that only
+needs the defaults keeps working, and no provider/model name is ever
+invented.
 """
 
 from __future__ import annotations
@@ -41,6 +51,11 @@ __all__ = [
 #: Authoritative in-package inventory (Hermes' own picker substrate).
 HERMES_CATALOG_SOURCE_INVENTORY = "hermes-inventory"
 HERMES_CATALOG_SOURCE_NONE = "unavailable"
+#: Session 023 fallback: the SELECTED PROFILE's own configured defaults,
+#: read from its config.yaml when the inventory is unavailable (an
+#: unreadable optional plugin must never make the defaults unknowable).
+#: NO provider list is claimed — only the profile's provider/model pair.
+HERMES_CATALOG_SOURCE_PROFILE_CONFIG = "profile-config"
 
 #: Bounded child budget: the payload for a fully-authed host stays tiny, the
 #: cap only exists so a pathological Hermes update can never hang discovery.
@@ -168,7 +183,14 @@ class HermesModelCatalog:
 
     @property
     def available(self) -> bool:
-        return self.source == HERMES_CATALOG_SOURCE_INVENTORY
+        # Session 023: the profile-config fallback is also "available" —
+        # the operator's runtime (profile defaults) genuinely works; only
+        # the provider LIST is narrower.  Unavailable still means BOTH
+        # legs failed (source == "unavailable").
+        return self.source in (
+            HERMES_CATALOG_SOURCE_INVENTORY,
+            HERMES_CATALOG_SOURCE_PROFILE_CONFIG,
+        )
 
     def provider_names(self) -> list[str]:
         """Deterministic de-duplicated provider names (slug, inventory order)."""
@@ -315,25 +337,89 @@ def discover_hermes_model_catalog(
     try:
         result = real_runner.run(spec)
     except Exception as exc:  # noqa: BLE001 - discovery must never raise
-        return HermesModelCatalog(
-            profile=name, error=f"catalog runner failed: {type(exc).__name__}: {exc}"
+        return _profile_config_fallback(
+            name, environ, reason=f"inventory runner failed: {type(exc).__name__}: {exc}", runner=real_runner
         )
     if result.timed_out:
-        return HermesModelCatalog(profile=name, error="hermes inventory timed out")
-    if result.exit_code != 0:
-        return HermesModelCatalog(
-            profile=name,
-            error=f"hermes inventory exited {result.exit_code}",
+        return _profile_config_fallback(
+            name, environ, reason="hermes inventory timed out", runner=real_runner
         )
-    return _parse_inventory_payload(result.stdout, profile=name)
+    if result.exit_code != 0:
+        return _profile_config_fallback(
+            name, environ, reason=f"hermes inventory exited {result.exit_code}", runner=real_runner
+        )
+    return _parse_inventory_payload(result.stdout, profile=name, environ=environ, runner=real_runner)
 
 
-def _parse_inventory_payload(stdout: str, *, profile: str) -> HermesModelCatalog:
+def _profile_config_fallback(
+    profile: str,
+    environ: dict[str, str] | None,
+    *,
+    reason: str,
+    runner: Any = None,
+) -> HermesModelCatalog:
+    """Session 023 §A: degrade to the SELECTED PROFILE's own defaults.
+
+    The profile itself is the primary runtime configuration — an empty
+    ``provider``/``model`` on ``ProposalAgentConfig`` makes the real
+    ``HermesDriver`` run exactly these defaults.  This fallback reads them
+    from the profile's own ``config.yaml`` (a NEVER-hermes_cli child, so
+    the unreadable-plugin failure class cannot reach this path either).
+    The provider LIST stays empty (honestly unknown here); only the
+    profile's provider/model pair is claimed.
+    """
+    from .hermes_profile_defaults import discover_hermes_profile_defaults
+
+    # Deterministic-test guard: a caller-INJECTED runner (S022's script
+    # doubles) must never gain a REAL fallback child — the fallback would
+    # otherwise reach past the injected seam.  A double may opt in to
+    # serving the defaults leg itself (``handles_profile_defaults``); a
+    # production call (runner=None → the real SubprocessRunner) always
+    # gets the real fallback child.
+    opt_in = bool(getattr(runner, "handles_profile_defaults", False))
+    if runner is not None and not isinstance(runner, SubprocessRunner) and not opt_in:
+        return HermesModelCatalog(
+            profile=profile,
+            error=(
+                f"{reason}; profile defaults unavailable "
+                "(injected runner; fallback child not launched)"
+            ),
+        )
+    defaults = discover_hermes_profile_defaults(
+        profile, environ=environ, runner=(None if runner is None else runner)
+    )
+    if not defaults.available:
+        return HermesModelCatalog(
+            profile=profile,
+            error=f"{reason}; profile defaults unavailable ({defaults.error})",
+        )
+    return HermesModelCatalog(
+        profile=profile,
+        providers=[],
+        models_by_provider={},
+        profile_default_provider=defaults.provider,
+        profile_default_model=defaults.model,
+        source=HERMES_CATALOG_SOURCE_PROFILE_CONFIG,
+        provider_catalog_authoritative=False,
+        model_lists_exhaustive=False,
+        error="",
+    )
+
+
+def _parse_inventory_payload(
+    stdout: str,
+    *,
+    profile: str,
+    environ: dict[str, str] | None = None,
+    runner: Any = None,
+) -> HermesModelCatalog:
     """Strict single-JSON-object parse of the child's one-line document.
 
     The bootstrap prints EXACTLY one JSON object on stdout.  Anything else
     (prose, logs, multiple objects, malformed JSON) is "unavailable" — never
-    partially parsed, never eval'd.
+    partially parsed, never eval'd.  A payload-level ``error`` (e.g. the
+    child's import guard or ``hermes_inventory_failed``) degrades through
+    the Session 023 profile-config fallback exactly like a process failure.
     """
     text = str(stdout or "").strip()
     if not text:
@@ -348,7 +434,12 @@ def _parse_inventory_payload(stdout: str, *, profile: str) -> HermesModelCatalog
         return HermesModelCatalog(profile=profile, error="hermes inventory payload shape invalid")
     error = str(data.get("error") or "").strip()
     if error:
-        return HermesModelCatalog(profile=profile, error=error)
+        # Session 023 §A: a child-level failure (hermes_import_failed /
+        # hermes_inventory_failed, e.g. PermissionError from ONE unreadable
+        # optional plugin manifest) must NOT make the profile's own
+        # defaults unknowable — degrade through the profile-config
+        # fallback, exactly like a process-level failure.
+        return _profile_config_fallback(profile, environ, reason=error, runner=runner)
 
     entries: list[HermesProviderEntry] = []
     models_by_provider: dict[str, list[str]] = {}

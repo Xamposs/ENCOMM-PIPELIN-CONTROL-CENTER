@@ -619,20 +619,32 @@ class TestHermesSelectors:
         panel = make_window(qapp).proposal_panel
         role = ProposalRole.SCIENTIFIC_REVIEWER
         row = panel._role_rows[role]
+        # S023A: the defaults line renders only for a hermes role — mirror
+        # the production flow (engine selected, config synced) first.
+        row["engine"].setCurrentIndex(row["engine"].findData("hermes"))
+        panel._sync_role_config_from_widgets(role)
         monkeypatch.setattr(
             "encomm_pcc.ui.proposal_mode.discover_hermes_model_catalog",
             fake_catalog,
         )
         panel._populate_provider_model(role, "alpha")
-        assert row["provider"].currentText() == "zai"
-        assert row["model"].currentText() == "glm-x"
+        # S023A SHARPENED: discovery is DISPLAY-ONLY — the catalogue lists
+        # every provider, but NO profile default is auto-selected and the
+        # config keeps provider/model EMPTY (profile defaults run).
         assert row["provider"].count() == 2  # every discovered provider
-        assert [row["model"].itemText(i) for i in range(row["model"].count())] == [
-            "glm-x", "glm-5.3",
-        ]
-        # Still editable: an operator-entered value sticks.
+        assert row["provider"].currentText() == ""
+        assert row["model"].currentText() == ""
+        cfg = panel.role_configs()[role]
+        assert cfg.provider == "" and cfg.model == ""
+        # The defaults remain VISIBLE as read-only metadata:
+        assert "Using profile defaults: zai / glm-x" in (
+            panel._defaults_labels[role].text()
+        )
+        # An operator-entered value sticks AND is an explicit override:
         row["model"].setEditText("custom-model")
-        assert row["model"].currentText() == "custom-model"
+        panel._on_role_config_text_changed(role)
+        assert panel._combo_overrides[role] is True
+        assert panel.role_configs()[role].model == "custom-model"
 
     def test_sessions_are_profile_scoped_via_the_bridge(
         self, qapp, tmp_path, monkeypatch
